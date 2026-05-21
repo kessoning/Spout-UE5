@@ -14,29 +14,6 @@ public class SpoutPlugin : ModuleRules
         get { return Path.GetFullPath(Path.Combine(ModulePath, "ThirdParty/")); }
     }
 
-    public string GetUProjectPath()
-    {
-        // Resolve the .uproject root (used to copy runtime DLLs).
-        return Path.Combine(ModuleDirectory, "../../../..");
-    }
-
-    private string CopyToProjectBinaries(string Filepath, ReadOnlyTargetRules Target)
-    {
-        // Ensures the Spout runtime DLL is staged in the project's Binaries folder.
-        string BinariesDir = Path.Combine(GetUProjectPath(), "Binaries", Target.Platform.ToString());
-        string Filename = Path.GetFileName(Filepath);
-        string FullBinariesDir = Path.GetFullPath(BinariesDir);
-
-        if (!Directory.Exists(FullBinariesDir)) Directory.CreateDirectory(FullBinariesDir);
-
-        string FullExistingPath = Path.Combine(FullBinariesDir, Filename);
-        if (!File.Exists(FullExistingPath) || File.GetLastWriteTimeUtc(Filepath) > File.GetLastWriteTimeUtc(FullExistingPath))
-        {
-            File.Copy(Filepath, FullExistingPath, true);
-        }
-        return FullExistingPath;
-    }
-
     public SpoutPlugin(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
@@ -62,7 +39,8 @@ public class SpoutPlugin : ModuleRules
 
         PrivateDependencyModuleNames.AddRange(new string[]
         {
-            "ApplicationCore", "Slate", "SlateCore"
+            // "Projects" provides IPluginManager, used for startup Spout.dll diagnostics.
+            "ApplicationCore", "Slate", "SlateCore", "Projects"
         });
 
         if (Target.Platform == UnrealTargetPlatform.Win64)
@@ -80,13 +58,24 @@ public class SpoutPlugin : ModuleRules
             AddEngineThirdPartyPrivateStaticDependencies(Target, "DX11");
 
             string PlatformString = "amd64";
-            // Link against the Spout import library and stage the DLL.
-            PublicAdditionalLibraries.Add(Path.Combine(ThirdPartyPath, "Spout", "lib", PlatformString, "Spout.lib"));
+            string SpoutLibPath = Path.Combine(ThirdPartyPath, "Spout", "lib", PlatformString, "Spout.lib");
+            string SpoutDllPath = Path.Combine(ThirdPartyPath, "Spout", "lib", PlatformString, "Spout.dll");
+
+            // Link against the Spout import library.
+            PublicAdditionalLibraries.Add(SpoutLibPath);
             PublicSystemLibraries.Add("d3dcompiler.lib");
 
-            string pluginDLLPath = Path.Combine(ThirdPartyPath, "Spout", "lib", PlatformString, "Spout.dll");
-            string binariesPath = CopyToProjectBinaries(pluginDLLPath, Target);
-            RuntimeDependencies.Add(binariesPath);
+            // Delay-load Spout.dll so the module itself loads even when the DLL is
+            // resolved late, and so the loader picks it up from the staged binary dir.
+            PublicDelayLoadDLLs.Add("Spout.dll");
+
+            // Stage Spout.dll next to the plugin's own module binary via Unreal's
+            // RuntimeDependencies system instead of manually copying it into the project
+            // folder. $(BinaryOutputDir) (the plugin's Binaries/Win64) is used rather than
+            // $(TargetOutputDir) so the DLL lands in the same place for normal project
+            // builds, RunUAT BuildPlugin packaging, and precompiled release zips — and so
+            // it matches the location the startup diagnostics check.
+            RuntimeDependencies.Add("$(BinaryOutputDir)/Spout.dll", SpoutDllPath);
         }
     }
 }

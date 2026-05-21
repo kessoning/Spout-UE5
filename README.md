@@ -248,6 +248,19 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
 - Confirm you are using a supported Unreal Engine 5 version.
 - Regenerate project files and rebuild after enabling the plugin.
 
+### `Plugin 'SpoutPlugin' failed to load because module 'SpoutPlugin' could not be loaded`
+
+This almost always means the compiled module binary doesn't match your engine, or `Spout.dll` isn't beside the module binary.
+
+1. **Verify the build matches your engine.** A precompiled download must be built for your **exact** Unreal Engine version. If it isn't, rebuild from source.
+2. **Verify `Spout.dll` is present** at `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll`. Precompiled release users need it there beside `UnrealEditor-SpoutPlugin.dll`.
+3. **Read the log.** Open `Project/Saved/Logs/ProjectName.log` and search for: `SpoutPlugin`, `Missing import`, `GetLastError`, `Spout.dll`. The plugin logs an explicit error/warning at startup if `Spout.dll` cannot be found.
+4. **If rebuilding from source,** delete these folders, then regenerate project files and rebuild:
+   - `Project/Binaries`
+   - `Project/Intermediate`
+   - `Plugins/SpoutPlugin/Binaries`
+   - `Plugins/SpoutPlugin/Intermediate`
+
 
 ## Third-Party
 - Spout: http://spout.zeal.co/

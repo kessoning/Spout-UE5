@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.5 - 2026-05-21
+
+### Fixed
+- Release packaging for `Spout.dll` so precompiled plugin builds can load correctly (addresses `Plugin 'SpoutPlugin' failed to load because module 'SpoutPlugin' could not be loaded`).
+
+### Added
+- Delay-loading for `Spout.dll` through `PublicDelayLoadDLLs`.
+- Startup diagnostics that log a clear error/warning when `Spout.dll` is missing from `Binaries/Win64` or `ThirdParty`.
+- Troubleshooting steps for "module could not be loaded" errors in the README, plus a precompiled-release packaging checklist.
+
+### Changed
+- Replaced fragile manual DLL copy logic (`GetUProjectPath`/`CopyToProjectBinaries`) with Unreal's `RuntimeDependencies` staging. The DLL is staged to `$(BinaryOutputDir)` (the plugin's own `Binaries/Win64`) so it lands in the same place for normal project builds, `RunUAT BuildPlugin` packaging, and precompiled release zips, and matches where the startup diagnostics look.
+- Restricted the plugin module to `Win64` via `PlatformAllowList` in the plugin descriptor.
+
 ## 0.0.4 — 2026-04-30
 
 ### Added
