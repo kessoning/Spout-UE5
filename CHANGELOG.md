@@ -4,6 +4,7 @@
 
 ### Fixed
 - Release packaging for `Spout.dll` so precompiled plugin builds can load correctly (addresses `Plugin 'SpoutPlugin' failed to load because module 'SpoutPlugin' could not be loaded`).
+- UE 5.8 compatibility for the viewport sender: `FSlateRenderer::OnBackBufferReadyToPresent()` now passes `ISlateViewportProvider&` instead of `const FTextureRHIRef&`. The back-buffer callback is version-guarded (`ENGINE_MAJOR_VERSION`/`ENGINE_MINOR_VERSION`) so UE 5.3-5.7 keep the old signature and 5.8+ fetches the back buffer via `ISlateViewportProvider::GetBackBufferResource()`.
 
 ### Added
 - Delay-loading for `Spout.dll` through `PublicDelayLoadDLLs`.

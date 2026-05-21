@@ -24,6 +24,20 @@
 #include "RenderResource.h"
 #include "Engine/TextureRenderTarget.h"
 
+// Defines ENGINE_MAJOR_VERSION / ENGINE_MINOR_VERSION. Required because these are
+// not guaranteed to be defined transitively in all targets (e.g. UnrealGame builds).
+#include "Runtime/Launch/Resources/Version.h"
+
+// UE 5.8 changed FSlateRenderer::OnBackBufferReadyToPresent() to pass an
+// ISlateViewportProvider& (from which the back buffer is fetched) instead of a
+// const FTextureRHIRef&. Guard on engine version so 5.3-5.7 keep the old signature.
+#define SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER \
+	((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
+
+#if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+#include "Slate/SlateViewportProvider.h"
+#endif
+
 #include <cstring>
 
 #if PLATFORM_WINDOWS
@@ -581,8 +595,18 @@ bool EnsureGammaResources(FSpoutSharedSender& Sender, uint32 Width, uint32 Heigh
 
 			BackBufferHandle =
 			Renderer->OnBackBufferReadyToPresent().AddLambda(
-				[this](SWindow& SlateWindow, const FTextureRHIRef& BackBuffer)
+#if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+				[this](SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider)
+#else
+				[this](SWindow& SlateWindow, const FTextureRHIRef& IncomingBackBuffer)
+#endif
 				{
+#if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+					// UE 5.8+: the back buffer is obtained from the viewport provider.
+					const FTextureRHIRef BackBuffer = ViewportProvider.GetBackBufferResource();
+#else
+					const FTextureRHIRef& BackBuffer = IncomingBackBuffer;
+#endif
 					if (!BackBuffer.IsValid())
 					{
 						return;
