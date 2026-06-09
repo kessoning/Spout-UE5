@@ -115,6 +115,16 @@ public:
 							  UTexture2D*& OutTexture,
 							  UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr);
 
+	/**
+	 * Tears down a receiver started with SpoutReceiver: drops its registry entry (releasing the
+	 * opened shared texture and cached wraps), destroys the transient ReceivedTexture, and clears the
+	 * ReceivedMaterial reference so it no longer samples the destroyed texture. Pass the same
+	 * OutTexture / OutMat you got back from SpoutReceiver. Call when a receiver is no longer needed to
+	 * avoid per-name resource growth.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Spout")
+	static void CloseReceiver(FName SpoutName, UPARAM(ref) UTexture2D*& ReceivedTexture, UPARAM(ref) UMaterialInstanceDynamic*& ReceivedMaterial);
+
 	// --- Info / Utils ---
 
 	UFUNCTION(BlueprintCallable, Category = "Spout")

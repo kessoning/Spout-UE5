@@ -444,8 +444,6 @@ bool EnsureGammaResources(FSpoutSharedSender& Sender, uint32 Width, uint32 Heigh
 			return;
 		}
 
-		// D3D11 immediate context is not thread-safe; guard its usage.
-		FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
 		if (!Context.GetImmediateContext() || !Context.GetD3D11On12Device())
 		{
 			return;
@@ -460,6 +458,9 @@ bool EnsureGammaResources(FSpoutSharedSender& Sender, uint32 Width, uint32 Heigh
 
 		// Transition for copy and flush so the wrapped D3D11 context can see up-to-date data.
 		// Viewport backbuffer comes in Present state; render targets come in SRVMask after scene render.
+		// The flush acts on the RHI command list, not the D3D11 immediate context, so it is issued
+		// BEFORE taking D3D11ContextMutex — keeping the heavy RHI-thread flush out of the lock and
+		// matching the receiver path.
 		const ERHIAccess FromState = bIsViewport ? ERHIAccess::Present : ERHIAccess::SRVMask;
 		RHICmdList.Transition(FRHITransitionInfo(SourceRHI, FromState, ERHIAccess::CopySrc));
 		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThreadFlushResources);
@@ -472,31 +473,40 @@ bool EnsureGammaResources(FSpoutSharedSender& Sender, uint32 Width, uint32 Heigh
 			// Fall back to a common format if the backbuffer format cannot be used.
 			Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 		}
+
 		TSharedPtr<FSpoutSharedSender> Sender = FSpoutSenderRegistry::Get().FindOrAdd(SpoutName, ESpoutType::Sender);
-		if (!Sender)
+		if (Sender)
 		{
-			return;
-		}
+			// Shared-texture creation/registration is device-level (free-threaded); only the
+			// immediate-context CopyResource below needs D3D11ContextMutex.
+			EnsureSharedSenderTexture(*Sender, static_cast<uint32>(Desc.Width), static_cast<uint32>(Desc.Height), Format, Context);
 
-		EnsureSharedSenderTexture(*Sender, static_cast<uint32>(Desc.Width), static_cast<uint32>(Desc.Height), Format, Context);
-
-		ComPtr<ID3D11Texture2D> SharedTexture;
-		{
-			FScopeLock SenderLock(&Sender->ResourceMutex);
-			SharedTexture = Sender->SharedTexture;
-		}
-
-		ComPtr<ID3D11Texture2D> WrappedResource = SharedTexture ? GetWrappedResource(*Sender, NativeRes) : nullptr;
-		if (SharedTexture && WrappedResource)
-		{
-			FScopedD3D11On12Acquire Acquire(WrappedResource.Get());
-			if (Acquire.IsValid())
+			ComPtr<ID3D11Texture2D> SharedTexture;
 			{
-				Context.GetImmediateContext()->CopyResource(SharedTexture.Get(), WrappedResource.Get());
+				FScopeLock SenderLock(&Sender->ResourceMutex);
+				SharedTexture = Sender->SharedTexture;
+			}
+
+			if (SharedTexture)
+			{
+				// D3D11 immediate context is not thread-safe; guard its usage (and the wrap cache it
+				// shares with the receiver path).
+				FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
+				ComPtr<ID3D11Texture2D> WrappedResource = GetWrappedResource(*Sender, NativeRes);
+				if (WrappedResource)
+				{
+					FScopedD3D11On12Acquire Acquire(WrappedResource.Get());
+					if (Acquire.IsValid())
+					{
+						Context.GetImmediateContext()->CopyResource(SharedTexture.Get(), WrappedResource.Get());
+					}
+				}
 			}
 		}
 
-		// Restore the source access state after the copy.
+		// Restore the source access state after the copy. Runs on every path once the resource has
+		// been transitioned to CopySrc (including when the sender lookup or wrap fails) so UE's state
+		// tracking stays consistent.
 		RHICmdList.Transition(FRHITransitionInfo(
 			SourceRHI,
 			ERHIAccess::CopySrc,
