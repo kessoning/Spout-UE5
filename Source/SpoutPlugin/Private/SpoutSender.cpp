@@ -24,6 +24,17 @@
 #include "RenderResource.h"
 #include "Engine/TextureRenderTarget.h"
 
+// UE 5.8 changed FSlateRenderer::OnBackBufferReadyToPresent()'s second delegate parameter from
+// const FTextureRHIRef& to ISlateViewportProvider& (the back buffer is fetched from the provider).
+// Guard on engine version so UE 5.3-5.7 keep the original signature. EngineVersionComparison.h
+// also pulls in ENGINE_*_VERSION (via Version.h), so no separate Version.h include is needed.
+#include "Misc/EngineVersionComparison.h"
+#define SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER (!UE_VERSION_OLDER_THAN(5, 8, 0))
+
+#if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+#include "Slate/SlateViewportProvider.h"
+#endif
+
 #include <cstring>
 
 #if PLATFORM_WINDOWS
@@ -591,8 +602,21 @@ bool EnsureGammaResources(FSpoutSharedSender& Sender, uint32 Width, uint32 Heigh
 
 			BackBufferHandle =
 			Renderer->OnBackBufferReadyToPresent().AddLambda(
-				[this](SWindow& SlateWindow, const FTextureRHIRef& BackBuffer)
+#if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+				[this](SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider)
+#else
+				[this](SWindow& SlateWindow, const FTextureRHIRef& IncomingBackBuffer)
+#endif
 				{
+#if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+					// UE 5.8+: obtain the back buffer from the viewport provider. This lambda runs on
+					// the render thread (delegate contract), where GetBackBufferResource() is valid; the
+					// returned raw FRHITexture* is held by an FTextureRHIRef (TRefCountPtr AddRefs),
+					// keeping it alive for the ENQUEUE_RENDER_COMMAND copy below.
+					const FTextureRHIRef BackBuffer = ViewportProvider.GetBackBufferResource();
+#else
+					const FTextureRHIRef& BackBuffer = IncomingBackBuffer;
+#endif
 					if (!BackBuffer.IsValid())
 					{
 						return;
