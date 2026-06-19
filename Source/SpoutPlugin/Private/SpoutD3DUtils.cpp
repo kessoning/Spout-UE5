@@ -78,7 +78,7 @@ void FScopedD3D11On12Acquire::AcquireResources(TConstArrayView<ID3D11Texture2D*>
 		if (Resource)
 		{
 			RawResources.Add(Resource.Get());
-			WrappedResources.Add(MoveTemp(Resource));
+			WrappedResources.Add(TRefCountPtr<ID3D11Resource>(Resource.Get()));
 		}
 	}
 
@@ -115,9 +115,9 @@ FScopedD3D11On12Acquire::~FScopedD3D11On12Acquire()
 		// Release transitions the wrapped resources back to their original D3D12 state.
 		TArray<ID3D11Resource*, TInlineAllocator<2>> RawResources;
 		RawResources.Reserve(WrappedResources.Num());
-		for (const ComPtr<ID3D11Resource>& Resource : WrappedResources)
+		for (const TRefCountPtr<ID3D11Resource>& Resource : WrappedResources)
 		{
-			RawResources.Add(Resource.Get());
+			RawResources.Add(Resource.GetReference());
 		}
 		D3D11On12->ReleaseWrappedResources(RawResources.GetData(), RawResources.Num());
 	}

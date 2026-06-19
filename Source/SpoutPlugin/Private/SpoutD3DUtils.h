@@ -5,6 +5,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Templates/RefCounting.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -32,7 +33,7 @@ private:
 	void AcquireResources(TConstArrayView<ID3D11Texture2D*> InTextures);
 
 	// Kept to release the wrapped resources on scope exit (inline storage for the common 1-2 case).
-	TArray<Microsoft::WRL::ComPtr<ID3D11Resource>, TInlineAllocator<2>> WrappedResources;
+	TArray<TRefCountPtr<ID3D11Resource>, TInlineAllocator<2>> WrappedResources;
 };
 
 // Wraps a D3D12 resource so it can be used by Spout's D3D11 path.
