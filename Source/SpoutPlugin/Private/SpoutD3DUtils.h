@@ -5,6 +5,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Templates/RefCounting.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -17,16 +18,22 @@
 class FScopedD3D11On12Acquire
 {
 public:
-	// Acquires a wrapped D3D11 resource for CPU/GPU access through the D3D11-on-12 device.
+	// Acquires a single wrapped D3D11 resource for access through the D3D11-on-12 device.
 	explicit FScopedD3D11On12Acquire(ID3D11Texture2D* InTexture);
-	// Releases the wrapped resource and flushes the D3D11 context to submit pending work.
+	// Acquires several wrapped resources in one AcquireWrappedResources call so the single
+	// scope-exit Release + Flush covers every copy (one GPU submit instead of one per resource).
+	explicit FScopedD3D11On12Acquire(TConstArrayView<ID3D11Texture2D*> InTextures);
+	// Releases the wrapped resources and flushes the D3D11 context once to submit pending work.
 	~FScopedD3D11On12Acquire();
 
+	// True if at least one resource was successfully acquired.
 	bool IsValid() const;
 
 private:
-	// Kept to release the wrapped resource on scope exit.
-	Microsoft::WRL::ComPtr<ID3D11Resource> WrappedResource;
+	void AcquireResources(TConstArrayView<ID3D11Texture2D*> InTextures);
+
+	// Kept to release the wrapped resources on scope exit (inline storage for the common 1-2 case).
+	TArray<TRefCountPtr<ID3D11Resource>, TInlineAllocator<2>> WrappedResources;
 };
 
 // Wraps a D3D12 resource so it can be used by Spout's D3D11 path.

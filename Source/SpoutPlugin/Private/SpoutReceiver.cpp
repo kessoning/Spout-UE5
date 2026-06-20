@@ -58,13 +58,21 @@ namespace
 
 	bool UpdateSharedReceiverTexture(FSpoutSharedSender& Receiver, unsigned int Width, unsigned int Height, HANDLE SharedHandle, FSpoutD3DContext& Context)
 	{
+		// Runs on the game thread while the render thread may concurrently read these same fields
+		// under ResourceMutex (GetSharedForGPUPath / GetOrCreateReceiverWrap). Hold the lock across
+		// the unchanged-check AND the writes so the comparison and the swap are atomic w.r.t. the
+		// render thread; otherwise a torn read can early-out and reuse a stale/freed handle.
+		FScopeLock ReceiverLock(&Receiver.ResourceMutex);
+
 		// Reuse the shared texture while the handle and dimensions are unchanged.
 		if (Receiver.Width == Width && Receiver.Height == Height && Receiver.SharedHandle == SharedHandle && Receiver.SharedTexture)
 		{
 			return true;
 		}
 
-		// Open the shared DX11 texture from the external sender's handle.
+		// Open the shared DX11 texture from the external sender's handle. OpenSharedResource is a
+		// device-level (free-threaded) call; holding ResourceMutex across it is acceptable because
+		// this only happens on connect/resize/handle-change, not per frame.
 		ComPtr<ID3D11Texture2D> NewSharedTexture;
 		HRESULT hr = Context.GetD3D11Device()->OpenSharedResource(
 			SharedHandle,
@@ -80,7 +88,6 @@ namespace
 			return false;
 		}
 
-		FScopeLock ReceiverLock(&Receiver.ResourceMutex);
 		Receiver.Width = Width;
 		Receiver.Height = Height;
 		Receiver.SharedHandle = SharedHandle;
@@ -219,6 +226,27 @@ namespace
 		}
 	}
 
+	// Whether the received texture should be sampled as sRGB. 8-bit color formats carry
+	// gamma-encoded bytes (this is also what the sender publishes for UE sRGB render targets,
+	// which it flattens to *_UNORM), so they must decode as sRGB — matching UTexture's default.
+	// 10-bit and float formats carry linear/HDR data and must be sampled linearly.
+	bool DxgiFormatPrefersSRGB(unsigned long DxgiFormat)
+	{
+		switch (static_cast<DXGI_FORMAT>(DxgiFormat))
+		{
+		case DXGI_FORMAT_B8G8R8A8_UNORM:
+		case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+		case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+		case DXGI_FORMAT_R8G8B8A8_UNORM:
+		case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+			return true;
+
+		default:
+			return false;
+		}
+	}
+
 	// GPU-direct path (H2A): wrap UE RHI destinations as D3D11 textures via D3D11-on-12 and
 	// issue CopyResource straight from the external shared texture. Zero CPU readback.
 	void ReceiveOnRenderThread_GPU(
@@ -285,28 +313,40 @@ namespace
 			ID3D11On12Device* D3D11On12 = Context.GetD3D11On12Device();
 			if (ImmediateContext && D3D11On12)
 			{
+				ComPtr<ID3D11Texture2D> Wrapped;
+				ComPtr<ID3D11Texture2D> WrappedRT;
+				TArray<ID3D11Texture2D*, TInlineAllocator<2>> ToAcquire;
+
 				if (DestTextureRHI.IsValid() && DestNative)
 				{
-					ComPtr<ID3D11Texture2D> Wrapped = GetOrCreateReceiverWrap(*Receiver, DestNative);
+					Wrapped = GetOrCreateReceiverWrap(*Receiver, DestNative);
 					if (Wrapped)
 					{
-						// Acquire transitions the wrapped resource into the state declared at wrap
-						// (COPY_DEST). Destructor Releases + Flushes so the D3D12 queue sees the copy.
-						FScopedD3D11On12Acquire Acquire(Wrapped.Get());
-						if (Acquire.IsValid())
-						{
-							ImmediateContext->CopyResource(Wrapped.Get(), SharedTexture.Get());
-						}
+						ToAcquire.Add(Wrapped.Get());
+					}
+				}
+				if (DestRenderTargetRHI.IsValid() && DestRTNative)
+				{
+					WrappedRT = GetOrCreateReceiverRTWrap(*Receiver, DestRTNative);
+					if (WrappedRT)
+					{
+						ToAcquire.Add(WrappedRT.Get());
 					}
 				}
 
-				if (DestRenderTargetRHI.IsValid() && DestRTNative)
+				if (ToAcquire.Num() > 0)
 				{
-					ComPtr<ID3D11Texture2D> WrappedRT = GetOrCreateReceiverRTWrap(*Receiver, DestRTNative);
-					if (WrappedRT)
+					// Acquire every destination together. Acquire transitions the wrapped resources
+					// into the state declared at wrap (COPY_DEST); the single scope-exit Release +
+					// Flush covers all copies, so two destinations cost one GPU submit, not two.
+					FScopedD3D11On12Acquire Acquire(ToAcquire);
+					if (Acquire.IsValid())
 					{
-						FScopedD3D11On12Acquire Acquire(WrappedRT.Get());
-						if (Acquire.IsValid())
+						if (Wrapped)
+						{
+							ImmediateContext->CopyResource(Wrapped.Get(), SharedTexture.Get());
+						}
+						if (WrappedRT)
 						{
 							ImmediateContext->CopyResource(WrappedRT.Get(), SharedTexture.Get());
 						}
@@ -416,6 +456,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		return false;
 	}
 	const EPixelFormat PixelFormat = DxgiFormatToPixelFormat(Format);
+	const bool bSRGB = DxgiFormatPrefersSRGB(Format);
 
 	TSharedPtr<FSpoutSharedSender> Receiver = FSpoutSenderRegistry::Get().FindOrAdd(SpoutName, ESpoutType::Receiver);
 	if (!Receiver)
@@ -429,7 +470,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	}
 
 	// Create/resize the transient texture that UE will sample in materials.
-	SpoutTextureUtils::EnsureTransientTexture(OutTexture, static_cast<int32>(W), static_cast<int32>(H), PixelFormat);
+	SpoutTextureUtils::EnsureTransientTexture(OutTexture, static_cast<int32>(W), static_cast<int32>(H), PixelFormat, bSRGB);
 
 	const FName ParamName = TextureParameterName.IsNone() ? FName("SpoutTexture") : TextureParameterName;
 
@@ -484,4 +525,16 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		});
 
 	return true;
+}
+
+void FSpoutReceiver::Close(const FName SpoutName)
+{
+	// Registry is keyed by (Name, Type); scope removal to the Receiver entry only, leaving any
+	// Sender entry with the same FName untouched. Dropping the entry releases the opened shared
+	// DX11 texture, staging texture, and cached D3D11-on-12 wraps held by FSpoutSharedSender.
+	if (FSpoutSenderRegistry::Get().Find(SpoutName, ESpoutType::Receiver))
+	{
+		FSpoutSenderRegistry::Get().Remove(SpoutName, ESpoutType::Receiver);
+		UE_LOG(LogSpoutPlugin, Log, TEXT("Closed Spout Receiver: %s"), *SpoutName.ToString());
+	}
 }

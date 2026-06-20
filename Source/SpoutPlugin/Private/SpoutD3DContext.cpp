@@ -97,6 +97,10 @@ void FSpoutD3DContext::Initialize()
 void FSpoutD3DContext::Shutdown()
 {
 #if PLATFORM_WINDOWS
+	// Serialize with InitializeIfNeeded/IsInitialized/IsSpoutAvailable. InitMutex is documented to
+	// guard Shutdown(); taking it here makes that contract real and prevents an init racing teardown.
+	FScopeLock Lock(&InitMutex);
+
 	// Release in reverse creation order; shared resources should already be idle.
 	SpoutSenderNames.Reset();
 	SpoutDirectX.Reset();

@@ -52,14 +52,37 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, D3D12_RESOUR
 
 FScopedD3D11On12Acquire::FScopedD3D11On12Acquire(ID3D11Texture2D* InTexture)
 {
-	if (!InTexture)
+	ID3D11Texture2D* Textures[1] = { InTexture };
+	AcquireResources(MakeArrayView(Textures, 1));
+}
+
+FScopedD3D11On12Acquire::FScopedD3D11On12Acquire(TConstArrayView<ID3D11Texture2D*> InTextures)
+{
+	AcquireResources(InTextures);
+}
+
+void FScopedD3D11On12Acquire::AcquireResources(TConstArrayView<ID3D11Texture2D*> InTextures)
+{
+	// Query each texture for the ID3D11Resource interface required by the Acquire/Release APIs,
+	// keeping only the ones that resolve. Null/failed entries are skipped, not fatal.
+	TArray<ID3D11Resource*, TInlineAllocator<2>> RawResources;
+	for (ID3D11Texture2D* Texture : InTextures)
 	{
-		return;
+		if (!Texture)
+		{
+			continue;
+		}
+
+		ComPtr<ID3D11Resource> Resource;
+		Texture->QueryInterface(IID_PPV_ARGS(Resource.GetAddressOf()));
+		if (Resource)
+		{
+			RawResources.Add(Resource.Get());
+			WrappedResources.Add(TRefCountPtr<ID3D11Resource>(Resource.Get()));
+		}
 	}
 
-	// Query for the ID3D11Resource interface required by Acquire/Release APIs.
-	InTexture->QueryInterface(IID_PPV_ARGS(WrappedResource.GetAddressOf()));
-	if (!WrappedResource)
+	if (RawResources.Num() == 0)
 	{
 		return;
 	}
@@ -68,30 +91,46 @@ FScopedD3D11On12Acquire::FScopedD3D11On12Acquire(ID3D11Texture2D* InTexture)
 	if (D3D11On12)
 	{
 		// Acquire ensures correct resource state for D3D11 use on the D3D12 device.
-		ID3D11Resource* RawWrapped = WrappedResource.Get();
-		D3D11On12->AcquireWrappedResources(&RawWrapped, 1);
+		D3D11On12->AcquireWrappedResources(RawResources.GetData(), RawResources.Num());
+	}
+	else
+	{
+		// Nothing acquired; drop the refs so IsValid() reports false and the destructor is a no-op.
+		WrappedResources.Reset();
 	}
 }
 
 FScopedD3D11On12Acquire::~FScopedD3D11On12Acquire()
 {
-	ID3D11On12Device* D3D11On12 = FSpoutD3DContext::Get().GetD3D11On12Device();
-	if (D3D11On12 && WrappedResource)
+	if (WrappedResources.Num() == 0)
 	{
-		// Release transitions the wrapped resource back to its original D3D12 state.
-		ID3D11Resource* RawWrapped = WrappedResource.Get();
-		D3D11On12->ReleaseWrappedResources(&RawWrapped, 1);
+		return;
 	}
 
-	ID3D11DeviceContext* ImmediateContext = FSpoutD3DContext::Get().GetImmediateContext();
-	if (ImmediateContext && WrappedResource)
+	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+
+	ID3D11On12Device* D3D11On12 = Context.GetD3D11On12Device();
+	if (D3D11On12)
 	{
-		// Flush required so D3D11 copies are visible to the D3D12 queue.
+		// Release transitions the wrapped resources back to their original D3D12 state.
+		TArray<ID3D11Resource*, TInlineAllocator<2>> RawResources;
+		RawResources.Reserve(WrappedResources.Num());
+		for (const TRefCountPtr<ID3D11Resource>& Resource : WrappedResources)
+		{
+			RawResources.Add(Resource.GetReference());
+		}
+		D3D11On12->ReleaseWrappedResources(RawResources.GetData(), RawResources.Num());
+	}
+
+	ID3D11DeviceContext* ImmediateContext = Context.GetImmediateContext();
+	if (ImmediateContext)
+	{
+		// Single flush for all released resources so D3D11 copies are visible to the D3D12 queue.
 		ImmediateContext->Flush();
 	}
 }
 
 bool FScopedD3D11On12Acquire::IsValid() const
 {
-	return WrappedResource != nullptr;
+	return WrappedResources.Num() > 0;
 }

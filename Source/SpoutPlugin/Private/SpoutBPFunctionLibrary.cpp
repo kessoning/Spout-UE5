@@ -57,6 +57,23 @@ void USpoutBPFunctionLibrary::CloseSender(FName SpoutName)
 	FSpoutSender::Close(SpoutName);
 }
 
+void USpoutBPFunctionLibrary::CloseReceiver(FName SpoutName, UTexture2D*& ReceivedTexture, UMaterialInstanceDynamic*& ReceivedMaterial)
+{
+	// Drop the receiver's registry entry (releases its shared/staging textures and cached wraps),
+	// then destroy the transient texture on the game thread (unroot + release render resource).
+	// Any in-flight render command keeps the underlying RHI alive via its captured ref-counted
+	// handle, so this is safe to call while a receive may still be queued.
+	FSpoutReceiver::Close(SpoutName);
+
+	// Clear the MID reference before destroying the texture so the material does not retain a
+	// binding to a texture whose render resource is being released. The MID is owned by the caller's
+	// graph (the plugin never roots it), so dropping this reference lets it be collected once the
+	// caller releases its own.
+	ReceivedMaterial = nullptr;
+
+	SpoutTextureUtils::DestroyTexture(ReceivedTexture);
+}
+
 bool USpoutBPFunctionLibrary::SpoutReceiver(
 	const FName SpoutName,
 	UMaterialInterface* InputMaterial,
