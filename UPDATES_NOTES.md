@@ -4,6 +4,16 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ---
 
+## JULY 2026 UPDATES
+
+A crash fix month.
+
+- **Fixed the crash when you send with a downloaded build.** A few people hit an instant crash the moment they used a Spout Sender node, especially on Event Tick, when running one of the ready-made (non-source) downloads. Turned out two things were going wrong. First, the core Spout file that does all the actual work was not even getting bundled into the download, so it simply was not there. Second, even when it was there, the plugin waited until the very last second to go looking for it and then checked the wrong place. Both are fixed now: the file is packed into every release, and the plugin loads it up front from the right spot, so sending just works.
+- **No more scary crash if that file is ever missing.** If the core Spout file somehow still is not there, the plugin now quietly switches Spout off and leaves you a clear note in the log, instead of crashing. You get a plugin that does nothing rather than an editor that falls over.
+- **Safer releases from my end.** I added a step to my build process that packs that core file in and refuses to publish a release without it, so a broken download should not reach you in the first place.
+
+---
+
 ## JUNE 2026 UPDATES
 
 This month was all about cleaning up and tightening the loose ends.

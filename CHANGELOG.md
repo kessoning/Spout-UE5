@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.7 - 2026-07-04
+
+### Fixed
+- Editor/game crash (`Unhandled Exception: 0xC06D007E`) the first time a Spout node runs — most visible on `Spout Sender` in Event Tick — in packaged/precompiled releases. Two independent defects both contributed:
+  - **`Spout.dll` was never shipped.** `RunUAT BuildPlugin` does not carry the `RuntimeDependencies`-declared DLL into its `-Package` output, so release zips contained only `UnrealEditor-SpoutPlugin.dll` and no `Spout.dll` at all. The release build script now stages `Spout.dll` into the packaged `Binaries/Win64` explicitly and aborts if it is ever absent, so releases can no longer ship without it.
+  - **Even when present, the DLL was resolved too late.** `Spout.dll` is delay-loaded, so its imports were bound lazily on the first Spout call using the host executable's DLL search order, which never includes the plugin's own `Binaries/Win64`; the delay-load helper then raised `ERROR_MOD_NOT_FOUND` (`0xC06D007E`). The module now explicitly loads `Spout.dll` by full path at startup (`FPlatformProcess::GetDllHandle`, preferring `Binaries/Win64` and falling back to `ThirdParty/Spout/lib/amd64`), so the delay-loaded imports bind by name on first use. The handle is released in `ShutdownModule`.
+- A genuinely missing `Spout.dll` no longer crashes: `FSpoutD3DContext::Initialize` now bails before constructing the Spout helpers when the DLL is not loaded, leaving Spout unavailable (nodes return `false`) with a clear log message instead of taking down the editor.
+
+No Blueprint API changes; no exported-symbol removals or breaking changes.
+
 ## 0.0.6 - 2026-06-09
 
 ### Added

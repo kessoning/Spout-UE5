@@ -8,25 +8,33 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 
 DEFINE_LOG_CATEGORY(LogSpoutPlugin);
 
 #define LOCTEXT_NAMESPACE "FSpoutModule"
 
+void* FSpoutModule::SpoutDllHandle = nullptr;
+
 #if PLATFORM_WINDOWS
 namespace
 {
-	// One-shot startup check: report whether Spout.dll is reachable so that
-	// "module could not be loaded" failures are diagnosable from the log.
+	// One-shot startup load: explicitly bring Spout.dll into the process by full path.
+	// Spout symbols are delay-loaded (PublicDelayLoadDLLs), so nothing resolves the DLL
+	// until the first Spout call on tick — and the OS delay-load resolver uses the host
+	// exe's search order, which does NOT include the plugin's own Binaries/Win64. Loading
+	// the DLL here by full path puts it in the process so the later delay-load thunk binds
+	// by name instead of raising 0xC06D007E (ERROR_MOD_NOT_FOUND). Returns the handle, or
+	// nullptr if the DLL is missing/failed to load (Spout then stays disabled, no crash).
 	// Runs only at module startup — never per frame.
-	void VerifySpoutRuntime()
+	void* LoadSpoutRuntime()
 	{
 		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("SpoutPlugin"));
 		if (!Plugin.IsValid())
 		{
 			UE_LOG(LogSpoutPlugin, Warning,
-				TEXT("Could not locate the SpoutPlugin descriptor via IPluginManager; skipping Spout.dll diagnostics."));
-			return;
+				TEXT("Could not locate the SpoutPlugin descriptor via IPluginManager; Spout.dll will not be loaded and Spout will be disabled."));
+			return nullptr;
 		}
 
 		const FString BaseDir = FPaths::ConvertRelativePathToFull(Plugin->GetBaseDir());
@@ -34,27 +42,46 @@ namespace
 		const FString ThirdPartyDll = FPaths::Combine(BaseDir, TEXT("ThirdParty"), TEXT("Spout"), TEXT("lib"), TEXT("amd64"), TEXT("Spout.dll"));
 
 		IFileManager& FileManager = IFileManager::Get();
-		const bool bBinariesExists = FileManager.FileExists(*BinariesDll);
-		const bool bThirdPartyExists = FileManager.FileExists(*ThirdPartyDll);
 
-		if (!bBinariesExists && !bThirdPartyExists)
+		// Prefer the staged copy beside the module binary (packaged/precompiled releases);
+		// fall back to the source tree under ThirdParty (source/editor builds).
+		FString DllToLoad;
+		if (FileManager.FileExists(*BinariesDll))
+		{
+			DllToLoad = BinariesDll;
+		}
+		else if (FileManager.FileExists(*ThirdPartyDll))
+		{
+			DllToLoad = ThirdPartyDll;
+		}
+
+		if (DllToLoad.IsEmpty())
 		{
 			UE_LOG(LogSpoutPlugin, Error,
-				TEXT("Spout.dll not found in either '%s' or '%s'. The module will fail to load. ")
+				TEXT("Spout.dll not found in either '%s' or '%s'. Spout is disabled. ")
 				TEXT("Precompiled releases must ship Spout.dll in Binaries/Win64; source builds need it under ThirdParty/Spout/lib/amd64."),
 				*BinariesDll, *ThirdPartyDll);
+			return nullptr;
 		}
-		else if (!bBinariesExists && bThirdPartyExists)
+
+		// Push the containing directory onto the loader search path while loading so any
+		// co-located dependency of Spout.dll also resolves, then restore it immediately.
+		const FString DllDir = FPaths::GetPath(DllToLoad);
+		FPlatformProcess::PushDllDirectory(*DllDir);
+		void* Handle = FPlatformProcess::GetDllHandle(*DllToLoad);
+		FPlatformProcess::PopDllDirectory(*DllDir);
+
+		if (Handle == nullptr)
 		{
-			UE_LOG(LogSpoutPlugin, Warning,
-				TEXT("Spout.dll is present under ThirdParty ('%s') but missing beside the module binary ('%s'). ")
-				TEXT("Precompiled/binary release users may fail to load the module — rebuild from source or copy Spout.dll into Binaries/Win64."),
-				*ThirdPartyDll, *BinariesDll);
+			UE_LOG(LogSpoutPlugin, Error,
+				TEXT("Failed to load Spout.dll from '%s'. Spout is disabled."), *DllToLoad);
 		}
 		else
 		{
-			UE_LOG(LogSpoutPlugin, Verbose, TEXT("Spout.dll located at '%s'."), *BinariesDll);
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Loaded Spout.dll from '%s'."), *DllToLoad);
 		}
+
+		return Handle;
 	}
 }
 #endif // PLATFORM_WINDOWS
@@ -65,7 +92,9 @@ void FSpoutModule::StartupModule()
 	UE_LOG(LogSpoutPlugin, Log, TEXT("Spout Plugin Loaded"));
 
 #if PLATFORM_WINDOWS
-	VerifySpoutRuntime();
+	// Explicitly load Spout.dll so its delay-loaded imports bind on first Spout call
+	// instead of crashing with 0xC06D007E.
+	SpoutDllHandle = LoadSpoutRuntime();
 #endif
 }
 
@@ -73,6 +102,15 @@ void FSpoutModule::ShutdownModule()
 {
 	// Ensure all DX/Spout resources are properly released before module teardown.
 	USpoutBPFunctionLibrary::GlobalShutdown();
+
+#if PLATFORM_WINDOWS
+	if (SpoutDllHandle != nullptr)
+	{
+		FPlatformProcess::FreeDllHandle(SpoutDllHandle);
+		SpoutDllHandle = nullptr;
+	}
+#endif
+
 	UE_LOG(LogSpoutPlugin, Log, TEXT("Spout Plugin Unloaded"));
 }
 

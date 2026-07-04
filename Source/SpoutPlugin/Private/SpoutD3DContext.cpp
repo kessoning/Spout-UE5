@@ -86,6 +86,16 @@ void FSpoutD3DContext::Initialize()
 	ImmediateContext = MoveTemp(LocalContext);
 	D3D11On12Device = MoveTemp(LocalOn12);
 
+	// Guard the first touch of any Spout symbol: constructing spoutSenderNames/spoutDirectX
+	// triggers the delay-load bind of Spout.dll, which crashes with 0xC06D007E if the DLL
+	// never loaded. Bailing here leaves the Spout helpers null, so IsSpoutAvailable() stays
+	// false and FSpoutSender::Send returns cleanly instead of crashing the editor.
+	if (!FSpoutModule::IsSpoutDllLoaded())
+	{
+		UE_LOG(LogSpoutPlugin, Error, TEXT("Spout.dll failed to load at startup; Spout is disabled. See earlier log."));
+		return;
+	}
+
 	// Spout helpers manage shared textures and the global sender registry.
 	SpoutSenderNames = MakeUnique<spoutSenderNames>();
 	SpoutDirectX = MakeUnique<spoutDirectX>();
