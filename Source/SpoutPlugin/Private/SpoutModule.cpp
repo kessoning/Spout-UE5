@@ -10,6 +10,10 @@
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 
+#if WITH_EDITOR
+#include "Engine/World.h"
+#endif
+
 DEFINE_LOG_CATEGORY(LogSpoutPlugin);
 
 #define LOCTEXT_NAMESPACE "FSpoutModule"
@@ -29,38 +33,61 @@ namespace
 	// Runs only at module startup — never per frame.
 	void* LoadSpoutRuntime()
 	{
+		TArray<FString> CandidatePaths;
+
 		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("SpoutPlugin"));
-		if (!Plugin.IsValid())
+		if (Plugin.IsValid())
+		{
+			const FString BaseDir = FPaths::ConvertRelativePathToFull(Plugin->GetBaseDir());
+			// Staged copy beside the plugin's own module binary (editor/modular builds,
+			// BuildPlugin output, precompiled release zips).
+			CandidatePaths.Add(FPaths::Combine(BaseDir, TEXT("Binaries"), TEXT("Win64"), TEXT("Spout.dll")));
+			// Source tree under ThirdParty (source/editor builds before first stage).
+			CandidatePaths.Add(FPaths::Combine(BaseDir, TEXT("ThirdParty"), TEXT("Spout"), TEXT("lib"), TEXT("amd64"), TEXT("Spout.dll")));
+		}
+		else
 		{
 			UE_LOG(LogSpoutPlugin, Warning,
-				TEXT("Could not locate the SpoutPlugin descriptor via IPluginManager; Spout.dll will not be loaded and Spout will be disabled."));
-			return nullptr;
+				TEXT("Could not locate the SpoutPlugin descriptor via IPluginManager; falling back to project/executable search paths for Spout.dll."));
 		}
 
-		const FString BaseDir = FPaths::ConvertRelativePathToFull(Plugin->GetBaseDir());
-		const FString BinariesDll = FPaths::Combine(BaseDir, TEXT("Binaries"), TEXT("Win64"), TEXT("Spout.dll"));
-		const FString ThirdPartyDll = FPaths::Combine(BaseDir, TEXT("ThirdParty"), TEXT("Spout"), TEXT("lib"), TEXT("amd64"), TEXT("Spout.dll"));
+		// Packaged (monolithic) games: the plugin module is linked into the game executable,
+		// so the RuntimeDependencies target $(BinaryOutputDir) resolves to the PROJECT's
+		// Binaries/Win64 next to the executable — the plugin's own Binaries folder is not
+		// staged at all in that layout.
+		CandidatePaths.Add(FPaths::ConvertRelativePathToFull(
+			FPaths::Combine(FPaths::ProjectDir(), TEXT("Binaries"), TEXT("Win64"), TEXT("Spout.dll"))));
+		// Executable directory, for staged layouts where the running binary does not live
+		// under ProjectDir (e.g. content-only projects packaged against a shared game exe).
+		CandidatePaths.Add(FPaths::Combine(FString(FPlatformProcess::BaseDir()), TEXT("Spout.dll")));
 
 		IFileManager& FileManager = IFileManager::Get();
 
-		// Prefer the staged copy beside the module binary (packaged/precompiled releases);
-		// fall back to the source tree under ThirdParty (source/editor builds).
 		FString DllToLoad;
-		if (FileManager.FileExists(*BinariesDll))
+		for (const FString& Candidate : CandidatePaths)
 		{
-			DllToLoad = BinariesDll;
-		}
-		else if (FileManager.FileExists(*ThirdPartyDll))
-		{
-			DllToLoad = ThirdPartyDll;
+			if (FileManager.FileExists(*Candidate))
+			{
+				DllToLoad = Candidate;
+				break;
+			}
 		}
 
 		if (DllToLoad.IsEmpty())
 		{
+			// Last resort: let the OS resolve the bare name through the standard search
+			// order (which includes the executable directory and PATH). Covers layouts
+			// none of the explicit candidates anticipate.
+			if (void* SearchOrderHandle = FPlatformProcess::GetDllHandle(TEXT("Spout.dll")))
+			{
+				UE_LOG(LogSpoutPlugin, Log, TEXT("Loaded Spout.dll via the OS search order (no explicit candidate path existed)."));
+				return SearchOrderHandle;
+			}
+
 			UE_LOG(LogSpoutPlugin, Error,
-				TEXT("Spout.dll not found in either '%s' or '%s'. Spout is disabled. ")
-				TEXT("Precompiled releases must ship Spout.dll in Binaries/Win64; source builds need it under ThirdParty/Spout/lib/amd64."),
-				*BinariesDll, *ThirdPartyDll);
+				TEXT("Spout.dll not found. Spout is disabled. Paths checked: %s. ")
+				TEXT("Precompiled releases must ship Spout.dll in the plugin's Binaries/Win64; packaged games stage it next to the game executable automatically."),
+				*FString::Join(CandidatePaths, TEXT(", ")));
 			return nullptr;
 		}
 
@@ -96,10 +123,36 @@ void FSpoutModule::StartupModule()
 	// instead of crashing with 0xC06D007E.
 	SpoutDllHandle = LoadSpoutRuntime();
 #endif
+
+#if WITH_EDITOR
+	WorldCleanupHandle = FWorldDelegates::OnWorldCleanup.AddRaw(this, &FSpoutModule::OnWorldCleanup);
+#endif
 }
+
+#if WITH_EDITOR
+void FSpoutModule::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
+{
+	// Only PIE. A packaged game's world is EWorldType::Game and tears down on every level
+	// transition — closing streams there would kill senders that are meant to survive a
+	// travel. Editor worlds never carry Spout streams.
+	if (!World || World->WorldType != EWorldType::PIE)
+	{
+		return;
+	}
+
+	// Release the streams but keep the interop device: rebuilding it on every PIE run would
+	// cost far more than it saves.
+	USpoutBPFunctionLibrary::CloseAllStreams();
+}
+#endif
 
 void FSpoutModule::ShutdownModule()
 {
+#if WITH_EDITOR
+	FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
+	WorldCleanupHandle.Reset();
+#endif
+
 	// Ensure all DX/Spout resources are properly released before module teardown.
 	USpoutBPFunctionLibrary::GlobalShutdown();
 

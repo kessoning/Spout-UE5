@@ -27,4 +27,12 @@ private:
 	// Static because the module is a process-wide singleton and FSpoutD3DContext
 	// queries it without a module reference.
 	static void* SpoutDllHandle;
+
+#if WITH_EDITOR
+	// Closes streams when a PIE world tears down, so senders started in PIE stop publishing
+	// when the user hits Stop instead of lingering until the editor exits.
+	void OnWorldCleanup(class UWorld* World, bool bSessionEnded, bool bCleanupResources);
+
+	FDelegateHandle WorldCleanupHandle;
+#endif
 };

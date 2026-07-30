@@ -20,12 +20,17 @@ void USpoutBPFunctionLibrary::EnsureSpoutInitialized()
 	FSpoutD3DContext::Get().InitializeIfNeeded();
 }
 
-void USpoutBPFunctionLibrary::GlobalShutdown()
+void USpoutBPFunctionLibrary::CloseAllStreams()
 {
 	// Render-thread work may still reference shared D3D objects; drain before releasing.
 	FlushRenderingCommands();
 	FSpoutSender::Shutdown();
 	FSpoutSenderRegistry::Get().Clear();
+}
+
+void USpoutBPFunctionLibrary::GlobalShutdown()
+{
+	CloseAllStreams();
 	FSpoutD3DContext::Get().Shutdown();
 }
 

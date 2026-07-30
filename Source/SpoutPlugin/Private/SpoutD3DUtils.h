@@ -38,3 +38,34 @@ private:
 
 // Wraps a D3D12 resource so it can be used by Spout's D3D11 path.
 Microsoft::WRL::ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, D3D12_RESOURCE_STATES State);
+
+/**
+ * Small bounded cache of D3D11-on-12 wraps, keyed by the native D3D12 resource.
+ *
+ * Wrapping is a device call, so it must not run per frame. A single-entry cache is enough when the
+ * source is one stable texture (a render target), but NOT for the viewport back buffer: the swap
+ * chain rotates through several back buffers, so a single entry would miss on almost every frame
+ * and re-wrap continuously. Keying a few entries covers the whole rotation.
+ *
+ * Entries keep the wrapped resource (and therefore the underlying D3D12 resource) alive, so the
+ * cache is dropped wholesale once it grows past MaxEntries and on Reset(). Exceeding the bound
+ * means the working set changed, at which point the old wraps are stale anyway.
+ *
+ * Not internally synchronized: callers must hold the D3D11 immediate-context mutex.
+ */
+class FSpoutWrapCache
+{
+public:
+	// Returns the cached wrap for Resource, creating it on first use. Null if wrapping fails.
+	Microsoft::WRL::ComPtr<ID3D11Texture2D> GetOrCreate(ID3D12Resource* Resource, D3D12_RESOURCE_STATES State);
+
+	// Drops every cached wrap, releasing the references they hold.
+	void Reset();
+
+private:
+	static constexpr int32 MaxEntries = 8;
+
+	// TRefCountPtr, not ComPtr: ComPtr overloads operator& to return a ComPtrRef, which breaks
+	// UE container internals that take the address of an element (a hard compile error on UE 5.3).
+	TMap<ID3D12Resource*, TRefCountPtr<ID3D11Texture2D>> Entries;
+};

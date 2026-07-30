@@ -25,10 +25,9 @@ void FSpoutSharedSender::ReleaseResources()
 	StagingTexture.Reset();
 	CachedWrappedResource.Reset();
 	CachedRTWrappedResource.Reset();
-	GammaTexture.Reset();
-	GammaRTV.Reset();
 
 	SharedHandle = nullptr;
+	SharedFormat = DXGI_FORMAT_UNKNOWN;
 	CachedNativeResource = nullptr;
 	CachedRTNativeResource = nullptr;
 

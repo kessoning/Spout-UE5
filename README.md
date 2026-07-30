@@ -204,8 +204,7 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
   **RTF RGBA8 sRGB**
   **RTF RGB10A2**
 
-- The Spout Receiver currently performs a **CPU readback** each frame before updating Unreal textures.  
-  This can become expensive with large resolutions or high update rates and should be considered when targeting real-time performance.
+- The Spout Receiver uses a **GPU-direct path by default** (`r.Spout.GPUReceiver=1`): the shared texture is copied straight into the Unreal texture on the GPU. Setting the CVar to `0` falls back to the legacy **CPU readback** path, which is expensive at large resolutions or high update rates.
 
 - The Sender and Receiver must be called **continuously** (Tick or timer) to keep the Spout stream alive and updated.
 
@@ -247,6 +246,14 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
 - Ensure the plugin is placed inside the project `Plugins` directory, not the engine directory.
 - Confirm you are using a supported Unreal Engine 5 version.
 - Regenerate project files and rebuild after enabling the plugin.
+
+### `Could not find definition for module 'SpoutPlugin'` (compile or packaging fails instantly)
+
+This is a **build-time** error (it aborts in well under a second, and packaging reports `dotnet.exe ExitCode=8`), different from the load-time error below. It means your copy of the plugin has **no `Source/` folder**, so Unreal Build Tool can't find `SpoutPlugin.Build.cs`. A source-less, binary-only copy only loads in the editor when the prebuilt binary matches your exact engine version; it cannot be compiled or packaged against.
+
+1. Use a copy that **includes `Source/`**. Every current release ships it (0.0.8 and later). If you have an older, source-less download, re-download or clone this repository into `YourProject/Plugins/SpoutPlugin/`.
+2. Confirm `Plugins/SpoutPlugin/Source/SpoutPlugin/SpoutPlugin.Build.cs` exists.
+3. Delete `Plugins/SpoutPlugin/Binaries` and `Plugins/SpoutPlugin/Intermediate`, regenerate project files, and rebuild.
 
 ### `Plugin 'SpoutPlugin' failed to load because module 'SpoutPlugin' could not be loaded`
 

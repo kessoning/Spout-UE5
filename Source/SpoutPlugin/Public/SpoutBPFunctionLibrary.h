@@ -91,6 +91,13 @@ public:
 	// Called by module shutdown; drains render commands and releases D3D/Spout resources.
 	static void GlobalShutdown();
 
+	/**
+	 * Closes every active sender and receiver, leaving the D3D/Spout context alive.
+	 * Used to tear down streams that belong to a session (PIE) without paying to rebuild the
+	 * process-wide interop device. GlobalShutdown() calls this before releasing the context.
+	 */
+	static void CloseAllStreams();
+
 	// --- Senders ---
 
 	/**

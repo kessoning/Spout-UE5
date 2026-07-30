@@ -20,6 +20,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "HAL/IConsoleManager.h"
+#include "PixelFormat.h"
 #include "RHI.h"
 #include "RenderingThread.h"
 #include "Engine/Texture.h"
@@ -373,7 +374,8 @@ namespace
 	void ReceiveOnRenderThread_CPU(
 		TSharedPtr<FSpoutSharedSender> Receiver,
 		TRefCountPtr<FRHITexture> DestTextureRHI,
-		TRefCountPtr<FRHITexture> DestRenderTargetRHI)
+		TRefCountPtr<FRHITexture> DestRenderTargetRHI,
+		FRHICommandListImmediate& RHICmdList)
 	{
 		if (!DestTextureRHI.IsValid() && !DestRenderTargetRHI.IsValid())
 		{
@@ -410,9 +412,11 @@ namespace
 			const uint8* const SourceData = static_cast<const uint8*>(Mapped.pData);
 			const FUpdateTextureRegion2D UpdateRegion(0, 0, 0, 0, LocalWidth, LocalHeight);
 
+			// Use the command-list form: the global RHIUpdateTexture2D with an implied
+			// immediate command list is deprecated in UE 5.8 and removed after it.
 			if (DestTextureRHI.IsValid())
 			{
-				RHIUpdateTexture2D(
+				RHICmdList.UpdateTexture2D(
 					DestTextureRHI,
 					0,
 					UpdateRegion,
@@ -423,7 +427,7 @@ namespace
 
 			if (DestRenderTargetRHI.IsValid())
 			{
-				RHIUpdateTexture2D(
+				RHICmdList.UpdateTexture2D(
 					DestRenderTargetRHI,
 					0,
 					UpdateRegion,
@@ -502,6 +506,31 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			OptionalOutputRenderTarget->ResizeTarget(static_cast<int32>(W), static_cast<int32>(H));
 		}
 
+		// The render target is user-supplied, so its format is whatever the asset was authored with.
+		// A mismatch is not recoverable here (reformatting someone else's asset at runtime would be
+		// worse than the symptom): the GPU path's CopyResource between different formats is silently
+		// dropped by D3D, and the CPU path writes bytes the destination reinterprets. Either way the
+		// user sees a black or stale render target with nothing in the log, so name both formats.
+		// Logged only when the pairing changes, since this runs every frame.
+		const EPixelFormat OutputFormat = OptionalOutputRenderTarget->GetFormat();
+		if (OutputFormat != PixelFormat)
+		{
+			if (Receiver->WarnedOutputFormat != OutputFormat)
+			{
+				Receiver->WarnedOutputFormat = OutputFormat;
+				UE_LOG(LogSpoutPlugin, Warning,
+					TEXT("Spout receiver '%s': output render target format (%s) does not match the sender's format (%s). ")
+					TEXT("The render target will not update. Recreate it with the sender's format; RTF RGBA8 sRGB matches the most common senders."),
+					*SpoutName.ToString(),
+					GetPixelFormatString(OutputFormat),
+					GetPixelFormatString(PixelFormat));
+			}
+		}
+		else
+		{
+			Receiver->WarnedOutputFormat = PF_Unknown;
+		}
+
 		if (FTextureRenderTargetResource* RenderTargetResource = OptionalOutputRenderTarget->GameThread_GetRenderTargetResource())
 		{
 			CapturedRenderTargetRHI = RenderTargetResource->GetRenderTargetTexture();
@@ -520,7 +549,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			}
 			else
 			{
-				ReceiveOnRenderThread_CPU(Receiver, CapturedTextureRHI, CapturedRenderTargetRHI);
+				ReceiveOnRenderThread_CPU(Receiver, CapturedTextureRHI, CapturedRenderTargetRHI, RHICmdList);
 			}
 		});
 

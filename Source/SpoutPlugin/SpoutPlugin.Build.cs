@@ -63,7 +63,6 @@ public class SpoutPlugin : ModuleRules
 
             // Link against the Spout import library.
             PublicAdditionalLibraries.Add(SpoutLibPath);
-            PublicSystemLibraries.Add("d3dcompiler.lib");
 
             // Delay-load Spout.dll so the module itself loads even when the DLL is
             // resolved late, and so the loader picks it up from the staged binary dir.

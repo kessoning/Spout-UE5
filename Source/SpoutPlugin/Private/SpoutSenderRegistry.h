@@ -27,6 +27,10 @@ public:
 	FName Name;
 	uint32 Width = 0;
 	uint32 Height = 0;
+	// DXGI format of the shared texture (sender role). Part of the recreate identity together
+	// with Width/Height: a source format change at the same resolution must recreate the shared
+	// texture, otherwise CopyResource is fed mismatched formats and silently drops frames.
+	DXGI_FORMAT SharedFormat = DXGI_FORMAT_UNKNOWN;
 	// Distinguishes sender vs receiver ownership semantics.
 	ESpoutType Type = ESpoutType::Sender;
 	bool bRegistered = false;
@@ -37,9 +41,10 @@ public:
 
 	// CPU-readable staging texture for receiver readback.
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> StagingTexture;
-	// Optional intermediate texture for sender-side gamma correction.
-	Microsoft::WRL::ComPtr<ID3D11Texture2D> GammaTexture;
-	Microsoft::WRL::ComPtr<ID3D11RenderTargetView> GammaRTV;
+
+	// Receiver role only: pixel format of the optional output render target the last mismatch was
+	// reported for, so the warning is logged on change instead of every frame. Game thread only.
+	EPixelFormat WarnedOutputFormat = PF_Unknown;
 
 	// Cached D3D11 wrapper for a D3D12 resource.
 	// - Sender role: wraps the source UE RHI texture (state = COPY_SOURCE).

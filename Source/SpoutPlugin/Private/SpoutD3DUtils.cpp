@@ -50,6 +50,40 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, D3D12_RESOUR
 	return Result;
 }
 
+ComPtr<ID3D11Texture2D> FSpoutWrapCache::GetOrCreate(ID3D12Resource* Resource, D3D12_RESOURCE_STATES State)
+{
+	if (!Resource)
+	{
+		return nullptr;
+	}
+
+	if (TRefCountPtr<ID3D11Texture2D>* Existing = Entries.Find(Resource))
+	{
+		return ComPtr<ID3D11Texture2D>(Existing->GetReference());
+	}
+
+	// Drop everything rather than evicting a single entry: the cache is sized for a small, stable
+	// working set (the swap chain's back buffers). Growing past it means that set changed, so the
+	// remaining wraps are stale and keeping them only pins dead resources.
+	if (Entries.Num() >= MaxEntries)
+	{
+		Entries.Reset();
+	}
+
+	ComPtr<ID3D11Texture2D> Wrapped = WrapD3D12Resource(Resource, State);
+	if (Wrapped)
+	{
+		Entries.Add(Resource, TRefCountPtr<ID3D11Texture2D>(Wrapped.Get()));
+	}
+
+	return Wrapped;
+}
+
+void FSpoutWrapCache::Reset()
+{
+	Entries.Reset();
+}
+
 FScopedD3D11On12Acquire::FScopedD3D11On12Acquire(ID3D11Texture2D* InTexture)
 {
 	ID3D11Texture2D* Textures[1] = { InTexture };
