@@ -1,0 +1,28 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "",
+	"Category": "",
+	"Description": "Release-validation host for SpoutPlugin. Not shipped; used by Scripts/Invoke-AutomationTests.ps1 and Scripts/Invoke-PackagedHostMatrix.ps1.",
+	"Modules": [
+		{
+			"Name": "SpoutHostTest",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"Engine"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "SpoutPlugin",
+			"Enabled": true,
+			"SupportedTargetPlatforms": [
+				"Win64"
+			]
+		}
+	],
+	"TargetPlatforms": [
+		"Windows"
+	]
+}

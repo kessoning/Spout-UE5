@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+Validation, release-evidence and documentation work. No runtime plugin behaviour changed;
+no Blueprint API changes; no exported-symbol removals or breaking changes.
+
+### Added
+- **Tracked host test project** at `Tests/SpoutHostTest/`. A minimal Win64 code project that builds on UE 5.3-5.8 and exists to be packaged and launched unattended. It carries no content assets: both maps the smoke sequence travels between are engine maps, so the whole project is reproducible from tracked text.
+- **Packaged-host validation matrix** (`Scripts/Invoke-PackagedHostMatrix.ps1`). Per engine and per configuration it cooks, packages, inspects and launches the host, then reads back a machine-readable verdict. A pass requires the process to exit 0 *and* every required marker to be present *and* the host's own `result.json` to say it passed. `BuildPlugin` succeeding, and the executable merely existing, are explicitly not accepted as evidence.
+- **Runtime DLL loading verification.** The host asks the Windows loader which `Spout.dll` is mapped into the process and where it resolved it from; the matrix compares that against the path it staged and searches the whole package for conflicting copies. File presence proves staging, not loading, and the two are now checked separately.
+- **Lifecycle and level-travel smoke sequence.** Ten sender create/close cycles, ten receiver create/close cycles, a same-name close-and-reopen, five level-travel round trips with a sender open across every transition, a stale-session check after close, and an orderly shutdown with a sender still publishing. Run three times per matrix row, so a defect that only appears on a second launch is visible.
+- **Performance baselines** (`Scripts/Invoke-PerformanceBaselines.ps1`): 1080p60 and 4K60 send and receive, multi-stream, CPU fallback (`r.Spout.GPUReceiver=0`), idle receiver with no new frame, resize/reconnect churn, and repeated stream start/stop. Each records frame-time mean, p95, p99 and peak, game and render thread times, GPU time where the engine exposes it, process CPU, peak working set and RHI texture memory. A scenario that cannot genuinely run fails rather than reporting zeros. `-Trace` captures an Unreal Insights `.utrace` per scenario.
+- **Five automation tests** covering what the existing tests could not: that the plugin module is loaded, that `Spout.dll` resolved from one of the four locations the plugin declares rather than from `PATH`, that the Spout API genuinely answers, and that a hundred open/close cycles and twenty-five receiver-ownership cycles leave no state behind.
+- **Clean-source reproducibility check** (`Scripts/ReleaseSources.psd1` + `Scripts/New-CleanSourceCopy.ps1`). Builds a copy containing only the declared release inputs and runs the release from it, reporting separately whether anything *undeclared* was needed and whether every declared input is *tracked by git*.
+- **Documentation drift check** (`Scripts/Validate-Documentation.ps1`). 47 checks, every fact derived from source: the version from the descriptor, the engine matrix from `build.ps1`, the DLL name from `PublicDelayLoadDLLs`, the supported formats from `SpoutFormatPolicy.cpp`, the Blueprint API from the `UFUNCTION` declarations. It also asserts that specific known false claims are absent.
+- **Unified entry point**: `build.bat -TrackD` with `-BoundaryOnly`, `-FullMatrix`, `-Performance`, `-CleanSource` and `-All`. Every stage propagates its exit code, and a stage that was not run is recorded as `Skipped` with a reason rather than omitted.
+
+### Changed
+- **`README.md` now ships inside every release archive.** It is a required release input, listed in `Config/FilterPlugin.ini`, required in the packaged output, and required inside every ZIP, so an unzipped plugin is self-describing.
+- **Archive validation rejects internal material.** A release archive containing `Artifacts/`, `Scripts/`, `Tests/`, `Docs/`, `.git/`, `.vs/`, `UPDATES_NOTES.md`, the build scripts or any internal development record now fails the release, as does a shipped `README.md` containing a machine-specific user path.
+- **`.gitignore` no longer ignores the documentation set or the manual generator.** Previously every Markdown document, `Docs/build_user_manual.py` and the entire generated website were ignored, which is why a clean clone could not reproduce the working-folder documentation. Only genuinely generated or machine-local output is ignored now.
+
+### Fixed (documentation)
+- `Docs/build_user_manual.py` derives the version from `SpoutPlugin.uplugin` and the engine range from `build.ps1` instead of hard-coding them. The hard-coded `VERSION = "0.0.5"` is what let the manual, the PDF and the website drift three releases behind the descriptor.
+- Removed every reference to the sender gamma pipeline (`FSpoutGammaPipeline`, `EnsureGammaResources`, `SanitizeGamma`), deleted in 0.0.9 but still described in `LIMITATIONS.md`, `RENDER_TARGETS_AND_FORMATS.md`, `SENDER.md`, `USER_MANUAL_SOURCE.md`, the manual generator and the website. Replaced with the actual format-driven colour-space contract.
+- Removed the `d3dcompiler.lib` dependency from the documented module dependencies; it went with the gamma pipeline.
+- Corrected the claim that `CreateTextureRenderTarget2D` roots its result. It does not, and callers that believed otherwise would lose the render target to garbage collection.
+- Documented `CloseReceiver`, which was exposed in the Blueprint API but absent from the API guide, the manual, the PDF and the website, including its ownership rules and the fact that the name decides what is released rather than the pointers.
+- Corrected the claim that `RuntimeDependencies` places `Spout.dll` into raw `RunUAT BuildPlugin` output. It does not; `build.ps1` stages it explicitly. All five distinct DLL layouts are now documented and distinguished.
+- Corrected the claim that release archives strip `Intermediate`. They deliberately keep `Intermediate/Build`, which is what lets Blueprint-only users package without a compiler.
+- Corrected the supported engine range in `README.md` from "5.5 and newer" to UE 5.3-5.8, and removed the struck-through legacy text claiming 5.3 and 5.4 could not be built.
+
 ## 0.0.9 - 2026-07-27
 
 ### Fixed

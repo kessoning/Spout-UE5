@@ -4,35 +4,14 @@
  */
 #include "SpoutTextureUtils.h"
 
+#include "SpoutModule.h"
+#include "SpoutValidation.h"
+
 #include "TextureResource.h"
 #include "RenderResource.h"
 
 namespace SpoutTextureUtils
 {
-	void DestroyTexture(UTexture2D*& Texture)
-	{
-		if (!Texture)
-		{
-			return;
-		}
-
-		// Transient textures are rooted to avoid GC while in use by the plugin.
-		if (Texture->IsRooted())
-		{
-			Texture->RemoveFromRoot();
-		}
-
-		// Ensure the render resource is released before GC.
-		// FTextureResource derives from FRenderResource, so no cast is required.
-		if (FTextureResource* Resource = Texture->GetResource())
-		{
-			BeginReleaseResource(Resource);
-		}
-
-		Texture->MarkAsGarbage();
-		Texture = nullptr;
-	}
-
 	bool EnsureTransientTexture(UTexture2D*& Texture, int32 Width, int32 Height, EPixelFormat Format, bool bSRGB)
 	{
 		// Identity is (size, pixel format, sRGB). A format- or sRGB-only change at the same
@@ -47,7 +26,11 @@ namespace SpoutTextureUtils
 			return false;
 		}
 
-		DestroyTexture(Texture);
+		// The outgoing texture is simply dropped from this variable. Its owner releases the last
+		// managed reference, and UTexture's own destruction path releases the render resource on the
+		// render thread at the right time. A hand-rolled release cannot do that safely: it could run
+		// while render commands are still holding the resource.
+		Texture = nullptr;
 
 		// Transient textures are created on the game thread and updated on the render thread.
 		Texture = UTexture2D::CreateTransient(Width, Height, Format);
@@ -56,8 +39,11 @@ namespace SpoutTextureUtils
 			// Set the sRGB flag explicitly before UpdateResource so the SRV is built with the
 			// matching (sRGB vs linear) view. CreateTransient leaves UTexture's default (SRGB=true),
 			// which is correct for 8-bit color but wrong to rely on for linear/data formats.
+			//
+			// Deliberately NOT rooted. The texture is kept alive by FSpoutReceiverOwnership, which
+			// can enumerate and release it; a root cannot be enumerated, so it outlives every code
+			// path meant to remove it.
 			Texture->SRGB = bSRGB ? 1 : 0;
-			Texture->AddToRoot();
 			Texture->UpdateResource();
 		}
 
@@ -66,6 +52,35 @@ namespace SpoutTextureUtils
 
 	UTextureRenderTarget2D* CreateRenderTarget2D(int32 Width, int32 Height, EPixelFormat Format, bool bForceLinearGamma)
 	{
+		// Validated here, at the allocation site, so no caller can reach InitCustomFormat with an
+		// invalid extent. InitCustomFormat takes uint32 dimensions, so an unchecked negative int32
+		// argument would become an enormous unsigned extent inside the engine rather than an error.
+		const SpoutValidation::EResult ExtentResult = SpoutValidation::ValidateDimensions(Width, Height);
+		if (ExtentResult != SpoutValidation::EResult::Ok)
+		{
+			UE_LOG(LogSpoutPlugin, Warning,
+				TEXT("CreateTextureRenderTarget2D: rejected %dx%d (%s). Dimensions must be 1..%d and the total pixel count at most %lld."),
+				Width,
+				Height,
+				SpoutValidation::ToString(ExtentResult),
+				SpoutValidation::MaxTextureDimension,
+				SpoutValidation::MaxTexturePixels);
+			return nullptr;
+		}
+
+		// Only formats the Spout send path can actually publish. Creating a render target this
+		// plugin cannot share just defers the failure to the first send.
+		const SpoutValidation::EResult FormatResult = SpoutValidation::ValidatePixelFormat(Format);
+		if (FormatResult != SpoutValidation::EResult::Ok)
+		{
+			UE_LOG(LogSpoutPlugin, Warning,
+				TEXT("CreateTextureRenderTarget2D: pixel format %s cannot be shared over Spout (%s). ")
+				TEXT("Supported formats are B8G8R8A8, R8G8B8A8, A2B10G10R10 and FloatRGBA."),
+				GetPixelFormatString(Format),
+				SpoutValidation::ToString(FormatResult));
+			return nullptr;
+		}
+
 		UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>();
 		// Do NOT AddToRoot here: the Blueprint caller receives and stores the return value, whose
 		// reference keeps it alive (mirrors UKismetRenderingLibrary::CreateRenderTarget2D). Rooting

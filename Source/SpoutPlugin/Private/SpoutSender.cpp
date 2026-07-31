@@ -5,8 +5,16 @@
 #include "SpoutSender.h"
 #include "SpoutD3DContext.h"
 #include "SpoutD3DUtils.h"
+#include "SpoutFormatPolicy.h"
+#include "SpoutFrameSync.h"
+#include "SpoutLogThrottle.h"
+#include "SpoutRHIState.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutModule.h"
+#include "SpoutSession.h"
+#include "SpoutValidation.h"
+
+#include <atomic>
 
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
@@ -38,22 +46,14 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
-	DXGI_FORMAT SanitizeDxgiFormat(DXGI_FORMAT InFormat)
-	{
-		switch (InFormat)
-		{
-		case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-			return DXGI_FORMAT_R8G8B8A8_UNORM;
-		case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-			return DXGI_FORMAT_B8G8R8A8_UNORM;
-		case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-			return DXGI_FORMAT_R10G10B10A2_UNORM;
-		case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-			return DXGI_FORMAT_R16G16B16A16_FLOAT;
-		default:
-			return InFormat;
-		}
-	}
+	/**
+	 * Rate limiter for the unsupported-source-format diagnostic.
+	 *
+	 * Scoped to the send path rather than to one sender entry: the format comes from the shared
+	 * source resource, so every name publishing that source hits the same condition in the same
+	 * frame and one line per interval describes all of them.
+	 */
+	FSpoutLogThrottle GSenderFormatLogThrottle(5.0);
 
 	struct FSpoutSendSource
 	{
@@ -69,6 +69,43 @@ namespace
 		{
 			if (!TextureRenderTarget2D)
 			{
+				return false;
+			}
+
+			// Reject an unusable render target on the game thread, before a render command is
+			// queued. The render thread validates the resolved RHI resource again as the
+			// authoritative check, but failing here keeps an obviously invalid request from
+			// costing a queued command and a GPU flush every frame.
+			const SpoutValidation::EResult ExtentResult = SpoutValidation::ValidateDimensions(
+				TextureRenderTarget2D->SizeX,
+				TextureRenderTarget2D->SizeY);
+			if (ExtentResult != SpoutValidation::EResult::Ok)
+			{
+				static FSpoutLogThrottle ExtentLogThrottle(5.0);
+				if (ExtentLogThrottle.ShouldLog())
+				{
+					UE_LOG(LogSpoutPlugin, Warning,
+						TEXT("SpoutSender: render target '%s' has invalid dimensions %dx%d (%s)."),
+						*TextureRenderTarget2D->GetName(),
+						TextureRenderTarget2D->SizeX,
+						TextureRenderTarget2D->SizeY,
+						SpoutValidation::ToString(ExtentResult));
+				}
+				return false;
+			}
+
+			const EPixelFormat RenderTargetFormat = TextureRenderTarget2D->GetFormat();
+			if (SpoutValidation::ValidatePixelFormat(RenderTargetFormat) != SpoutValidation::EResult::Ok)
+			{
+				static FSpoutLogThrottle FormatLogThrottle(5.0);
+				if (FormatLogThrottle.ShouldLog())
+				{
+					UE_LOG(LogSpoutPlugin, Warning,
+						TEXT("SpoutSender: render target '%s' has pixel format %s, which this plugin cannot share. ")
+						TEXT("Supported formats are B8G8R8A8, R8G8B8A8, A2B10G10R10 and FloatRGBA."),
+						*TextureRenderTarget2D->GetName(),
+						GetPixelFormatString(RenderTargetFormat));
+				}
 				return false;
 			}
 
@@ -93,14 +130,30 @@ namespace
 		return false;
 	}
 
-	void EnsureSharedSenderTexture(FSpoutSharedSender& Sender, uint32 Width, uint32 Height, DXGI_FORMAT Format, FSpoutD3DContext& Context);
-	ComPtr<ID3D11Texture2D> GetWrappedResource(FSpoutSharedSender& Sender, ID3D12Resource* NativeResource);
+	bool EnsureSharedSenderTexture(FSpoutSharedSender& Sender, uint32 Width, uint32 Height, DXGI_FORMAT Format, FSpoutD3DContext& Context);
+	ComPtr<ID3D11Texture2D> GetWrappedResource(FSpoutSharedSender& Sender, ID3D12Resource* NativeResource, SpoutRHIState::EWrapState WrapState);
+
+	/** One resolved publication target: the entry that owns the protocol state, and its texture. */
+	struct FSpoutSendDestination
+	{
+		TSharedPtr<FSpoutSharedSender> Entry;
+		// TRefCountPtr, not ComPtr: ComPtr overloads operator& to return a ComPtrRef, which breaks
+		// UE container internals that take the address of an element (a hard compile error on UE 5.3).
+		TRefCountPtr<ID3D11Texture2D> SharedTexture;
+	};
 
 	/**
 	 * Copies SourceRHI into the shared texture of every named sender.
 	 *
-	 * All destinations share ONE state transition, ONE RHI flush and ONE D3D11-on-12 acquire scope,
-	 * so N senders publishing the same source cost a single GPU round trip instead of N.
+	 * All destinations share ONE state transition, ONE RHI flush and ONE D3D11-on-12 acquire scope
+	 * of the source, so N senders publishing the same source still cost a single source round trip.
+	 * The per-destination part cannot be shared: each name has its own cross-process access mutex,
+	 * and the copy into a shared texture has to be submitted before that name's frame is announced.
+	 *
+	 * Takes tokens rather than names. Between the Blueprint call that queued this command and this
+	 * function running, the sender may have been closed or the whole session torn down; a name
+	 * carries none of that, a token carries all of it. Tokens are filtered here, before the source
+	 * is transitioned, so a fully cancelled batch also costs no GPU work.
 	 *
 	 * SourceWrapCache supplies the D3D11 wrap of the source. The viewport path passes its own cache
 	 * because the swap chain rotates through several back buffers and a per-sender single-entry cache
@@ -109,13 +162,31 @@ namespace
 	 * the first entry's cache is consulted.
 	 */
 	void SendTextureOnRenderThread(
-		TConstArrayView<FName> SpoutNames,
+		TConstArrayView<FSpoutStreamToken> Tokens,
 		const FTextureRHIRef& SourceRHI,
 		bool bIsViewport,
 		FRHICommandListImmediate& RHICmdList,
 		FSpoutWrapCache* SourceWrapCache)
 	{
-		if (SpoutNames.Num() == 0 || !SourceRHI.IsValid())
+		if (Tokens.Num() == 0 || !SourceRHI.IsValid())
+		{
+			return;
+		}
+
+		// Cancellation check first, before anything with a cost. Everything below this point is
+		// skipped entirely for work that was closed or torn down after it was queued: no registry
+		// entry is created, no name is registered, no resource is transitioned and no copy is made.
+		FSpoutSession& Session = FSpoutSession::Get();
+		TArray<FSpoutStreamToken, TInlineAllocator<4>> LiveTokens;
+		for (const FSpoutStreamToken& Token : Tokens)
+		{
+			if (Session.IsCurrent(Token))
+			{
+				LiveTokens.Add(Token);
+			}
+		}
+
+		if (LiveTokens.Num() == 0)
 		{
 			return;
 		}
@@ -138,92 +209,203 @@ namespace
 			return;
 		}
 
-		// Transition for copy and flush so the wrapped D3D11 context can see up-to-date data.
-		// Viewport backbuffer comes in Present state; render targets come in SRVMask after scene render.
-		// The flush acts on the RHI command list, not the D3D11 immediate context, so it is issued
-		// BEFORE taking D3D11ContextMutex — keeping the heavy RHI-thread flush out of the lock and
-		// matching the receiver path.
-		const ERHIAccess FromState = bIsViewport ? ERHIAccess::Present : ERHIAccess::SRVMask;
-		RHICmdList.Transition(FRHITransitionInfo(SourceRHI, FromState, ERHIAccess::CopySrc));
-		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThreadFlushResources);
-
+		// Resolve the source description and its format BEFORE any state transition. Reading the
+		// D3D12 descriptor needs no particular resource state, and deciding here means an
+		// unsupported source returns without having transitioned the resource or paid for an RHI
+		// flush — so there is no state to unwind on the reject path.
 		D3D12_RESOURCE_DESC Desc = NativeRes->GetDesc();
 
-		DXGI_FORMAT Format = SanitizeDxgiFormat(Desc.Format);
-		if (Format == DXGI_FORMAT_UNKNOWN)
+		const SpoutFormatPolicy::FSenderFormat SourceFormat = SpoutFormatPolicy::ResolveSenderFormat(Desc.Format);
+		if (!SourceFormat.IsUsable())
 		{
-			// Fall back to a common format if the backbuffer format cannot be used.
-			Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+			// Refuse rather than substitute. Turning an unknown format into a BGRA8 shared texture
+			// advertises a layout the source does not have, and passing an unsupported one
+			// straight to CreateSharedDX11Texture is no better; both produce silently dropped or
+			// garbled frames. Naming the format here makes the cause visible instead.
+			if (GSenderFormatLogThrottle.ShouldLog())
+			{
+				UE_LOG(LogSpoutPlugin, Warning,
+					TEXT("Spout sender: source texture format %s is %s and cannot be shared. ")
+					TEXT("Nothing was published for %d name(s) (first: '%s'). ")
+					TEXT("Supported source formats are RGBA8, BGRA8, RGB10A2 and RGBA16F (including their typeless variants)."),
+					*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Desc.Format)),
+					SpoutFormatPolicy::ToString(SourceFormat.Support),
+					LiveTokens.Num(),
+					*LiveTokens[0].Name.ToString());
+			}
+			return;
 		}
 
-		// Resolve every destination first: shared-texture creation and Spout registration are
-		// device-level (free-threaded), so they stay outside D3D11ContextMutex.
-		// TRefCountPtr, not ComPtr: ComPtr overloads operator& to return a ComPtrRef, which breaks
-		// UE container internals that take the address of an element (a hard compile error on UE 5.3).
-		TArray<TRefCountPtr<ID3D11Texture2D>, TInlineAllocator<4>> Destinations;
-		TSharedPtr<FSpoutSharedSender> WrapOwner;
+		const DXGI_FORMAT Format = SourceFormat.SharedFormat;
 
-		for (const FName& SpoutName : SpoutNames)
+		// Validate the source extent before creating a shared texture from it.
+		const SpoutValidation::EResult ExtentResult = SpoutValidation::ValidateDimensions(
+			static_cast<int64>(Desc.Width),
+			static_cast<int64>(Desc.Height));
+		if (ExtentResult != SpoutValidation::EResult::Ok)
 		{
-			TSharedPtr<FSpoutSharedSender> Sender = FSpoutSenderRegistry::Get().FindOrAdd(SpoutName, ESpoutType::Sender);
+			if (GSenderFormatLogThrottle.ShouldLog())
+			{
+				UE_LOG(LogSpoutPlugin, Warning,
+					TEXT("Spout sender: source texture extent %llux%llu is invalid (%s); nothing was published for '%s'."),
+					static_cast<uint64>(Desc.Width),
+					static_cast<uint64>(Desc.Height),
+					SpoutValidation::ToString(ExtentResult),
+					*LiveTokens[0].Name.ToString());
+			}
+			return;
+		}
+
+		// Resolve every destination BEFORE anything with a GPU cost. Shared-texture creation and
+		// Spout registration are device-level (free-threaded), so they stay outside
+		// D3D11ContextMutex — and doing them first means a batch with nothing publishable (a sender
+		// whose registration is failing, say) costs no state transition and no RHI flush at all.
+		TArray<FSpoutSendDestination, TInlineAllocator<4>> Destinations;
+
+		for (const FSpoutStreamToken& Token : LiveTokens)
+		{
+			// Re-checked immediately before the registry entry is created. FindOrAdd is the point
+			// of no return: creating the entry here for a name that was closed a moment ago
+			// resurrects the sender that Close was supposed to have removed.
+			if (!Session.IsCurrent(Token))
+			{
+				continue;
+			}
+
+			TSharedPtr<FSpoutSharedSender> Sender = FSpoutSenderRegistry::Get().FindOrAdd(Token.Name, ESpoutType::Sender);
 			if (!Sender)
 			{
 				continue;
 			}
 
-			EnsureSharedSenderTexture(*Sender, static_cast<uint32>(Desc.Width), static_cast<uint32>(Desc.Height), Format, Context);
+			// Gate on the registration state, not on the texture existing. A live shared texture
+			// says nothing about whether Spout accepted the name, and publishing into a texture
+			// whose name is unregistered (or whose advertised handle is stale) sends the frames
+			// nowhere a receiver can find them.
+			if (!EnsureSharedSenderTexture(*Sender, static_cast<uint32>(Desc.Width), static_cast<uint32>(Desc.Height), Format, Context))
+			{
+				continue;
+			}
 
 			ComPtr<ID3D11Texture2D> SharedTexture;
 			{
 				FScopeLock SenderLock(&Sender->ResourceMutex);
-				SharedTexture = Sender->SharedTexture;
+				// Re-check under the lock: the registration and the texture must agree at the
+				// moment the destination is captured.
+				if (Sender->Registration.IsActive())
+				{
+					SharedTexture = Sender->SharedTexture;
+				}
 			}
 
 			if (SharedTexture)
 			{
-				Destinations.Add(TRefCountPtr<ID3D11Texture2D>(SharedTexture.Get()));
-				if (!WrapOwner)
-				{
-					WrapOwner = Sender;
-				}
+				FSpoutSendDestination Destination;
+				Destination.Entry = Sender;
+				Destination.SharedTexture = TRefCountPtr<ID3D11Texture2D>(SharedTexture.Get());
+				Destinations.Add(MoveTemp(Destination));
 			}
 		}
 
-		if (Destinations.Num() > 0)
+		if (Destinations.Num() == 0)
+		{
+			// Nothing to publish. Nothing has been transitioned or flushed, so there is nothing to
+			// unwind either.
+			return;
+		}
+
+		// The whole state bracket comes from SpoutRHIState, which is also what the wrap
+		// state below comes from, so the ERHIAccess the resource is transitioned into and the
+		// D3D12 state declared to CreateWrappedResource cannot disagree.
+		//
+		// EntryBefore is Unknown for both source roles because neither resource's previous access
+		// is this plugin's to know: the viewport back buffer's access at broadcast time is not
+		// contractual across UE 5.3-5.8, and a caller-supplied render target may last have been an
+		// RTV, a UAV or a copy destination. See SpoutRHIState.h.
+		//
+		// The flush acts on the RHI command list, not the D3D11 immediate context, so it is issued
+		// BEFORE taking D3D11ContextMutex — keeping the heavy RHI-thread flush out of the lock and
+		// matching the receiver path. It also has to precede AcquireWrappedResources, which
+		// requires the resource to already be in the state the wrap declared.
+		const SpoutRHIState::FCopyBracket Bracket = SpoutRHIState::GetCopyBracket(
+			bIsViewport
+				? SpoutRHIState::EResourceRole::ViewportBackBuffer
+				: SpoutRHIState::EResourceRole::SenderRenderTarget);
+
+		RHICmdList.Transition(FRHITransitionInfo(SourceRHI, Bracket.EntryBefore, Bracket.CopyAccess));
+		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThreadFlushResources);
+
 		{
 			// D3D11 immediate context is not thread-safe; guard its usage (and the wrap caches it
 			// shares with the receiver path).
 			FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
 
 			ComPtr<ID3D11Texture2D> WrappedSource = SourceWrapCache
-				? SourceWrapCache->GetOrCreate(NativeRes, D3D12_RESOURCE_STATE_COPY_SOURCE)
-				: GetWrappedResource(*WrapOwner, NativeRes);
+				? SourceWrapCache->GetOrCreate(NativeRes, Bracket.WrapState)
+				: GetWrappedResource(*Destinations[0].Entry, NativeRes, Bracket.WrapState);
 
 			if (WrappedSource)
 			{
-				// One acquire/release/flush scope covers every copy, so publishing to N senders
-				// submits once instead of N times.
+				// One acquire/release scope covers every copy: the source is wrapped once and
+				// transitioned once no matter how many names publish it.
 				FScopedD3D11On12Acquire Acquire(WrappedSource.Get());
 				if (Acquire.IsValid())
 				{
-					for (const TRefCountPtr<ID3D11Texture2D>& Destination : Destinations)
+					for (const FSpoutSendDestination& Destination : Destinations)
 					{
-						Context.GetImmediateContext()->CopyResource(Destination.GetReference(), WrappedSource.Get());
+						// Take this name's cross-process access mutex around its copy, one name at
+						// a time. Never several at once: each destination is a different named
+						// mutex, and holding two of them would make the lock order depend on the
+						// order names happen to be queued in.
+						//
+						// A failed wait means a peer is still reading this texture. Skipping is
+						// the correct response -- overwriting it would tear the frame the peer is
+						// mid-read of -- and the scope owns nothing, so nothing is released.
+						FSpoutTextureAccessScope Access(
+							Destination.Entry->FrameSync,
+							Destination.SharedTexture.GetReference());
+
+						if (!Access.IsAcquired())
+						{
+							if (Destination.Entry->AccessLogThrottle.ShouldLog())
+							{
+								UE_LOG(LogSpoutPlugin, Warning,
+									TEXT("Spout sender '%s': timed out waiting for shared-texture access; this frame was not published. ")
+									TEXT("A receiver is holding the texture longer than the sender's frame time."),
+									*Destination.Entry->Name.ToString());
+							}
+							continue;
+						}
+
+						Context.GetImmediateContext()->CopyResource(
+							Destination.SharedTexture.GetReference(),
+							WrappedSource.Get());
+
+						// Submit before announcing. SetNewFrame tells receivers the texture holds a
+						// new frame, and releasing access lets them read it, so both have to follow
+						// the copy actually reaching the queue. This is the order the Spout SDK's
+						// own sender uses.
+						Context.GetImmediateContext()->Flush();
+						Destination.Entry->FrameSync.PublishFrame();
 					}
 				}
 			}
 		}
 
 		// Restore the source access state after the copy. Runs on every path once the resource has
-		// been transitioned to CopySrc (including when the sender lookup or wrap fails) so UE's state
-		// tracking stays consistent.
-		// Restore to SRVMask (not just SRVGraphics) to mirror the SRVMask the texture was
-		// transitioned from, so a later compute-shader read does not trip RHI validation.
-		RHICmdList.Transition(FRHITransitionInfo(
-			SourceRHI,
-			ERHIAccess::CopySrc,
-			bIsViewport ? ERHIAccess::Present : ERHIAccess::SRVMask
-		));
+		// been transitioned (including when the wrap or the acquire fails) so UE's state tracking
+		// stays consistent.
+		//
+		// The declared previous state is the copy access, never Unknown: the transition above is
+		// what set it and no other code has touched the resource since.
+		//
+		// The viewport back buffer is restored to SRVGraphics, which is precisely what UE 5.3/5.4
+		// set before broadcasting — so this whole bracket is invisible to the engine, and the
+		// engine's own follow-up transition (SRVGraphics -> RTV for stereo) stays valid. Restoring
+		// it to Present would invalidate that transition's declared previous state. Render targets
+		// go back to SRVMask rather than SRVGraphics so a later compute-shader read does not trip
+		// RHI validation.
+		RHICmdList.Transition(FRHITransitionInfo(SourceRHI, Bracket.CopyAccess, Bracket.ExitAfter));
 	}
 
 	class FSpoutViewportSender
@@ -235,9 +417,9 @@ namespace
 			return Instance;
 		}
 
-		bool QueueSend(const FName& SpoutName)
+		bool QueueSend(const FSpoutStreamToken& Token)
 		{
-			if (SpoutName.IsNone())
+			if (!Token.IsSet() || Token.Name.IsNone())
 			{
 				return false;
 			}
@@ -259,18 +441,42 @@ namespace
 				}
 			}
 
-			FScopeLock Lock(&PendingMutex);
-			// Stored as a raw pointer used only for identity comparison against the window the
-			// delegate hands us. It is never dereferenced, so a destroyed window cannot be touched
-			// through it.
-			TargetWindow = WindowPtr;
-			PendingSenders.Add(SpoutName);
+			{
+				FScopeLock Lock(&WindowMutex);
+				// Stored as a raw pointer used only for identity comparison against the window the
+				// delegate passes in. It is never dereferenced, so a destroyed window cannot be touched
+				// through it.
+				TargetWindow = WindowPtr;
+			}
+
+			PendingSenders.Add(Token);
 			return true;
 		}
 
-		void Shutdown()
+		/**
+		 * Drops one name from the pending set.
+		 *
+		 * Without it an individually closed viewport sender would stay queued, and the next
+		 * present would publish a name the caller had already closed.
+		 */
+		bool RemovePending(const FName& SpoutName)
 		{
-			if (bRegistered && FSlateApplication::IsInitialized())
+			return PendingSenders.Remove(SpoutName);
+		}
+
+		/**
+		 * Unsubscribes the back-buffer delegate and waits until no invocation of it is still running.
+		 *
+		 * The wait is the part that matters. Removing a multicast delegate does not interrupt a
+		 * broadcast that is already in progress, so without it this function can return while the
+		 * render thread is midway through the lambda and about to enqueue another command -- late
+		 * work that outlives the teardown meant to precede it. Once this returns, the only
+		 * commands that can exist are ones already in the queue, and the flush that follows drains
+		 * them.
+		 */
+		void DetachProducer()
+		{
+			if (bDelegateRegistered && FSlateApplication::IsInitialized())
 			{
 				if (FSlateRenderer* Renderer = FSlateApplication::Get().GetRenderer())
 				{
@@ -278,25 +484,72 @@ namespace
 				}
 			}
 
-			bRegistered = false;
+			bDelegateRegistered = false;
 			BackBufferHandle.Reset();
 
+			// Never wait from inside the callback itself; that would be waiting on this thread.
+			if (IsInRenderingThread())
 			{
-				// The cache is otherwise touched only on the render thread under this mutex.
-				FSpoutD3DContext& Context = FSpoutD3DContext::Get();
-				FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
-				BackBufferWrapCache.Reset();
+				return;
 			}
 
-			FScopeLock Lock(&PendingMutex);
+			// Bounded, because hanging the editor is a worse failure than a logged warning. The
+			// delegate body is a handful of instructions plus one ENQUEUE_RENDER_COMMAND, so the
+			// normal case exits on the first check.
+			const double DeadlineSeconds = FPlatformTime::Seconds() + 2.0;
+			while (InFlightBroadcasts.load(std::memory_order_acquire) > 0)
+			{
+				if (FPlatformTime::Seconds() > DeadlineSeconds)
+				{
+					UE_LOG(LogSpoutPlugin, Warning,
+						TEXT("Spout: timed out waiting for the viewport back-buffer callback to finish. ")
+						TEXT("Teardown is continuing; queued work is already cancelled, so any late callback is a no-op."));
+					break;
+				}
+
+				FPlatformProcess::SleepNoStats(0.0f);
+			}
+		}
+
+		/** Drops names that were queued but never presented. */
+		void ClearPending()
+		{
 			PendingSenders.Reset();
+
+			FScopeLock Lock(&WindowMutex);
 			TargetWindow = nullptr;
 		}
 
+		/** Releases the cached back-buffer wraps. Must run after the render-command flush. */
+		void ReleaseNativeResources()
+		{
+			// The cache is otherwise touched only on the render thread under this mutex.
+			FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+			FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
+			BackBufferWrapCache.Reset();
+		}
+
 	private:
+		/** Counts invocations of the back-buffer delegate that have entered but not yet returned. */
+		struct FBroadcastScope
+		{
+			explicit FBroadcastScope(std::atomic<int32>& InCounter)
+				: Counter(InCounter)
+			{
+				Counter.fetch_add(1, std::memory_order_acq_rel);
+			}
+
+			~FBroadcastScope()
+			{
+				Counter.fetch_sub(1, std::memory_order_acq_rel);
+			}
+
+			std::atomic<int32>& Counter;
+		};
+
 		bool RegisterIfNeeded()
 		{
-			if (bRegistered)
+			if (bDelegateRegistered)
 			{
 				return true;
 			}
@@ -330,6 +583,17 @@ namespace
 				[this](SWindow& SlateWindow, const FTextureRHIRef& IncomingBackBuffer)
 #endif
 				{
+					// Marks this callback as running for the whole of its body, so DetachProducer can
+					// tell "removed the delegate" from "the delegate has actually finished".
+					FBroadcastScope BroadcastScope(InFlightBroadcasts);
+
+					// Cheapest possible early-out during teardown, and it also means the work below
+					// cannot start once the session has entered Stopping.
+					if (!FSpoutSession::Get().IsRunning())
+					{
+						return;
+					}
+
 #if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
 					// UE 5.8+: obtain the back buffer from the viewport provider. This lambda runs on
 					// the render thread (delegate contract), where GetBackBufferResource() is valid; the
@@ -344,23 +608,21 @@ namespace
 						return;
 					}
 
-					TArray<FName> NamesToSend;
 					{
-						FScopeLock Lock(&PendingMutex);
-
 						// The delegate fires for every window; only consume the queue for the one the
 						// game viewport last reported. Pure pointer identity, resolved on the game
 						// thread in QueueSend.
+						FScopeLock Lock(&WindowMutex);
 						if (TargetWindow != &SlateWindow)
 						{
 							return;
 						}
-
-						NamesToSend = PendingSenders.Array();
-						PendingSenders.Reset();
 					}
 
-					if (NamesToSend.Num() == 0)
+					TArray<FSpoutStreamToken> TokensToSend;
+					PendingSenders.Drain(TokensToSend);
+
+					if (TokensToSend.Num() == 0)
 					{
 						return;
 					}
@@ -368,12 +630,13 @@ namespace
 					const FTextureRHIRef BackBufferCopy = BackBuffer;
 
 					ENQUEUE_RENDER_COMMAND(SpoutViewportSend)(
-						[this, NamesToSend = MoveTemp(NamesToSend), BackBufferCopy](FRHICommandListImmediate& RHICmdList)
+						[this, TokensToSend = MoveTemp(TokensToSend), BackBufferCopy](FRHICommandListImmediate& RHICmdList)
 						{
 							// Every queued sender publishes the same back buffer, so they share one
-							// transition, one flush and one acquire scope.
+							// transition, one flush and one acquire scope. Tokens that went stale
+							// between the present and this command running are dropped inside.
 							SendTextureOnRenderThread(
-								NamesToSend,
+								TokensToSend,
 								BackBufferCopy,
 								true,
 								RHICmdList,
@@ -384,92 +647,201 @@ namespace
 				}
 			);
 
-			bRegistered = BackBufferHandle.IsValid();
-			return bRegistered;
+			bDelegateRegistered = BackBufferHandle.IsValid();
+			return bDelegateRegistered;
 		}
 
-		FCriticalSection PendingMutex;
-		TSet<FName> PendingSenders;
+		// Names queued for the next present, each with the token it was queued under. Individually
+		// removable, which is what lets CloseSender cancel a single viewport name.
+		FSpoutPendingSenders PendingSenders;
+
+		FCriticalSection WindowMutex;
 		// Identity of the game viewport's window, resolved on the game thread. Compared against the
-		// delegate's window and never dereferenced. Guarded by PendingMutex.
+		// delegate's window and never dereferenced. Guarded by WindowMutex.
 		const SWindow* TargetWindow = nullptr;
+
+		// Non-zero while the back-buffer callback is executing. Read by DetachProducer.
+		std::atomic<int32> InFlightBroadcasts{0};
+
 		FDelegateHandle BackBufferHandle;
-		bool bRegistered = false;
+		// Whether the Slate back-buffer delegate is subscribed. Distinct from
+		// FSpoutSenderRegistration, which tracks whether Spout accepted a sender NAME; this is only
+		// about this object's hook into the renderer.
+		bool bDelegateRegistered = false;
 		// Wraps of the swap chain's back buffers. Render-thread only, under the D3D11 context mutex.
 		FSpoutWrapCache BackBufferWrapCache;
 	};
 
-	void EnsureSharedSenderTexture(FSpoutSharedSender& Sender, uint32 Width, uint32 Height, DXGI_FORMAT Format, FSpoutD3DContext& Context)
+	/**
+	 * Brings the shared texture and the Spout registration for one sender into agreement with the
+	 * requested geometry, and reports whether the sender is publishable afterwards.
+	 *
+	 * This never returns early on the strength of an existing texture. Registration is re-published
+	 * (which is a comparison and nothing more once Active) on every call, so an attempt that failed
+	 * on an earlier frame is retried on this one.
+	 */
+	bool EnsureSharedSenderTexture(FSpoutSharedSender& Sender, uint32 Width, uint32 Height, DXGI_FORMAT Format, FSpoutD3DContext& Context)
 	{
 		// Sender state can be accessed on the render thread and by BP calls.
 		FScopeLock SenderLock(&Sender.ResourceMutex);
-		if (Sender.SharedTexture && Sender.Width == Width && Sender.Height == Height && Sender.SharedFormat == Format)
+
+		if (!Sender.HasValidName())
 		{
-			return;
+			// The constructor already reported why; nothing here can recover it.
+			return false;
 		}
 
-		Sender.SharedTexture.Reset();
-		Sender.SharedHandle = nullptr;
-		Sender.CachedWrappedResource.Reset();
-		Sender.CachedNativeResource = nullptr;
-		Sender.Width = Width;
-		Sender.Height = Height;
-		Sender.SharedFormat = Format;
+		FSpoutSdkSenderNameBackend Backend;
+		const ANSICHAR* Utf8Name = Sender.GetUtf8Name();
+		const int32 FailuresBefore = Sender.Registration.GetConsecutiveFailureCount();
 
-		spoutDirectX* SpoutDX = Context.GetSpoutDirectX();
-		if (!SpoutDX)
+		const bool bTextureMatchesRequest =
+			Sender.SharedTexture
+			&& Sender.Width == Width
+			&& Sender.Height == Height
+			&& Sender.SharedFormat == Format;
+
+		if (!bTextureMatchesRequest)
 		{
-			return;
+			// Geometry or format changed (or there is no texture yet). The old shared texture cannot
+			// receive this frame, so it goes, and with it the handle Spout is advertising.
+			//
+			// Invalidate() releases the name before the new texture exists. That is deliberate: for
+			// the duration of the recreate the previously advertised handle refers to a texture this
+			// sender has already dropped, and a receiver that opens it gets a dead resource. Briefly
+			// leaving the sender list is the honest state, and it makes the recreate deterministic —
+			// the Publish below always takes the clean CreateSender path.
+			Sender.Registration.Invalidate(Backend);
+
+			Sender.SharedTexture.Reset();
+			Sender.SharedHandle = nullptr;
+			Sender.CachedWrappedResource.Reset();
+			Sender.CachedNativeResource = nullptr;
+			Sender.Width = Width;
+			Sender.Height = Height;
+			Sender.SharedFormat = Format;
+
+			spoutDirectX* SpoutDX = Context.GetSpoutDirectX();
+			ID3D11Device* D3D11Device = Context.GetD3D11Device();
+			if (!SpoutDX || !D3D11Device)
+			{
+				if (Sender.RegistrationLogThrottle.ShouldLog())
+				{
+					UE_LOG(LogSpoutPlugin, Error,
+						TEXT("Spout sender '%s': the D3D11/Spout interop context is unavailable; cannot create a shared texture. State=%s."),
+						*Sender.Name.ToString(),
+						LexToString(Sender.Registration.GetState()));
+				}
+				return false;
+			}
+
+			// Create into locals so a failure cannot leave a half-assigned texture/handle pair on
+			// the entry. Spout creates a DX11 shared texture and returns its shared handle.
+			ComPtr<ID3D11Texture2D> NewSharedTexture;
+			HANDLE NewSharedHandle = nullptr;
+			const bool bCreated = SpoutDX->CreateSharedDX11Texture(
+				D3D11Device,
+				Width,
+				Height,
+				Format,
+				NewSharedTexture.GetAddressOf(),
+				NewSharedHandle
+			);
+
+			if (!bCreated || !NewSharedTexture || !NewSharedHandle)
+			{
+				// Registration is already Invalidated above, so the entry stays retryable and
+				// nothing stale is advertised.
+				if (Sender.RegistrationLogThrottle.ShouldLog())
+				{
+					UE_LOG(LogSpoutPlugin, Error,
+						TEXT("Spout sender '%s': failed to create a %ux%u shared texture (%s). ")
+						TEXT("The sender is not publishing; it will retry on later frames. Consecutive failures: %d."),
+						*Sender.Name.ToString(),
+						Width,
+						Height,
+						*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)),
+						Sender.Registration.GetConsecutiveFailureCount());
+				}
+				return false;
+			}
+
+			Sender.SharedTexture = MoveTemp(NewSharedTexture);
+			Sender.SharedHandle = NewSharedHandle;
 		}
 
-		// Spout creates a DX11 shared texture and returns a shared handle.
-		const bool bCreated = SpoutDX->CreateSharedDX11Texture(
-			Context.GetD3D11Device(),
+		// Register the name, or republish it after a resize/handle change, or confirm the existing
+		// advertisement still matches. Every SDK return value is checked inside Publish.
+		const bool bActive = Sender.Registration.Publish(
+			Backend,
+			Utf8Name,
 			Width,
 			Height,
-			Format,
-			Sender.SharedTexture.GetAddressOf(),
-			Sender.SharedHandle
-		);
+			Sender.SharedHandle,
+			static_cast<uint32>(Format));
 
-		if (bCreated && Sender.SharedTexture && Sender.SharedHandle)
+		if (!bActive)
 		{
-			spoutSenderNames* SenderNames = Context.GetSenderNames();
-			if (SenderNames)
+			if (Sender.RegistrationLogThrottle.ShouldLog())
 			{
-				// Register or update this sender in Spout's global registry.
-				FScopeLock SpoutLock(&Context.GetSpoutMutex());
-				if (!Sender.bRegistered)
-				{
-					Sender.bRegistered = SenderNames->CreateSender(
-						TCHAR_TO_UTF8(*Sender.Name.ToString()),
-						Sender.Width,
-						Sender.Height,
-						Sender.SharedHandle,
-						Format
-					);
-				}
-				else
-				{
-					SenderNames->UpdateSender(
-						TCHAR_TO_UTF8(*Sender.Name.ToString()),
-						Sender.Width,
-						Sender.Height,
-						Sender.SharedHandle,
-						Format
-					);
-				}
+				UE_LOG(LogSpoutPlugin, Error,
+					TEXT("Spout sender '%s': Spout refused the registration for %ux%u %s. ")
+					TEXT("State=%s, consecutive failures=%d. The name is not advertised and no frames are published; ")
+					TEXT("it will retry on later frames. Check that the sender limit (SetMaxSenders) has not been reached."),
+					*Sender.Name.ToString(),
+					Width,
+					Height,
+					*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)),
+					LexToString(Sender.Registration.GetState()),
+					Sender.Registration.GetConsecutiveFailureCount());
+			}
+			return false;
+		}
+
+		// The name is now advertised, so open its access mutex and frame-count semaphore.
+		// Idempotent and keyed to the name, so this is a comparison on every later frame and it
+		// survives a resize untouched: the shared texture is recreated, but the mutex and the
+		// semaphore belong to the NAME and stay valid across it.
+		//
+		// Deliberately after Publish rather than at construction. A stream whose name Spout refused
+		// must not be holding that name's cross-process mutex, because the process that did get the
+		// name owns it.
+		if (!Sender.FrameSync.IsOpen() && !Sender.FrameSync.Open(Utf8Name))
+		{
+			// Not fatal: without the mutex the copy is simply unsynchronised, so frames still
+			// flow. Worth saying once per interval because tearing against a well-behaved
+			// receiver becomes possible again.
+			if (Sender.RegistrationLogThrottle.ShouldLog())
+			{
+				UE_LOG(LogSpoutPlugin, Warning,
+					TEXT("Spout sender '%s': could not create the shared-texture access mutex; frames are published without cross-process locking."),
+					*Sender.Name.ToString());
 			}
 		}
+
+		if (FailuresBefore > 0)
+		{
+			// Recovery is worth one line: it closes out the failure messages above.
+			Sender.RegistrationLogThrottle.Reset();
+			UE_LOG(LogSpoutPlugin, Log,
+				TEXT("Spout sender '%s': registration recovered after %d failed attempt(s); now publishing %ux%u %s."),
+				*Sender.Name.ToString(),
+				FailuresBefore,
+				Width,
+				Height,
+				*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)));
+		}
+
+		return true;
 	}
 
-	ComPtr<ID3D11Texture2D> GetWrappedResource(FSpoutSharedSender& Sender, ID3D12Resource* NativeResource)
+	ComPtr<ID3D11Texture2D> GetWrappedResource(FSpoutSharedSender& Sender, ID3D12Resource* NativeResource, SpoutRHIState::EWrapState WrapState)
 	{
 		// Cache the wrapped resource per native D3D12 texture to avoid re-wrapping every frame.
 		FScopeLock SenderLock(&Sender.ResourceMutex);
 		if (Sender.CachedNativeResource != NativeResource || !Sender.CachedWrappedResource)
 		{
-			Sender.CachedWrappedResource = WrapD3D12Resource(NativeResource, D3D12_RESOURCE_STATE_COPY_SOURCE);
+			Sender.CachedWrappedResource = WrapD3D12Resource(NativeResource, WrapState);
 			Sender.CachedNativeResource = NativeResource;
 		}
 
@@ -479,10 +851,36 @@ namespace
 
 bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, UTextureRenderTarget2D* TextureRenderTarget2D)
 {
+	// Validate the name before touching the interop context or queueing anything. NAME_None, an
+	// empty name, and a name whose UTF-8 encoding overflows Spout's 256-byte field are all rejected
+	// here rather than reaching the SDK.
+	const SpoutValidation::EResult NameResult = SpoutValidation::ValidateName(SpoutName);
+	if (NameResult != SpoutValidation::EResult::Ok)
+	{
+		static FSpoutLogThrottle NameLogThrottle(5.0);
+		if (NameLogThrottle.ShouldLog())
+		{
+			UE_LOG(LogSpoutPlugin, Warning,
+				TEXT("SpoutSender: rejected sender name '%s' (%s). Names must be non-empty and at most %d bytes when UTF-8 encoded."),
+				*SpoutName.ToString(),
+				SpoutValidation::ToString(NameResult),
+				SpoutValidation::MaxSenderNameUtf8Bytes);
+		}
+		return false;
+	}
+
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
 	Context.InitializeIfNeeded();
 
 	if (!Context.IsSpoutAvailable())
+	{
+		return false;
+	}
+
+	// Take the token before anything is queued. An unset token means the session is stopping, so the
+	// request is refused rather than dropped into a queue the teardown is about to invalidate.
+	const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Sender);
+	if (!Token.IsSet())
 	{
 		return false;
 	}
@@ -495,7 +893,7 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 		}
 
 		// Queue the request; capture happens when the backbuffer is ready to present.
-		return FSpoutViewportSender::Get().QueueSend(SpoutName);
+		return FSpoutViewportSender::Get().QueueSend(Token);
 	}
 
 	FSpoutSendSource SendSource;
@@ -504,9 +902,11 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 		return false;
 	}
 
-	// The copy must run on the render thread to safely touch RHI resources.
+	// The copy must run on the render thread to safely touch RHI resources. The token travels with
+	// it so the Send/Close-in-one-frame case stays correct: the command checks the token before it
+	// creates a registry entry or registers the name.
 	ENQUEUE_RENDER_COMMAND(SpoutSenderCmd)(
-		[SpoutName, SendSource](FRHICommandListImmediate& RHICmdList)
+		[Token, SendSource](FRHICommandListImmediate& RHICmdList)
 		{
 			if (!SendSource.SourceRHI.IsValid())
 			{
@@ -515,7 +915,7 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 
 			// Single destination; the sender's own wrap cache is keyed to this source.
 			SendTextureOnRenderThread(
-				MakeArrayView(&SpoutName, 1),
+				MakeArrayView(&Token, 1),
 				SendSource.SourceRHI,
 				SendSource.bIsViewport,
 				RHICmdList,
@@ -528,16 +928,40 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 
 void FSpoutSender::Close(FName SpoutName)
 {
+	// Cancel first. Everything after this is cleanup of work that already exists; the cancel is what
+	// stops work that is queued but has not run from re-creating any of it. Scoped to the Sender
+	// role, so a Receiver with the same FName is untouched.
+	FSpoutSession::Get().CancelStream(SpoutName, ESpoutType::Sender);
+
+	// Drop the name from the viewport queue, so a closed viewport sender is not published again at
+	// the next present.
+	const bool bWasPending = FSpoutViewportSender::Get().RemovePending(SpoutName);
+
 	// Registry is keyed by (Name, Type); Close must scope to the Sender entry only,
 	// leaving any Receiver entry with the same FName untouched.
-	if (FSpoutSenderRegistry::Get().Find(SpoutName, ESpoutType::Sender))
+	const bool bHadEntry = FSpoutSenderRegistry::Get().Find(SpoutName, ESpoutType::Sender).IsValid();
+	if (bHadEntry)
 	{
 		FSpoutSenderRegistry::Get().Remove(SpoutName, ESpoutType::Sender);
+	}
+
+	if (bHadEntry || bWasPending)
+	{
 		UE_LOG(LogSpoutPlugin, Log, TEXT("Closed Spout Sender: %s"), *SpoutName.ToString());
 	}
 }
 
-void FSpoutSender::Shutdown()
+void FSpoutSender::DetachProducers()
 {
-	FSpoutViewportSender::Get().Shutdown();
+	FSpoutViewportSender::Get().DetachProducer();
+}
+
+void FSpoutSender::ClearPendingWork()
+{
+	FSpoutViewportSender::Get().ClearPending();
+}
+
+void FSpoutSender::ReleaseNativeResources()
+{
+	FSpoutViewportSender::Get().ReleaseNativeResources();
 }

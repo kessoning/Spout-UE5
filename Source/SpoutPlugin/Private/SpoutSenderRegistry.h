@@ -6,6 +6,10 @@
 
 #include "CoreMinimal.h"
 #include "SpoutBPFunctionLibrary.h"
+#include "SpoutFormatPolicy.h"
+#include "SpoutFrameSync.h"
+#include "SpoutLogThrottle.h"
+#include "SpoutSenderRegistration.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -13,6 +17,21 @@
 #include <wrl/client.h>
 #include "Windows/HideWindowsPlatformTypes.h"
 #endif
+
+/**
+ * Forwards registration calls to the process-global Spout sender-name list.
+ *
+ * Each call takes the shared Spout mutex internally, so callers must already hold the owning
+ * entry's ResourceMutex and must not hold the Spout mutex themselves. That ordering (entry
+ * resource state, then the process-local Spout mutex) is the one the rest of the plugin uses.
+ */
+class FSpoutSdkSenderNameBackend final : public ISpoutSenderNameBackend
+{
+public:
+	virtual bool CreateSender(const ANSICHAR* Utf8Name, uint32 Width, uint32 Height, void* SharedHandle, uint32 Format) override;
+	virtual bool UpdateSender(const ANSICHAR* Utf8Name, uint32 Width, uint32 Height, void* SharedHandle, uint32 Format) override;
+	virtual void ReleaseSenderName(const ANSICHAR* Utf8Name) override;
+};
 
 class FSpoutSharedSender
 {
@@ -25,6 +44,20 @@ public:
 
 	// Spout sender/receiver identifier (shared across the registry).
 	FName Name;
+
+	/**
+	 * Null-terminated UTF-8 encoding of Name, produced once at construction by
+	 * SpoutValidation::ValidateName. Empty when the name failed validation, which is what keeps an
+	 * unusable name from ever reaching the Spout SDK. Read-only after construction.
+	 */
+	TArray<ANSICHAR> Utf8Name;
+
+	/** True when Utf8Name is a usable, correctly terminated encoding. */
+	bool HasValidName() const { return Utf8Name.Num() > 1; }
+
+	/** Utf8Name as a C string, or an empty string when the name is invalid. */
+	const ANSICHAR* GetUtf8Name() const { return HasValidName() ? Utf8Name.GetData() : ""; }
+
 	uint32 Width = 0;
 	uint32 Height = 0;
 	// DXGI format of the shared texture (sender role). Part of the recreate identity together
@@ -33,7 +66,36 @@ public:
 	DXGI_FORMAT SharedFormat = DXGI_FORMAT_UNKNOWN;
 	// Distinguishes sender vs receiver ownership semantics.
 	ESpoutType Type = ESpoutType::Sender;
-	bool bRegistered = false;
+
+	/**
+	 * Sender role only: explicit registration state.
+	 *
+	 * Registration is tracked here rather than inferred from SharedTexture being non-null, because
+	 * a live texture says nothing about whether Spout accepted the name. Guarded by ResourceMutex.
+	 */
+	FSpoutSenderRegistration Registration;
+
+	/**
+	 * This stream's half of the Spout access-mutex and frame-count protocol.
+	 *
+	 * One per entry, not one per process: the access mutex, the frame semaphore and the receiver's
+	 * last-seen frame count are all per sender NAME. Opened lazily -- senders open it once the name
+	 * is registered and the shared texture exists, receivers once the sender's shared handle has
+	 * been opened -- and closed by ReleaseResources.
+	 *
+	 * Self-synchronising, so it is deliberately NOT guarded by ResourceMutex; see the lock order in
+	 * SpoutFrameSync.h.
+	 */
+	FSpoutFrameSync FrameSync;
+
+	/**
+	 * Rate limiter for the "another process is holding this texture" diagnostic.
+	 *
+	 * Separate from the registration limiter: a contended texture is a per-frame condition on a
+	 * stream that is otherwise completely healthy, and folding it into the registration limiter
+	 * would let contention hide a registration failure or the other way round.
+	 */
+	FSpoutLogThrottle AccessLogThrottle;
 
 	// Shared DX11 texture exposed to other Spout clients (senders only).
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> SharedTexture;
@@ -42,9 +104,17 @@ public:
 	// CPU-readable staging texture for receiver readback.
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> StagingTexture;
 
-	// Receiver role only: pixel format of the optional output render target the last mismatch was
-	// reported for, so the warning is logged on change instead of every frame. Game thread only.
-	EPixelFormat WarnedOutputFormat = PF_Unknown;
+	/**
+	 * Receiver role only: the last reported compatibility status of the optional output render
+	 * target, so a persistent mismatch is logged when the situation changes rather than every
+	 * frame. Game thread only.
+	 */
+	SpoutFormatPolicy::EOutputTargetStatus LastOutputTargetStatus = SpoutFormatPolicy::EOutputTargetStatus::Compatible;
+
+	/** Rate limiters for the per-frame failure diagnostics on this stream. */
+	FSpoutLogThrottle OutputTargetLogThrottle;
+	FSpoutLogThrottle RegistrationLogThrottle;
+	FSpoutLogThrottle FormatLogThrottle;
 
 	// Cached D3D11 wrapper for a D3D12 resource.
 	// - Sender role: wraps the source UE RHI texture (state = COPY_SOURCE).
@@ -72,12 +142,25 @@ public:
 	// sharing (and corrupting) the same FSpoutSharedSender instance.
 	TSharedPtr<FSpoutSharedSender> FindOrAdd(const FName& Name, ESpoutType Type);
 	TSharedPtr<FSpoutSharedSender> Find(const FName& Name, ESpoutType Type);
+
+	/**
+	 * Drops one entry.
+	 *
+	 * The entry destructs after the registry mutex is released, so ~FSpoutSharedSender takes the
+	 * entry's resource mutex and the process-local Spout mutex without the registry mutex still
+	 * held.
+	 */
 	void Remove(const FName& Name, ESpoutType Type);
+
+	/** Drops every entry, with the same deferred-destruction property as Remove. */
 	void Clear();
+
+	/** Live entry count. Diagnostics and teardown assertions. */
+	int32 Num() const;
 
 private:
 	// Keyed by (Name, Type) so senders and receivers with the same FName coexist.
 	TMap<TPair<FName, ESpoutType>, TSharedPtr<FSpoutSharedSender>> Senders;
 	// Protects registry mutations across threads.
-	FCriticalSection Mutex;
+	mutable FCriticalSection Mutex;
 };

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "SpoutRHIState.h"
 #include "Templates/RefCounting.h"
 
 #if PLATFORM_WINDOWS
@@ -36,8 +37,15 @@ private:
 	TArray<TRefCountPtr<ID3D11Resource>, TInlineAllocator<2>> WrappedResources;
 };
 
-// Wraps a D3D12 resource so it can be used by Spout's D3D11 path.
-Microsoft::WRL::ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, D3D12_RESOURCE_STATES State);
+/**
+ * Wraps a D3D12 resource so it can be used by Spout's D3D11 path.
+ *
+ * Takes the state as SpoutRHIState::EWrapState rather than a raw D3D12_RESOURCE_STATES so a call
+ * site cannot invent one: AcquireWrappedResources requires the resource to already be in the state
+ * declared here, which means it has to agree with the ERHIAccess the caller transitioned it to.
+ * Routing both through SpoutRHIState::GetCopyBracket is what keeps them from drifting apart.
+ */
+Microsoft::WRL::ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, SpoutRHIState::EWrapState State);
 
 /**
  * Small bounded cache of D3D11-on-12 wraps, keyed by the native D3D12 resource.
@@ -57,7 +65,7 @@ class FSpoutWrapCache
 {
 public:
 	// Returns the cached wrap for Resource, creating it on first use. Null if wrapping fails.
-	Microsoft::WRL::ComPtr<ID3D11Texture2D> GetOrCreate(ID3D12Resource* Resource, D3D12_RESOURCE_STATES State);
+	Microsoft::WRL::ComPtr<ID3D11Texture2D> GetOrCreate(ID3D12Resource* Resource, SpoutRHIState::EWrapState State);
 
 	// Drops every cached wrap, releasing the references they hold.
 	void Reset();

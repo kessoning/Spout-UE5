@@ -7,7 +7,18 @@
 
 using Microsoft::WRL::ComPtr;
 
-ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, D3D12_RESOURCE_STATES State)
+namespace
+{
+	/** The single translation from the plugin's state contract to D3D12's own enumeration. */
+	D3D12_RESOURCE_STATES ToD3D12ResourceState(SpoutRHIState::EWrapState State)
+	{
+		return State == SpoutRHIState::EWrapState::CopySource
+			? D3D12_RESOURCE_STATE_COPY_SOURCE
+			: D3D12_RESOURCE_STATE_COPY_DEST;
+	}
+}
+
+ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, SpoutRHIState::EWrapState State)
 {
 	if (!Resource)
 	{
@@ -31,12 +42,20 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, D3D12_RESOUR
 	}
 
 	// Wrap the resource so the D3D11 immediate context can copy into/out of it.
+	//
+	// InState and OutState are deliberately the same value. AcquireWrappedResources transitions the
+	// resource INTO InState and requires it to already be there; ReleaseWrappedResources transitions
+	// it back to OutState. The caller brackets the wrap with a UE transition into the matching
+	// ERHIAccess and back out of it again, so making the two states identical is what lets UE's own
+	// state tracking stay true across the acquire/release pair. Both come from
+	// SpoutRHIState::GetCopyBracket, so they cannot disagree.
+	const D3D12_RESOURCE_STATES NativeState = ToD3D12ResourceState(State);
 	ComPtr<ID3D11Resource> WrappedResource;
 	HRESULT hr = D3D11On12->CreateWrappedResource(
 		Resource,
 		&Flags,
-		State,
-		State,
+		NativeState,
+		NativeState,
 		IID_PPV_ARGS(WrappedResource.GetAddressOf())
 	);
 
@@ -50,7 +69,7 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, D3D12_RESOUR
 	return Result;
 }
 
-ComPtr<ID3D11Texture2D> FSpoutWrapCache::GetOrCreate(ID3D12Resource* Resource, D3D12_RESOURCE_STATES State)
+ComPtr<ID3D11Texture2D> FSpoutWrapCache::GetOrCreate(ID3D12Resource* Resource, SpoutRHIState::EWrapState State)
 {
 	if (!Resource)
 	{

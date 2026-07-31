@@ -29,7 +29,7 @@ void FSpoutD3DContext::InitializeIfNeeded()
 void FSpoutD3DContext::Initialize()
 {
 #if PLATFORM_WINDOWS
-	// Spout uses D3D11 interop; in UE5 we bridge via D3D11-on-12.
+	// Spout uses D3D11 interop; in UE5 the plugin bridges via D3D11-on-12.
 	if (!GDynamicRHI || GDynamicRHI->GetInterfaceType() != ERHIInterfaceType::D3D12)
 	{
 		UE_LOG(LogSpoutPlugin, Error, TEXT("SpoutPlugin requires DX12 RHI."));

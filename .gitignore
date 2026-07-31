@@ -1,26 +1,51 @@
-Docs/2026-06-05-SpoutPlugin-User-Manual.pdf
-Docs/BLUEPRINT_API.md
-Docs/build_user_manual.py
-Docs/CHANGELOG.md
-Docs/INSTALLATION.md
-Docs/LIMITATIONS.md
-Docs/manual_screenshots/README.md
-Docs/PACKAGING_AND_DISTRIBUTION.md
-Docs/QUICK_START.md
-Docs/RECEIVER.md
-Docs/RENDER_TARGETS_AND_FORMATS.md
-Docs/SCENECAPTURE2D.md
-Docs/SCREENSHOT_CHECKLIST.md
-Docs/SENDER.md
-Docs/spout_web/assets/spout-app.js
-Docs/spout_web/assets/spout-components.js
-Docs/spout_web/assets/spout-data.js
-Docs/spout_web/assets/spout-hero.css
-Docs/spout_web/assets/spout-icons.js
-Docs/spout_web/assets/spout-render-a.js
-Docs/spout_web/assets/spout-render-b.js
-Docs/spout_web/assets/spout.css
-Docs/spout_web/CLAUDE.md
-Docs/spout_web/index.html
-Docs/TROUBLESHOOTING.md
-Docs/USER_MANUAL_SOURCE.md
+# -------------------------------------------------------------------------------------------------
+# What is deliberately NOT ignored here.
+#
+# Authoritative documentation SOURCE is tracked: the Markdown documents, the manual generator and
+# the website sources all live in the repository. Ignoring them would mean a fresh clone produced a
+# plugin with no manual, no API reference and no installation guide, and nobody could check the
+# shipped documentation against the commit it came from.
+#
+# Only genuinely generated or machine-local output is ignored, and each entry below says which it
+# is. Scripts/Validate-Documentation.ps1 covers the half that ignore rules cannot: keeping the
+# documentation in agreement with the implementation.
+# -------------------------------------------------------------------------------------------------
+
+# --- Generated documentation output ---------------------------------------------------------------
+# Regenerated at release time from the tracked sources beside them
+# (Docs/USER_MANUAL_SOURCE.md + Docs/build_user_manual.py). The release manifest records their
+# hashes; Validate-Documentation.ps1 fails the release when the rendered PDF is older than its
+# inputs.
+Docs/*.pdf
+
+# --- Release validation evidence --------------------------------------------------------------------
+# Build logs, packaged-host smoke results, performance JSON, traces and manifests. Reproducible by
+# re-running the pipeline, and deliberately kept out of the plugin release archive.
+Artifacts/
+
+# --- Unreal build output ---------------------------------------------------------------------------
+# Note that BuildPlugin PRODUCES an Intermediate/Build tree inside its package output, and that one
+# IS shipped: it carries the precompiled metadata Blueprint-only users need in order to package
+# without a compiler. This entry is about the working tree, not the archive.
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+Tests/*/Binaries/
+Tests/*/Intermediate/
+Tests/*/Saved/
+Tests/*/DerivedDataCache/
+
+# --- Release artefacts -----------------------------------------------------------------------------
+*.zip
+release-manifest-*.json
+
+# --- IDE and OS ------------------------------------------------------------------------------------
+.vs/
+*.sln
+*.suo
+*.user
+*.VC.db
+*.opendb
+Thumbs.db
+desktop.ini

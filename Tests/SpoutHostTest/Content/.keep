@@ -1,0 +1,9 @@
+This project deliberately ships no content assets.
+
+Both maps used by the smoke sequence (/Engine/Maps/Entry and
+/Engine/Maps/Templates/Template_Default) are engine content, present and byte-identical on every
+engine in the supported matrix. Authoring project .umap assets instead would put binary blobs into
+the release-validation path that cannot be reviewed, diffed or regenerated from tracked text -
+which is exactly what the clean-source-copy reproducibility check exists to prevent.
+
+Unreal requires this directory to exist; this file is what keeps it in the tree.
