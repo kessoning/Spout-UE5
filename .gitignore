@@ -49,3 +49,5 @@ release-manifest-*.json
 *.opendb
 Thumbs.db
 desktop.ini
+
+**/.claude/settings.local.json
