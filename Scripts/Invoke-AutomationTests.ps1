@@ -46,7 +46,13 @@ param(
 
     # Retries reserved for the machine-wide UnrealBuildTool mutex, which is an environmental
     # conflict rather than a plugin failure. Recorded separately in the manifest.
-    [int] $MutexRetries = 2
+    [int] $MutexRetries = 3,
+
+    # How long to wait for ANOTHER build to release UnrealBuildTool's machine-global state before
+    # attempting anyway. Sized for a foreign build rather than for this pipeline racing itself: an
+    # unrelated Unreal build on the same machine can hold that state for many minutes, and waiting
+    # it out costs nothing on an idle machine.
+    [int] $BuildToolWaitSeconds = 1800
 )
 
 Set-StrictMode -Version Latest
@@ -263,11 +269,11 @@ foreach ($version in $EngineVersions)
         # after its tests report completion; a build started inside that window dies instantly, and
         # every remaining engine in the matrix dies with it. Waiting is not a retry - it prevents the
         # conflict rather than classifying one after the fact.
-        $settled = Wait-TrackDBuildToolIdle -TimeoutSeconds 300
+        $settled = Wait-TrackDBuildToolIdle -TimeoutSeconds $BuildToolWaitSeconds
         if ($settled -gt 0)
         {
             $row.BuildToolWaitSeconds += $settled
-            Write-TrackDStep "waited ${settled}s for the previous build tool to release the shared UnrealBuildTool log"
+            Write-TrackDStep "waited ${settled}s for another build to release the shared UnrealBuildTool state"
         }
 
         Write-TrackDStep "Building editor target (attempt $attempt)"
@@ -281,8 +287,8 @@ foreach ($version in $EngineVersions)
         if ((Test-TrackDLogForBuildMutex $buildLog) -and $row.MutexRetries -lt $MutexRetries)
         {
             $row.MutexRetries++
-            Write-TrackDWarn "UnrealBuildTool contention; waiting for the other instance to finish"
-            [void] (Wait-TrackDBuildToolIdle -TimeoutSeconds 300 -PollSeconds 10)
+            Write-TrackDWarn "UnrealBuildTool contention; waiting for the other build to finish"
+            [void] (Wait-TrackDBuildToolIdle -TimeoutSeconds $BuildToolWaitSeconds -PollSeconds 10)
             continue
         }
 

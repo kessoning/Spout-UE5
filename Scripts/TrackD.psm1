@@ -384,46 +384,88 @@ function Test-TrackDUnrealBuildToolBusy
     return $false
 }
 
-function Test-TrackDBuildToolLogBusy
+function Get-TrackDBuildToolStatePaths
 {
     <#
     .SYNOPSIS
-        True while another process still holds the machine-global UnrealBuildTool log open.
+        The machine-global files UnrealBuildTool rewrites on startup, shared by every engine.
 
     .DESCRIPTION
-        Before UBT does anything else - before the mutex, before reading any argument - it rotates
-        one shared log file, %LOCALAPPDATA%\UnrealBuildTool\Log.txt, by renaming it to Log-backup.txt.
-        That file is global to the machine, not per engine and not per project. If any process still
-        holds it, the rename throws and UBT dies with an unhandled IOException from
-        EpicGames.Core.Log.BackupLogFile, having printed nothing about mutexes at all.
+        Neither of these is per engine or per project, which is the entire problem. Two engines
+        built back to back contend on the same two things:
 
-        This is what a departing Unreal editor does to the next engine's build for a few seconds
-        after its tests finish, and it is how a matrix run engine by engine can fail several engines
-        within seconds and then recover on its own.
+          %LOCALAPPDATA%\UnrealBuildTool\Log.txt
+              Rotated to Log-backup.txt before UBT reads a single argument.
 
-        Probing the file for an exclusive handle tests the actual contended resource rather than
-        guessing at process names. Read-only: the handle is opened and immediately closed.
+          %LOCALAPPDATA%\UnrealEngine\Intermediate\Build\BuildRules\*.dll
+              The compiled plugin/marketplace rules assembly. Each engine version compiles a
+              DIFFERENT assembly to this ONE path, so every engine rebuilds it, and a previous
+              UBT that still has it loaded holds a lock on it.
     #>
-    param([string] $Path = (Join-Path $env:LOCALAPPDATA 'UnrealBuildTool\Log.txt'))
 
-    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $paths = New-Object System.Collections.ArrayList
 
-    $stream = $null
-    try
+    $localAppData = $env:LOCALAPPDATA
+    if ([string]::IsNullOrWhiteSpace($localAppData)) { return ,([string[]] @()) }
+
+    [void] $paths.Add((Join-Path $localAppData 'UnrealBuildTool\Log.txt'))
+
+    $rulesDir = Join-Path $localAppData 'UnrealEngine\Intermediate\Build\BuildRules'
+    if (Test-Path -LiteralPath $rulesDir -PathType Container)
     {
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        return $false
+        foreach ($dll in (Get-ChildItem -LiteralPath $rulesDir -File -Filter '*.dll' -ErrorAction SilentlyContinue))
+        {
+            [void] $paths.Add($dll.FullName)
+        }
     }
-    catch
+
+    return ,([string[]] $paths.ToArray())
+}
+
+function Test-TrackDBuildToolStateBusy
+{
+    <#
+    .SYNOPSIS
+        True while another process still holds UnrealBuildTool's machine-global state open.
+
+    .DESCRIPTION
+        Probes the contended files themselves for an exclusive handle rather than guessing at
+        process names, because the holder is not always a process you would think to look for: a
+        departing Unreal editor holds the shared log for a few seconds after its tests report
+        complete, and a departing UBT holds the rules assembly it loaded.
+
+        That is how a matrix can fail several engines within seconds and then recover on its own,
+        with each failure an unhandled IOException that says nothing about mutexes at all.
+
+        Read-only: each handle is opened and immediately closed. A path that does not exist is not
+        contention - on a machine that has never run UBT there is nothing to rotate.
+    #>
+    param([string[]] $Path)
+
+    if (-not $PSBoundParameters.ContainsKey('Path')) { $Path = Get-TrackDBuildToolStatePaths }
+
+    foreach ($candidate in $Path)
     {
-        return $true
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+
+        $stream = $null
+        try
+        {
+            $stream = [System.IO.File]::Open($candidate, [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        }
+        catch
+        {
+            return $true
+        }
+        finally
+        {
+            if ($stream) { $stream.Dispose() }
+        }
     }
-    finally
-    {
-        if ($stream) { $stream.Dispose() }
-    }
+
+    return $false
 }
 
 function Wait-TrackDBuildToolIdle
@@ -450,7 +492,7 @@ function Wait-TrackDBuildToolIdle
     $waited = 0
     while ($waited -lt $TimeoutSeconds)
     {
-        if (-not (Test-TrackDUnrealBuildToolBusy) -and -not (Test-TrackDBuildToolLogBusy)) { break }
+        if (-not (Test-TrackDUnrealBuildToolBusy) -and -not (Test-TrackDBuildToolStateBusy)) { break }
         Start-Sleep -Seconds $PollSeconds
         $waited += $PollSeconds
     }
@@ -487,10 +529,19 @@ function Test-TrackDLogForBuildMutex
         return $true
     }
 
-    # The -waitmutex form. Narrow deliberately: an IOException anywhere else in a build is a real
-    # failure, so both the exception and the log-rotation frame that raised it must be present.
-    return (($text -match 'System\.IO\.IOException') -and
-            ($text -match 'Log\.BackupLogFile' -or $text -match 'Log\.AddFileWriter'))
+    # The two "shared state was locked" forms. Narrow deliberately: an IOException anywhere else in
+    # a build is a real failure, so the exception must appear together with the specific frame or
+    # path that identifies the contended machine-global file.
+    #
+    #   Log.BackupLogFile / Log.AddFileWriter   %LOCALAPPDATA%\UnrealBuildTool\Log.txt
+    #   BuildRules\...Rules.dll                 the shared compiled rules assembly, which each
+    #                                           engine version rebuilds to the same one path
+    if ($text -notmatch 'System\.IO\.IOException') { return $false }
+
+    return ($text -match 'Log\.BackupLogFile' -or
+            $text -match 'Log\.AddFileWriter' -or
+            $text -match 'Intermediate[\\/]Build[\\/]BuildRules' -or
+            $text -match 'DynamicCompilation\.CompileAssembly')
 }
 
 function Test-TrackDLogForResourceExhaustion
@@ -1699,8 +1750,20 @@ Unhandled exception: System.IO.IOException: The process cannot access the file b
    at EpicGames.Core.Log.AddFileWriter(String name, FileReference outputFile) in D:\UE\UE_5.4\Engine\Source\Programs\Shared\EpicGames.Core\Log.cs:line 272
 '@
 
+    # Verbatim from a UE 5.4 BuildPlugin log. A different shared file from the one above,
+    # contended the same way by the previous engine's UnrealBuildTool.
+    $sharedRulesAssembly = @'
+Running: dotnet "UnrealBuildTool.dll" UnrealEditor Win64 Development -plugin="SpoutPlugin.uplugin"
+Total execution time: 0.54 seconds
+Unhandled exception: System.IO.IOException: The process cannot access the file 'C:\Users\x\AppData\Local\UnrealEngine\Intermediate\Build\BuildRules\MarketplaceRules.dll' because it is being used by another process.
+   at UnrealBuildTool.DynamicCompilation.CompileAssembly(FileReference OutputAssemblyPath, IEnumerable`1 SourceFileNames, ILogger Logger) in DynamicCompilation.cs:line 258
+   at UnrealBuildTool.RulesCompiler.CreateMarketplaceRulesAssembly(...) in RulesCompiler.cs:line 226
+AutomationTool exiting with ExitCode=6 (6)
+'@
+
     $classifierCases = @(
         @{ Name = 'waitmutex log rotation'; Text = $waitMutexLogRotation; Expect = $true }
+        @{ Name = 'shared rules assembly locked'; Text = $sharedRulesAssembly; Expect = $true }
         @{ Name = 'plain conflicting instance'
            Text = "A conflicting instance of UnrealBuildTool is already running.`nTook 0.29s to run dotnet.exe, ExitCode=6"
            Expect = $true }
@@ -1760,7 +1823,7 @@ Unhandled exception: System.IO.IOException: The process cannot access the file b
         # timeout before every single build.
         $freeProbe = Join-Path $probeRoot 'free.log'
         Set-Content -LiteralPath $freeProbe -Value 'not held by anyone' -Encoding UTF8
-        if (Test-TrackDBuildToolLogBusy -Path $freeProbe)
+        if (Test-TrackDBuildToolStateBusy -Path $freeProbe)
         {
             [void] $problems.Add('an unlocked log file was reported as busy')
         }
@@ -1773,7 +1836,7 @@ Unhandled exception: System.IO.IOException: The process cannot access the file b
             [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         try
         {
-            if (-not (Test-TrackDBuildToolLogBusy -Path $heldProbe))
+            if (-not (Test-TrackDBuildToolStateBusy -Path $heldProbe))
             {
                 [void] $problems.Add('a locked log file was reported as free')
             }
@@ -1785,9 +1848,34 @@ Unhandled exception: System.IO.IOException: The process cannot access the file b
 
         # A path that does not exist yet is not contention either: on a machine that has never run
         # UBT there is no log to rotate.
-        if (Test-TrackDBuildToolLogBusy -Path (Join-Path $probeRoot 'no-such-file.log'))
+        if (Test-TrackDBuildToolStateBusy -Path (Join-Path $probeRoot 'no-such-file.log'))
         {
             [void] $problems.Add('a missing log file was reported as busy')
+        }
+
+        # One locked file among several must still read as busy: the probe covers a set of shared
+        # paths, and a loop that stopped at the first readable one would miss the locked rules
+        # assembly entirely.
+        $setProbe = @((Join-Path $probeRoot 'free.log'), (Join-Path $probeRoot 'held.log'))
+        $handle2 = [System.IO.File]::Open((Join-Path $probeRoot 'held.log'), [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        try
+        {
+            if (-not (Test-TrackDBuildToolStateBusy -Path $setProbe))
+            {
+                [void] $problems.Add('a locked file later in the probe set was not detected')
+            }
+        }
+        finally
+        {
+            $handle2.Dispose()
+        }
+
+        # The real path set must at least name the UBT log, or the settle probes nothing.
+        $statePaths = Get-TrackDBuildToolStatePaths
+        if (-not (@($statePaths) -match 'UnrealBuildTool'))
+        {
+            [void] $problems.Add('the shared build-tool state path set does not include the UnrealBuildTool log')
         }
     }
     catch
@@ -1844,7 +1932,8 @@ Export-ModuleMember -Function @(
     'Resolve-TrackDEnginePath',
     'Get-TrackDEngineFacts',
     'Test-TrackDUnrealBuildToolBusy',
-    'Test-TrackDBuildToolLogBusy',
+    'Get-TrackDBuildToolStatePaths',
+    'Test-TrackDBuildToolStateBusy',
     'Wait-TrackDBuildToolIdle',
     'Test-TrackDLogForBuildMutex',
     'Test-TrackDLogForResourceExhaustion',

@@ -277,6 +277,118 @@ function Resolve-EnginePath
 }
 
 # Best-effort engine build identity, for the manifest. Absent on some installs, which is not fatal.
+function Wait-BuildToolStateFree
+{
+    <#
+    .SYNOPSIS
+        Waits until UnrealBuildTool's machine-global state is free. Returns the seconds waited.
+
+    .DESCRIPTION
+        UBT keeps mutable state that is shared by EVERY engine version, not one copy per engine:
+
+          %LOCALAPPDATA%\UnrealBuildTool\Log.txt
+              Rotated to Log-backup.txt before UBT reads a single argument.
+
+          %LOCALAPPDATA%\UnrealEngine\Intermediate\Build\BuildRules\*.dll
+              The compiled plugin rules assembly. Every engine version compiles a different
+              assembly to this same path, so each one rebuilds it.
+
+        A matrix release builds engines back to back, and the previous engine's UBT can still hold
+        both for several seconds after its log says it finished. The next engine then dies with an
+        unhandled IOException in under a second, having compiled nothing - a failure that looks
+        alarming, says nothing about the plugin, and disappears on a re-run.
+
+        Waiting is deliberately dumb and safe: it probes the contended files for an exclusive handle
+        rather than guessing at process names, it never kills anything, and on timeout the build is
+        attempted anyway so a genuinely stuck machine still produces a real failure with a real log.
+
+        Self-contained on purpose. build.ps1 is a release input and must run on a machine that has
+        only the plugin repository, with no dependency on the shared validation module.
+    #>
+    param(
+        # Sized for an unrelated build rather than for this script racing itself: another Unreal
+        # build on the same machine can hold the shared state for many minutes. Waiting costs
+        # nothing when nothing else is building.
+        [int] $TimeoutSeconds = 1800,
+        [int] $PollSeconds = 5
+    )
+
+    $localAppData = $env:LOCALAPPDATA
+    if ([string]::IsNullOrWhiteSpace($localAppData)) { return 0 }
+
+    $rulesDir = Join-Path $localAppData 'UnrealEngine\Intermediate\Build\BuildRules'
+
+    $waited = 0
+    while ($waited -lt $TimeoutSeconds)
+    {
+        $paths = @(Join-Path $localAppData 'UnrealBuildTool\Log.txt')
+        if (Test-Path -LiteralPath $rulesDir -PathType Container)
+        {
+            $paths += @(Get-ChildItem -LiteralPath $rulesDir -File -Filter '*.dll' -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName })
+        }
+
+        $busy = $false
+        foreach ($path in $paths)
+        {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            $stream = $null
+            try
+            {
+                $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            }
+            catch
+            {
+                $busy = $true
+            }
+            finally
+            {
+                if ($stream) { $stream.Dispose() }
+            }
+            if ($busy) { break }
+        }
+
+        if (-not $busy) { break }
+        Start-Sleep -Seconds $PollSeconds
+        $waited += $PollSeconds
+    }
+
+    return $waited
+}
+
+function Test-BuildToolContention
+{
+    <#
+    .SYNOPSIS
+        True when a UAT log shows shared build-tool state contention rather than a real failure.
+
+    .DESCRIPTION
+        Narrow on purpose. An IOException on its own is not enough - a full disk raises one too, and
+        that is a real failure that must not be retried. The exception has to appear together with
+        the frame or path that names one of the machine-global files described in
+        Wait-BuildToolStateFree.
+    #>
+    param([string] $LogPath)
+
+    if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) { return $false }
+    $text = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+    if (-not $text) { return $false }
+
+    if ($text -match 'conflicting instance' -or
+        $text -match 'Another instance of UnrealBuildTool is already running')
+    {
+        return $true
+    }
+
+    if ($text -notmatch 'System\.IO\.IOException') { return $false }
+
+    return ($text -match 'Log\.BackupLogFile' -or
+            $text -match 'Log\.AddFileWriter' -or
+            $text -match 'Intermediate[\\/]Build[\\/]BuildRules' -or
+            $text -match 'DynamicCompilation\.CompileAssembly')
+}
+
 function Get-EngineBuildId
 {
     param([string] $EnginePath)
@@ -895,6 +1007,7 @@ try
             TargetConfigurations = $TargetConfigurations
             UatCommand           = $null
             UatExitCode          = $null
+            UatAttempts          = 0
             UatLogPath           = $uatLog
             EngineLogDirectory   = $null
             Artifacts            = @()
@@ -934,18 +1047,47 @@ try
             Write-Step "Running: $($engineResult.UatCommand)"
             Write-Step "Log    : $uatLog"
 
-            # Tee so the log is retained and the console still shows progress. $LASTEXITCODE is
-            # captured immediately: a nonzero UAT status is a release failure, not a warning.
-            & $engine.RunUAT @uatArgs 2>&1 | Tee-Object -FilePath $uatLog | Out-Null
-            $uatExit = $LASTEXITCODE
+            $uatExit = $null
+            $attempt = 0
+            while ($true)
+            {
+                $attempt++
+
+                # Settle BEFORE building. Engines are built one after another and the previous
+                # engine's UnrealBuildTool can still hold the shared rules assembly and log for a
+                # few seconds after it reports success, which kills this engine in under a second.
+                $settled = Wait-BuildToolStateFree
+                if ($settled -gt 0)
+                {
+                    Write-Step "Waited ${settled}s for the previous engine's UnrealBuildTool to release its shared state"
+                }
+
+                # Tee so the log is retained and the console still shows progress. $LASTEXITCODE is
+                # captured immediately: a nonzero UAT status is a release failure, not a warning.
+                & $engine.RunUAT @uatArgs 2>&1 | Tee-Object -FilePath $uatLog | Out-Null
+                $uatExit = $LASTEXITCODE
+
+                if ($uatExit -eq 0) { break }
+
+                # Contention is retried; anything else fails the release on its first attempt.
+                if ($attempt -le 3 -and (Test-BuildToolContention $uatLog))
+                {
+                    Write-Step "UE $version : shared UnrealBuildTool state was locked by another build; retrying"
+                    continue
+                }
+
+                break
+            }
+
             $engineResult.UatExitCode = $uatExit
+            $engineResult.UatAttempts = $attempt
 
             if ($uatExit -ne 0)
             {
                 [void] $script:EngineResults.Add($engineResult)
                 Fail "UE $version : RunUAT BuildPlugin failed with exit code $uatExit. See $uatLog"
             }
-            Write-Good "UAT exit code 0"
+            Write-Good "UAT exit code 0$(if ($attempt -gt 1) { " (attempt $attempt; earlier attempts hit shared build-tool contention)" })"
 
             if ($KeepLogs)
             {

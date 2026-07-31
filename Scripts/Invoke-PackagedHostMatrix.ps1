@@ -63,7 +63,13 @@ param(
     [int] $PackageTimeoutSeconds = 5400,
     [int] $LaunchTimeoutSeconds = 900,
 
-    [int] $MutexRetries = 2,
+    [int] $MutexRetries = 3,
+
+    # How long to wait for ANOTHER build to release UnrealBuildTool's machine-global state before
+    # attempting anyway. Sized for a foreign build rather than for this pipeline racing itself: an
+    # unrelated Unreal build on the same machine can hold that state for many minutes, and waiting
+    # it out costs nothing on an idle machine.
+    [int] $BuildToolWaitSeconds = 1800,
 
     # Retries reserved for the compiler running out of memory on a busy machine. Environmental,
     # like the mutex, and counted separately from it in the manifest.
@@ -231,6 +237,7 @@ foreach ($version in $EngineVersions)
             UatDurationSeconds  = $null
             MutexRetries        = 0
             ResourceRetries     = 0
+            BuildToolWaitSeconds = 0
             ExecutablePath      = $null
             ExecutableSha256    = $null
             PluginDescriptorStaged = $null
@@ -315,6 +322,16 @@ foreach ($version in $EngineVersions)
         $uatResult = $null
         while ($true)
         {
+            # Settle before packaging. Rows run back to back, and an unrelated Unreal build may also be
+            # running on the machine; either way, a row started while another process holds
+            # UnrealBuildTool's machine-global state fails almost at once, having compiled nothing.
+            $settled = Wait-TrackDBuildToolIdle -TimeoutSeconds $BuildToolWaitSeconds
+            if ($settled -gt 0)
+            {
+                $row.BuildToolWaitSeconds += $settled
+                Write-TrackDStep "waited ${settled}s for another build to release the shared UnrealBuildTool state"
+            }
+
             $uatResult = Invoke-TrackDProcess -FilePath $engine.RunUAT -ArgumentList $uatArgs `
                 -StdOutPath $uatLog -TimeoutSeconds $PackageTimeoutSeconds -WorkingDirectory $WorkRoot
 
@@ -326,13 +343,8 @@ foreach ($version in $EngineVersions)
             if ((Test-TrackDLogForBuildMutex $uatLog) -and $row.MutexRetries -lt $MutexRetries)
             {
                 $row.MutexRetries++
-                Write-TrackDWarn "UnrealBuildTool mutex conflict; waiting for the other instance to finish"
-                $waited = 0
-                while ((Test-TrackDUnrealBuildToolBusy) -and $waited -lt 300)
-                {
-                    Start-Sleep -Seconds 10
-                    $waited += 10
-                }
+                Write-TrackDWarn "UnrealBuildTool contention; waiting for the other build to finish"
+                [void] (Wait-TrackDBuildToolIdle -TimeoutSeconds $BuildToolWaitSeconds -PollSeconds 10)
                 continue
             }
 

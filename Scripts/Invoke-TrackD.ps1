@@ -59,6 +59,12 @@ param(
 
     [int] $LaunchRepeats = 3,
     [int] $PerformanceSeconds = 60,
+
+    # How long any stage waits for ANOTHER build to release UnrealBuildTool's machine-global state
+    # before attempting anyway. An unrelated Unreal build on the same machine can hold that state
+    # for many minutes; waiting costs nothing when nothing else is building.
+    [int] $BuildToolWaitSeconds = 1800,
+
     [switch] $Trace
 )
 
@@ -135,10 +141,10 @@ function Invoke-Stage
     # suite is enough. A build started inside that window dies before it reads its own arguments,
     # which is how a healthy matrix produces a wall of instant failures. Wait it out first; never
     # kill anything to make room.
-    $settled = Wait-TrackDBuildToolIdle -TimeoutSeconds 300
+    $settled = Wait-TrackDBuildToolIdle -TimeoutSeconds $BuildToolWaitSeconds
     if ($settled -gt 0)
     {
-        Write-TrackDStep "waited ${settled}s for the previous stage's build tools to exit"
+        Write-TrackDStep "waited ${settled}s for another build to release the shared UnrealBuildTool state"
     }
 
     $logPath = Join-Path $context.RunRoot ("stage-{0}.log" -f ($Name -replace '[^A-Za-z0-9]', '-'))
