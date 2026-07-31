@@ -229,6 +229,14 @@ else
     {
         [void] $selfTestProblems.Add("ReleaseSources.psd1 could not be loaded: $($_.Exception.Message)")
     }
+
+    # The rules that decide what counts as a release input, proved on a synthetic tree before an
+    # hour of packaging depends on them. Offline and deterministic: it asserts on the rules, not on
+    # whatever happens to be sitting in the working folder today.
+    foreach ($filterProblem in (Test-TrackDReleaseSourceFiltering -ManifestPath $sourceManifestPath))
+    {
+        [void] $selfTestProblems.Add("release-source filtering: $filterProblem")
+    }
 }
 
 # build.ps1 and build.bat are release inputs; their absence is a release failure, not a warning.
@@ -265,7 +273,7 @@ catch
 }
 
 foreach ($problem in $selfTestProblems) { Write-TrackDBad $problem }
-if ($selfTestProblems.Count -eq 0) { Write-TrackDGood "self-test passed ($($pipelineScripts.Count) scripts parsed, manifest schema valid)" }
+if ($selfTestProblems.Count -eq 0) { Write-TrackDGood "self-test passed ($($pipelineScripts.Count) scripts parsed, manifest schema valid, release-source filtering proved)" }
 
 [void] $stages.Add([ordered] @{
     Name = 'Self-test'

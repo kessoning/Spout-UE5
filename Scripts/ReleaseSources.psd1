@@ -45,8 +45,18 @@
         @{ Path = 'Docs/...';                    Category = 'docs';       Note = 'Audit, track reports and the documentation set the drift check reads.' }
     )
 
-    # Present in the working tree and deliberately NOT copied into a clean release copy. Listed so
-    # the exclusion is a decision on the record rather than an accident of the copy logic.
+    # Present in the working tree and deliberately NOT a release input. Applied during enumeration,
+    # so an excluded file is absent from the declared count, from the git-tracking comparison and
+    # from the clean copy alike - not merely swept out of the copy afterwards.
+    #
+    # Two kinds of entry live here, and the difference matters:
+    #
+    #   - Files that COULD be tracked but should not ship. Excluding them is a packaging decision.
+    #   - Files git is CONFIGURED to ignore, because they are generated or machine-local. These can
+    #     never become tracked, so declaring one as a required input asks for a commit that is
+    #     impossible to make. Each such entry mirrors a specific .gitignore line, quoted below, and
+    #     the two must stay in step: New-CleanSourceCopy.ps1 reports any declared input that git
+    #     ignores as a manifest error rather than letting it masquerade as a missing commit.
     Excluded = @(
         @{ Path = 'Artifacts/...';   Reason = 'Generated validation evidence. Must never reach a release archive.' }
         @{ Path = 'Binaries/...';    Reason = 'Build output.' }
@@ -55,8 +65,14 @@
         @{ Path = '.git/...';        Reason = 'Version-control metadata. The clean copy is built by file copy, never by a git checkout.' }
         @{ Path = '.vs/...';         Reason = 'IDE scratch.' }
         @{ Path = '.vscode/...';     Reason = 'IDE settings; not a release input.' }
-        @{ Path = 'CLAUDE.md';       Reason = 'Repository working instructions; not shipped.' }
+        @{ Path = 'CLAUDE.md';       Reason = 'Repository working instructions; not shipped. Root-anchored: Docs/spout_web/CLAUDE.md is tracked documentation source and remains an input.' }
         @{ Path = 'TRACK_A_*.md';    Reason = 'Track implementation records; internal.' }
         @{ Path = 'UPDATES_NOTES.md';Reason = 'Public-facing release notes, published separately from the plugin archive.' }
+
+        # --- git-ignored: generated or machine-local, so never trackable ---------------------------
+        @{ Path = 'Docs/*.pdf';
+           Reason = 'Generated documentation output, rebuilt from Docs/USER_MANUAL_SOURCE.md by Docs/build_user_manual.py. Mirrors .gitignore "Docs/*.pdf". Deliberately not recursive: a PDF nested deeper is not covered by that ignore rule either, so it would be an ordinary tracked input.' }
+        @{ Path = '**/.claude/settings.local.json';
+           Reason = 'Machine-local Claude configuration, at any depth. Mirrors .gitignore "**/.claude/settings.local.json". Only this one file is excluded - .claude directories and tracked CLAUDE.md instruction files are release inputs where they are tracked.' }
     )
 }

@@ -928,6 +928,645 @@ function Read-TrackDSmokeResult
 }
 
 # ---------------------------------------------------------------------------------------------
+# Release-source enumeration
+#
+# The clean-source check does three things with the declared release inputs: it counts them, it
+# compares them against `git ls-files`, and it copies them. All three must agree on what counts,
+# which is why the list below is produced once, filtered once, and shared by every stage.
+#
+# Running them as three passes does not work. If the manifest's Excluded list is consulted only
+# AFTER the copy is made, as a leak check, it cannot remove anything from the count or from the
+# git comparison, and a filter built from directory NAMES alone cannot express "generated output"
+# or "machine-local file". A broad 'Docs/...' declaration then sweeps up generated and ignored
+# files, declares them as required tracked inputs, and fails fresh-clone reproducibility for files
+# git is configured never to track.
+# ---------------------------------------------------------------------------------------------
+
+$script:ReleaseExcludedSegments = @('Binaries', 'Intermediate', 'Saved', 'DerivedDataCache', '.git', '.vs', 'Artifacts')
+
+$script:PathMatcherCache = @{}
+
+function Get-TrackDExcludedPathSegments
+{
+    <#
+    .SYNOPSIS
+        Directory names that are never a release input, at any depth.
+
+    .DESCRIPTION
+        Separate from the manifest's Excluded patterns, which are anchored at the repository root.
+        'Binaries/...' says nothing about Source/ThirdParty/Binaries; this list does, so a
+        'Source/...' declaration cannot sweep up a build tree that happens to be nested inside it.
+    #>
+    return ,([string[]] $script:ReleaseExcludedSegments)
+}
+
+function ConvertTo-TrackDPathRegex
+{
+    <#
+    .SYNOPSIS
+        Compiles one release-source pattern into an anchored regex.
+
+    .DESCRIPTION
+        The pattern vocabulary, all repository-relative and forward-slashed:
+
+            Dir/...   the directory and everything below it     Artifacts/...
+            **        zero or more leading directories          **/.claude/settings.local.json
+            *         any run of characters within one segment  Docs/*.pdf
+            ?         one character within one segment
+
+        '*' deliberately does not cross a '/', so 'Docs/*.pdf' means exactly what the identical
+        line in .gitignore means and nothing wider: a PDF sitting directly in Docs is generated
+        output, while a hypothetical Docs/sub/diagram.pdf is not covered by either rule and would
+        still have to be tracked like any other input.
+    #>
+    param([Parameter(Mandatory)][string] $Pattern)
+
+    $normalised = $Pattern.Replace('\', '/').Trim().TrimEnd('/')
+    if ($normalised.EndsWith('/...')) { $normalised = $normalised.Substring(0, $normalised.Length - 4) + '/**' }
+    elseif ($normalised -eq '...')    { $normalised = '**' }
+
+    $tokens = $normalised -split '/'
+    $builder = New-Object System.Text.StringBuilder
+    [void] $builder.Append('^')
+
+    for ($i = 0; $i -lt $tokens.Count; ++$i)
+    {
+        $token = $tokens[$i]
+        $isLast = ($i -eq ($tokens.Count - 1))
+
+        if ($token -eq '**')
+        {
+            if ($isLast)
+            {
+                # 'Docs/**' is every file BELOW Docs, so at least one more segment must follow.
+                [void] $builder.Append('.+')
+            }
+            else
+            {
+                # '**/x' matches x at the repository root as well as at any depth. The group carries
+                # its own trailing separator, so no separator is appended for this token.
+                [void] $builder.Append('(?:[^/]+/)*')
+                continue
+            }
+        }
+        else
+        {
+            # Regex.Escape turns * into \* and ? into \?; put the glob meaning back afterwards.
+            $escaped = [System.Text.RegularExpressions.Regex]::Escape($token)
+            $escaped = $escaped.Replace('\*', '[^/]*').Replace('\?', '[^/]')
+            [void] $builder.Append($escaped)
+        }
+
+        if (-not $isLast) { [void] $builder.Append('/') }
+    }
+
+    [void] $builder.Append('$')
+    return $builder.ToString()
+}
+
+function Test-TrackDPathMatchesPattern
+{
+    <#
+    .SYNOPSIS
+        Does one repository-relative path match one release-source pattern?
+
+    .DESCRIPTION
+        Case-insensitive, because Windows paths are, and because .gitignore is being mirrored on a
+        case-insensitive filesystem. Compiled matchers are cached: the enumeration tests every file
+        against every exclusion, and recompiling the same dozen patterns a few thousand times is
+        pure waste.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Path,
+        [Parameter(Mandatory)][string] $Pattern
+    )
+
+    if (-not $script:PathMatcherCache.ContainsKey($Pattern))
+    {
+        $options = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+                   [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+        $script:PathMatcherCache[$Pattern] =
+            [System.Text.RegularExpressions.Regex]::new((ConvertTo-TrackDPathRegex $Pattern), $options)
+    }
+
+    return $script:PathMatcherCache[$Pattern].IsMatch($Path.Replace('\', '/'))
+}
+
+function Get-TrackDPathExclusion
+{
+    <#
+    .SYNOPSIS
+        The exclusion that removes a path from the release inputs, or $null when none does.
+
+    .DESCRIPTION
+        Returns the rule that matched rather than a bare boolean, so a filtered file can be reported
+        with the reason it was filtered instead of silently disappearing from the manifest. A file
+        that vanishes without explanation is the same class of problem as one that is wrongly
+        required: neither can be checked by a reader.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Path,
+        [AllowEmptyCollection()][object[]] $Exclusions = @(),
+        [string[]] $Segments
+    )
+
+    if (-not $PSBoundParameters.ContainsKey('Segments')) { $Segments = Get-TrackDExcludedPathSegments }
+
+    $normalised = $Path.Replace('\', '/')
+
+    foreach ($segment in ($normalised -split '/'))
+    {
+        if ($Segments -contains $segment)
+        {
+            return [ordered] @{
+                Pattern = "<segment>/$segment"
+                Reason  = "'$segment' is build output, editor scratch or version-control metadata, at any depth."
+            }
+        }
+    }
+
+    foreach ($exclusion in $Exclusions)
+    {
+        if (-not $exclusion) { continue }
+        $pattern = [string] $exclusion.Path
+        if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+
+        if (Test-TrackDPathMatchesPattern -Path $normalised -Pattern $pattern)
+        {
+            $reason = if ($exclusion.Contains('Reason')) { [string] $exclusion.Reason } else { 'declared as an excluded input' }
+            return [ordered] @{ Pattern = $pattern; Reason = $reason }
+        }
+    }
+
+    return $null
+}
+
+function Expand-TrackDDeclaredPattern
+{
+    <#
+    .SYNOPSIS
+        Repository-relative paths matching one declared release-source pattern.
+
+    .DESCRIPTION
+        'Dir/...' means the directory and everything below it. Anything else is handed to the
+        filesystem as a literal path or a wildcard. -Force throughout, because a hidden file that
+        the release needs is still a release input and one that it must not ship is still something
+        the exclusion rules have to be given the chance to reject.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $RepoRoot,
+        [Parameter(Mandatory)][string] $Pattern
+    )
+
+    $prefix = $RepoRoot.TrimEnd('\')
+    $results = New-Object System.Collections.ArrayList
+
+    if ($Pattern.EndsWith('/...'))
+    {
+        $relativeDir = $Pattern.Substring(0, $Pattern.Length - 4)
+        $absoluteDir = Join-Path $prefix ($relativeDir -replace '/', '\')
+        if (Test-Path -LiteralPath $absoluteDir -PathType Container)
+        {
+            foreach ($file in (Get-ChildItem -LiteralPath $absoluteDir -Recurse -File -Force))
+            {
+                [void] $results.Add($file.FullName.Substring($prefix.Length).TrimStart('\').Replace('\', '/'))
+            }
+        }
+        return ,([string[]] $results.ToArray())
+    }
+
+    $absolute = Join-Path $prefix ($Pattern -replace '/', '\')
+    foreach ($file in (Get-ChildItem -Path $absolute -File -Force -ErrorAction SilentlyContinue))
+    {
+        [void] $results.Add($file.FullName.Substring($prefix.Length).TrimStart('\').Replace('\', '/'))
+    }
+    return ,([string[]] $results.ToArray())
+}
+
+function Get-TrackDIgnoredPaths
+{
+    <#
+    .SYNOPSIS
+        The subset of the given repository-relative paths that git is configured to ignore.
+
+    .DESCRIPTION
+        Read-only, and used to tell two very different failures apart.
+
+        A declared input that git has merely not been told about yet is a missing commit: commit it
+        and a fresh clone reproduces the release. A declared input that git is CONFIGURED to ignore
+        can never become tracked at all, so declaring it is a manifest error and no amount of
+        committing will fix it - which is exactly the failure that reads as "untracked release
+        input" and sends the reader off to commit generated output.
+
+        git check-ignore does not report tracked paths, so anything it names here is genuinely
+        unreachable from a clone.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $RepoRoot,
+        [AllowEmptyCollection()][string[]] $Paths = @()
+    )
+
+    if ($null -eq $Paths -or $Paths.Count -eq 0) { return ,([string[]] @()) }
+
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) { return ,([string[]] @()) }
+
+    $ignored = $Paths | & git -C $RepoRoot check-ignore --stdin 2>$null
+
+    # 0 = at least one path is ignored, 1 = none is, anything else means git could not answer and
+    # the diagnostic is simply unavailable. The untracked check below still fires either way.
+    if ($LASTEXITCODE -gt 1) { return ,([string[]] @()) }
+
+    return ,([string[]] @($ignored | Where-Object { $_ } | ForEach-Object { $_.Replace('\', '/') }))
+}
+
+function Get-TrackDDeclaredReleaseInputs
+{
+    <#
+    .SYNOPSIS
+        Expands the release-source manifest into the single list of declared release inputs.
+
+    .DESCRIPTION
+        Exclusions are applied HERE, during enumeration, which is what makes the count, the git
+        comparison and the clean copy agree with each other: all three read this one list.
+
+        Filtered files are returned rather than dropped, so the report can say what was excluded and
+        by which rule. -TrackedFiles is a parameter rather than an internal `git ls-files` call so
+        the self-test can drive this against a synthetic tree with a known tracking state.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $RepoRoot,
+        [Parameter(Mandatory)] $Manifest,
+        [AllowEmptyCollection()][string[]] $TrackedFiles,
+        [switch] $SkipHash
+    )
+
+    $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+
+    if (-not $PSBoundParameters.ContainsKey('TrackedFiles'))
+    {
+        $TrackedFiles = Get-TrackDTrackedFiles $RepoRoot
+    }
+
+    # Case-insensitive, because Windows paths are. Populated by Add rather than by the collection
+    # constructor: New-Object cannot bind the (IEnumerable, IEqualityComparer) overload cleanly.
+    $trackedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($tracked in $TrackedFiles) { [void] $trackedSet.Add($tracked.Replace('\', '/')) }
+
+    $exclusions = @()
+    if ($Manifest.Contains('Excluded') -and $Manifest['Excluded']) { $exclusions = @($Manifest['Excluded']) }
+
+    $files         = New-Object System.Collections.ArrayList
+    $filtered      = New-Object System.Collections.ArrayList
+    $missing       = New-Object System.Collections.ArrayList
+    $fileIndex     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $filteredIndex = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($group in @('Required', 'Validation'))
+    {
+        if (-not $Manifest.Contains($group)) { continue }
+
+        foreach ($entry in @($Manifest[$group]))
+        {
+            $kept = 0
+            $excludedHere = 0
+
+            foreach ($relative in (Expand-TrackDDeclaredPattern -RepoRoot $RepoRoot -Pattern $entry.Path))
+            {
+                $exclusion = Get-TrackDPathExclusion -Path $relative -Exclusions $exclusions
+                if ($exclusion)
+                {
+                    ++$excludedHere
+                    if ($filteredIndex.Add($relative))
+                    {
+                        [void] $filtered.Add([ordered] @{
+                            Path       = $relative
+                            Pattern    = $entry.Path
+                            ExcludedBy = $exclusion.Pattern
+                            Reason     = $exclusion.Reason
+                        })
+                    }
+                    continue
+                }
+
+                if ($fileIndex.Add($relative))
+                {
+                    $absolute = Join-Path $RepoRoot ($relative -replace '/', '\')
+                    [void] $files.Add([ordered] @{
+                        Path       = $relative
+                        Group      = $group
+                        Category   = if ($entry.Contains('Category')) { $entry.Category } else { $null }
+                        Pattern    = $entry.Path
+                        SizeBytes  = (Get-Item -LiteralPath $absolute).Length
+                        Sha256     = if ($SkipHash) { $null } else { Get-TrackDSha256 $absolute }
+                        GitTracked = $trackedSet.Contains($relative)
+                    })
+                }
+                ++$kept
+            }
+
+            if ($kept -eq 0)
+            {
+                [void] $missing.Add([ordered] @{
+                    Group          = $group
+                    Pattern        = $entry.Path
+                    Note           = if ($entry.Contains('Note')) { $entry.Note } else { $null }
+                    ExcludedMatches = $excludedHere
+                })
+            }
+        }
+    }
+
+    $untracked = @($files | Where-Object { -not $_.GitTracked })
+
+    return [ordered] @{
+        Files           = $files.ToArray()
+        FilteredFiles   = $filtered.ToArray()
+        MissingPatterns = $missing.ToArray()
+        FileCount       = $files.Count
+        FilteredCount   = $filtered.Count
+        TrackedCount    = ($files.Count - $untracked.Count)
+        UntrackedCount  = $untracked.Count
+        UntrackedFiles  = $untracked
+    }
+}
+
+function New-TrackDCleanCopy
+{
+    <#
+    .SYNOPSIS
+        Copies exactly the given declared inputs into an empty destination tree.
+
+    .DESCRIPTION
+        Takes the enumerated list rather than re-walking the repository, which is the whole point:
+        the copy cannot contain anything the count and the git comparison did not also see.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $RepoRoot,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]] $Files,
+        [Parameter(Mandatory)][string] $Destination
+    )
+
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    foreach ($file in $Files)
+    {
+        $source = Join-Path $RepoRoot ($file.Path -replace '/', '\')
+        $target = Join-Path $Destination ($file.Path -replace '/', '\')
+        $targetDir = Split-Path -Parent $target
+        if (-not (Test-Path -LiteralPath $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+
+    return (Resolve-Path -LiteralPath $Destination).Path
+}
+
+function Get-TrackDCleanCopyLeaks
+{
+    <#
+    .SYNOPSIS
+        Files in a built clean copy that an exclusion says must not be there.
+
+    .DESCRIPTION
+        Walks the copy and tests every file against the same matcher the enumeration used, instead
+        of probing each excluded pattern with a filesystem wildcard. PowerShell's -Path globbing has
+        no recursive '**', so a probe for '**/.claude/settings.local.json' finds nothing and reports
+        a clean result for a check it never actually performed.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [AllowEmptyCollection()][object[]] $Exclusions = @()
+    )
+
+    $leaks = New-Object System.Collections.ArrayList
+    $rootPath = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
+
+    foreach ($file in (Get-ChildItem -LiteralPath $rootPath -Recurse -File -Force -ErrorAction SilentlyContinue))
+    {
+        $relative = $file.FullName.Substring($rootPath.Length).TrimStart('\').Replace('\', '/')
+        $exclusion = Get-TrackDPathExclusion -Path $relative -Exclusions $Exclusions
+        if ($exclusion)
+        {
+            [void] $leaks.Add([ordered] @{ Path = $relative; Pattern = $exclusion.Pattern; Reason = $exclusion.Reason })
+        }
+    }
+
+    return ,($leaks.ToArray())
+}
+
+# ---------------------------------------------------------------------------------------------
+# Release-source self-test
+# ---------------------------------------------------------------------------------------------
+
+function Test-TrackDReleaseSourceFiltering
+{
+    <#
+    .SYNOPSIS
+        Proves the release-source filtering rules on a synthetic tree. Returns the problems found.
+
+    .DESCRIPTION
+        Deterministic and offline: it builds its own miniature repository in the temp directory,
+        so it asserts on the RULES rather than on whatever happens to be in the working folder
+        today, and it uses the real manifest's Excluded list so the rules it proves are the ones
+        that ship.
+
+        What it pins down:
+
+          - a tracked documentation source under Docs/ is an input;
+          - a generated Docs/*.pdf is not, and never reaches the clean copy;
+          - a nested .claude/settings.local.json is not, while a tracked CLAUDE.md beside it still
+            is - the machine-local file is excluded, not the directory;
+          - excluded files are absent from the count, from the untracked diagnostics and from the
+            copy, which are the three places that must agree with each other;
+          - a genuinely required file that is untracked STILL fails, so this filtering cannot be
+            mistaken for a way to make the fresh-clone check quieter.
+    #>
+    param(
+        [string] $ManifestPath = (Join-Path $PSScriptRoot 'ReleaseSources.psd1'),
+        [string] $WorkRoot = (Join-Path ([System.IO.Path]::GetTempPath()) 'spoutplugin-trackd-selftest')
+    )
+
+    $problems = New-Object System.Collections.ArrayList
+
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf))
+    {
+        [void] $problems.Add("release source manifest not found: $ManifestPath")
+        return ,([string[]] $problems.ToArray())
+    }
+
+    $realManifest = Import-PowerShellDataFile -LiteralPath $ManifestPath
+    $exclusions = @($realManifest.Excluded)
+
+    # --- pattern vocabulary ---------------------------------------------------------------------
+    # Table-driven so a regression names the exact pattern and path that changed meaning.
+    $matcherCases = @(
+        @{ Pattern = 'Docs/*.pdf';                     Path = 'Docs/manual.pdf';                             Expect = $true }
+        @{ Pattern = 'Docs/*.pdf';                     Path = 'Docs/2026-06-05-SpoutPlugin-User-Manual.pdf'; Expect = $true }
+        @{ Pattern = 'Docs/*.pdf';                     Path = 'Docs/GUIDE.md';                               Expect = $false }
+        @{ Pattern = 'Docs/*.pdf';                     Path = 'Docs/sub/manual.pdf';                          Expect = $false }
+        @{ Pattern = '**/.claude/settings.local.json'; Path = '.claude/settings.local.json';                  Expect = $true }
+        @{ Pattern = '**/.claude/settings.local.json'; Path = 'Docs/spout_web/.claude/settings.local.json';   Expect = $true }
+        @{ Pattern = '**/.claude/settings.local.json'; Path = 'Docs/spout_web/.claude/settings.json';         Expect = $false }
+        @{ Pattern = '**/.claude/settings.local.json'; Path = 'Docs/spout_web/CLAUDE.md';                     Expect = $false }
+        @{ Pattern = 'Artifacts/...';                  Path = 'Artifacts/TrackD/run/report.json';             Expect = $true }
+        @{ Pattern = 'Artifacts/...';                  Path = 'ArtifactsExtra/report.json';                   Expect = $false }
+        @{ Pattern = 'TRACK_A_*.md';                   Path = 'TRACK_A_DEVIATIONS.md';                        Expect = $true }
+        @{ Pattern = 'TRACK_A_*.md';                   Path = 'Docs/TRACK_A_DEVIATIONS.md';                   Expect = $false }
+        @{ Pattern = 'CLAUDE.md';                      Path = 'Docs/spout_web/CLAUDE.md';                     Expect = $false }
+    )
+    foreach ($case in $matcherCases)
+    {
+        $actual = Test-TrackDPathMatchesPattern -Path $case.Path -Pattern $case.Pattern
+        if ($actual -ne $case.Expect)
+        {
+            [void] $problems.Add("pattern '$($case.Pattern)' vs '$($case.Path)': expected $($case.Expect), got $actual")
+        }
+    }
+
+    # --- enumeration, on a synthetic tree ---------------------------------------------------------
+    $root = Join-Path $WorkRoot 'repo'
+    $copy = Join-Path $WorkRoot 'copy'
+
+    try
+    {
+        if (Test-Path -LiteralPath $WorkRoot) { Remove-Item -LiteralPath $WorkRoot -Recurse -Force }
+
+        $included = @(
+            'Source/Runtime.cpp'
+            'Docs/GUIDE.md'
+            'Docs/build_user_manual.py'
+            'Docs/spout_web/index.html'
+            'Docs/spout_web/assets/logo.png'
+            'Docs/spout_web/CLAUDE.md'
+        )
+        $excludedFixtures = @(
+            'Docs/2026-06-05-Manual.pdf'
+            'Docs/spout_web/.claude/settings.local.json'
+            'Source/Intermediate/Build/stale.obj'
+            'Artifacts/TrackD/run/report.json'
+        )
+
+        foreach ($relative in ($included + $excludedFixtures))
+        {
+            $absolute = Join-Path $root ($relative -replace '/', '\')
+            $directory = Split-Path -Parent $absolute
+            if (-not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+            Set-Content -LiteralPath $absolute -Value "fixture: $relative" -Encoding UTF8
+        }
+
+        $syntheticManifest = @{
+            SchemaVersion = $realManifest.SchemaVersion
+            Required   = @(@{ Path = 'Source/...'; Category = 'source'; Note = 'synthetic' })
+            Validation = @(@{ Path = 'Docs/...';   Category = 'docs';   Note = 'synthetic' })
+            Excluded   = $exclusions
+        }
+
+        # Case A: everything that SHOULD be an input is tracked, and nothing else exists in git.
+        $inputs = Get-TrackDDeclaredReleaseInputs -RepoRoot $root -Manifest $syntheticManifest `
+            -TrackedFiles ([string[]] $included) -SkipHash
+
+        $declaredPaths = @($inputs.Files | ForEach-Object { $_.Path })
+
+        foreach ($expected in $included)
+        {
+            if ($declaredPaths -notcontains $expected)
+            {
+                [void] $problems.Add("'$expected' should be a declared release input but was filtered out")
+            }
+        }
+
+        $mustBeFiltered = @{
+            'Docs/2026-06-05-Manual.pdf'                 = 'Docs/*.pdf'
+            'Docs/spout_web/.claude/settings.local.json' = '**/.claude/settings.local.json'
+        }
+        foreach ($path in $mustBeFiltered.Keys)
+        {
+            if ($declaredPaths -contains $path)
+            {
+                [void] $problems.Add("'$path' must not be counted as a declared release input")
+            }
+
+            $record = @($inputs.FilteredFiles | Where-Object { $_.Path -eq $path })
+            if ($record.Count -ne 1)
+            {
+                [void] $problems.Add("'$path' should be reported once as filtered, was reported $($record.Count) time(s)")
+            }
+            elseif ($record[0].ExcludedBy -ne $mustBeFiltered[$path])
+            {
+                [void] $problems.Add("'$path' was excluded by '$($record[0].ExcludedBy)', expected '$($mustBeFiltered[$path])'")
+            }
+        }
+
+        foreach ($path in @('Source/Intermediate/Build/stale.obj', 'Artifacts/TrackD/run/report.json'))
+        {
+            if ($declaredPaths -contains $path)
+            {
+                [void] $problems.Add("build output '$path' must not be counted as a declared release input")
+            }
+        }
+
+        if ($inputs.FileCount -ne $included.Count)
+        {
+            [void] $problems.Add("declared input count is $($inputs.FileCount), expected $($included.Count)")
+        }
+        if ($inputs.UntrackedCount -ne 0)
+        {
+            [void] $problems.Add("untracked diagnostics named $($inputs.UntrackedCount) file(s) when every input was tracked: $(@($inputs.UntrackedFiles | ForEach-Object { $_.Path }) -join ', ')")
+        }
+        if ($inputs.MissingPatterns.Count -ne 0)
+        {
+            [void] $problems.Add("$($inputs.MissingPatterns.Count) declared pattern(s) matched nothing in the synthetic tree")
+        }
+
+        # --- the copy contains what the count contains, and nothing else ------------------------
+        [void] (New-TrackDCleanCopy -RepoRoot $root -Files $inputs.Files -Destination $copy)
+
+        foreach ($path in $mustBeFiltered.Keys)
+        {
+            if (Test-Path -LiteralPath (Join-Path $copy ($path -replace '/', '\')))
+            {
+                [void] $problems.Add("'$path' reached the clean copy")
+            }
+        }
+        foreach ($path in $included)
+        {
+            if (-not (Test-Path -LiteralPath (Join-Path $copy ($path -replace '/', '\'))))
+            {
+                [void] $problems.Add("'$path' is missing from the clean copy")
+            }
+        }
+
+        $leaks = Get-TrackDCleanCopyLeaks -Root $copy -Exclusions $exclusions
+        if ($leaks.Count -ne 0)
+        {
+            [void] $problems.Add("the clean copy leaked $($leaks.Count) excluded file(s): $(@($leaks | ForEach-Object { $_.Path }) -join ', ')")
+        }
+
+        # --- Case B: a genuinely required input that is untracked must still fail ---------------
+        $withoutSource = @($included | Where-Object { $_ -ne 'Source/Runtime.cpp' })
+        $regression = Get-TrackDDeclaredReleaseInputs -RepoRoot $root -Manifest $syntheticManifest `
+            -TrackedFiles ([string[]] $withoutSource) -SkipHash
+
+        $regressionUntracked = @($regression.UntrackedFiles | ForEach-Object { $_.Path })
+        if ($regressionUntracked.Count -ne 1 -or $regressionUntracked[0] -ne 'Source/Runtime.cpp')
+        {
+            [void] $problems.Add("an untracked required input must still fail validation; got [$($regressionUntracked -join ', ')]")
+        }
+    }
+    catch
+    {
+        [void] $problems.Add("release-source self-test threw: $($_.Exception.Message)")
+    }
+    finally
+    {
+        if (Test-Path -LiteralPath $WorkRoot) { Remove-Item -LiteralPath $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    return ,([string[]] $problems.ToArray())
+}
+
+# ---------------------------------------------------------------------------------------------
 # Exit codes
 # ---------------------------------------------------------------------------------------------
 
@@ -977,5 +1616,15 @@ Export-ModuleMember -Function @(
     'Copy-TrackDTree',
     'New-TrackDHostStaging',
     'Read-TrackDSmokeResult',
+    'Get-TrackDExcludedPathSegments',
+    'ConvertTo-TrackDPathRegex',
+    'Test-TrackDPathMatchesPattern',
+    'Get-TrackDPathExclusion',
+    'Expand-TrackDDeclaredPattern',
+    'Get-TrackDIgnoredPaths',
+    'Get-TrackDDeclaredReleaseInputs',
+    'New-TrackDCleanCopy',
+    'Get-TrackDCleanCopyLeaks',
+    'Test-TrackDReleaseSourceFiltering',
     'Get-TrackDExitCode'
 )

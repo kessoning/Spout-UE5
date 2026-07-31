@@ -82,139 +82,65 @@ Write-TrackDStep "Engines    : $($EngineVersions -join ', ')"
 
 # -------------------------------------------------------------------------------------------------
 # Expand the declared patterns against the working tree
+#
+# One list, produced once by the module, used for all three things this script does with it: the
+# declared-input count, the `git ls-files` comparison and the clean copy. Exclusions are applied
+# inside that enumeration, so all three agree by construction. Consulting the exclusion list only
+# after the copy exists does not achieve that: generated and machine-local files would still be
+# counted and reported as required tracked inputs.
 # -------------------------------------------------------------------------------------------------
 
-function Expand-DeclaredPattern
+$inputs = Get-TrackDDeclaredReleaseInputs -RepoRoot $RepoRoot -Manifest $sourceManifest
+
+$declaredFiles = $inputs.Files
+$filteredFiles = $inputs.FilteredFiles
+$missingPatterns = $inputs.MissingPatterns
+$untrackedDeclared = @($inputs.UntrackedFiles)
+
+foreach ($missing in $missingPatterns)
 {
-    <#
-    .SYNOPSIS
-        Repository-relative paths matching one declared pattern.
-
-    .DESCRIPTION
-        'Dir/...' means the directory and everything below it. Anything else is passed to the
-        filesystem as a literal path or a wildcard.
-    #>
-    param([string] $Pattern)
-
-    $results = New-Object System.Collections.ArrayList
-
-    if ($Pattern.EndsWith('/...'))
-    {
-        $relativeDir = $Pattern.Substring(0, $Pattern.Length - 4)
-        $absoluteDir = Join-Path $RepoRoot ($relativeDir -replace '/', '\')
-        if (Test-Path -LiteralPath $absoluteDir -PathType Container)
-        {
-            foreach ($file in (Get-ChildItem -LiteralPath $absoluteDir -Recurse -File -Force))
-            {
-                $relative = $file.FullName.Substring($RepoRoot.Length).TrimStart('\').Replace('\', '/')
-                [void] $results.Add($relative)
-            }
-        }
-        return $results.ToArray()
-    }
-
-    $absolute = Join-Path $RepoRoot ($Pattern -replace '/', '\')
-    foreach ($file in (Get-ChildItem -Path $absolute -File -Force -ErrorAction SilentlyContinue))
-    {
-        $relative = $file.FullName.Substring($RepoRoot.Length).TrimStart('\').Replace('\', '/')
-        [void] $results.Add($relative)
-    }
-    return $results.ToArray()
+    $suffix = if ($missing.ExcludedMatches -gt 0) { " ($($missing.ExcludedMatches) match(es), all excluded)" } else { '' }
+    Write-TrackDBad "declared release input '$($missing.Pattern)' matched no file$suffix"
 }
 
-$trackedFiles = Get-TrackDTrackedFiles $RepoRoot
+Write-TrackDStep "Declared inputs : $($inputs.FileCount) file(s)"
+Write-TrackDStep "Git-tracked     : $($inputs.TrackedCount)"
+Write-TrackDStep "Untracked       : $($inputs.UntrackedCount)"
+Write-TrackDStep "Excluded by rule: $($inputs.FilteredCount) file(s) matched a declared pattern but are not release inputs"
 
-# Case-insensitive, because Windows paths are. Populated by Add rather than by the collection
-# constructor: New-Object cannot bind the (IEnumerable, IEqualityComparer) overload cleanly.
-$trackedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($tracked in $trackedFiles) { [void] $trackedSet.Add($tracked) }
+# A declared input that git IGNORES is not a missing commit; it is a manifest error. Committing it
+# is impossible without overriding the ignore rules, so reporting it as "untracked, please commit"
+# sends the reader to do the wrong thing. Named separately for that reason.
+# No @() around the call: these helpers return an array through the comma operator so that an EMPTY
+# result survives the pipeline, and wrapping that in @() would produce a one-element array whose
+# single element is the empty array.
+$ignoredDeclared = Get-TrackDIgnoredPaths -RepoRoot $RepoRoot -Paths ([string[]] @($declaredFiles | ForEach-Object { $_.Path }))
 
-# Build directories are excluded from the copy regardless of what a pattern happens to match; a
-# Source/... pattern would otherwise sweep up an Intermediate tree that happened to be nested there.
-$excludedSegments = @('Binaries', 'Intermediate', 'Saved', 'DerivedDataCache', '.git', '.vs', 'Artifacts')
-
-$declaredFiles = New-Object System.Collections.ArrayList
-$declaredIndex = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-$missingPatterns = New-Object System.Collections.ArrayList
-
-foreach ($group in @('Required', 'Validation'))
+if ($ignoredDeclared.Count -gt 0)
 {
-    foreach ($entry in $sourceManifest[$group])
+    foreach ($ignored in $ignoredDeclared)
     {
-        $matched = Expand-DeclaredPattern $entry.Path
-        $kept = 0
-
-        foreach ($relative in $matched)
-        {
-            $segments = $relative -split '/'
-            $skip = $false
-            foreach ($segment in $segments)
-            {
-                if ($excludedSegments -contains $segment) { $skip = $true; break }
-            }
-            if ($skip) { continue }
-
-            if ($declaredIndex.Add($relative))
-            {
-                $absolute = Join-Path $RepoRoot ($relative -replace '/', '\')
-                [void] $declaredFiles.Add([ordered] @{
-                    Path      = $relative
-                    Group     = $group
-                    Category  = $entry.Category
-                    Pattern   = $entry.Path
-                    SizeBytes = (Get-Item -LiteralPath $absolute).Length
-                    Sha256    = Get-TrackDSha256 $absolute
-                    GitTracked = $trackedSet.Contains($relative)
-                })
-            }
-            ++$kept
-        }
-
-        if ($kept -eq 0)
-        {
-            [void] $missingPatterns.Add([ordered] @{ Group = $group; Pattern = $entry.Path; Note = $entry.Note })
-            Write-TrackDBad "declared release input '$($entry.Path)' matched no file"
-        }
+        Write-TrackDBad "declared release input '$ignored' is excluded by .gitignore, so it can never be tracked"
     }
+    Write-TrackDStep "Resolution: declare it in ReleaseSources.psd1 Excluded, or stop ignoring it in .gitignore."
 }
-
-$untrackedDeclared = @($declaredFiles | Where-Object { -not $_.GitTracked })
-
-Write-TrackDStep "Declared inputs : $($declaredFiles.Count) file(s)"
-Write-TrackDStep "Git-tracked     : $($declaredFiles.Count - $untrackedDeclared.Count)"
-Write-TrackDStep "Untracked       : $($untrackedDeclared.Count)"
 
 # -------------------------------------------------------------------------------------------------
 # Build the clean copy
 # -------------------------------------------------------------------------------------------------
 
-$cleanCopyRoot = Join-Path $WorkRoot 'clean\R'
-if (Test-Path -LiteralPath $cleanCopyRoot) { Remove-Item -LiteralPath $cleanCopyRoot -Recurse -Force }
-New-Item -ItemType Directory -Path $cleanCopyRoot -Force | Out-Null
-
-foreach ($file in $declaredFiles)
-{
-    $source = Join-Path $RepoRoot ($file.Path -replace '/', '\')
-    $target = Join-Path $cleanCopyRoot ($file.Path -replace '/', '\')
-    $targetDir = Split-Path -Parent $target
-    if (-not (Test-Path -LiteralPath $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
-    Copy-Item -LiteralPath $source -Destination $target -Force
-}
+$cleanCopyRoot = New-TrackDCleanCopy -RepoRoot $RepoRoot -Files $declaredFiles `
+    -Destination (Join-Path $WorkRoot 'clean\R')
 
 Write-TrackDGood "clean copy built at $cleanCopyRoot"
 
-# Nothing from an excluded pattern may have arrived by another route.
-$leaked = New-Object System.Collections.ArrayList
-foreach ($excluded in $sourceManifest.Excluded)
+# Nothing from an excluded pattern may have arrived by another route. Checked by walking the copy
+# and testing each file against the same matcher the enumeration used, so the check cannot pass by
+# looking in the wrong place.
+$leaked = Get-TrackDCleanCopyLeaks -Root $cleanCopyRoot -Exclusions @($sourceManifest.Excluded)
+foreach ($leak in $leaked)
 {
-    $pattern = $excluded.Path
-    $probe = if ($pattern.EndsWith('/...')) { $pattern.Substring(0, $pattern.Length - 4) } else { $pattern }
-    $absolute = Join-Path $cleanCopyRoot ($probe -replace '/', '\')
-    foreach ($hit in (Get-ChildItem -Path $absolute -Force -ErrorAction SilentlyContinue))
-    {
-        [void] $leaked.Add([ordered] @{ Pattern = $pattern; Path = $hit.FullName; Reason = $excluded.Reason })
-        Write-TrackDBad "excluded '$pattern' leaked into the clean copy: $($hit.FullName)"
-    }
+    Write-TrackDBad "excluded '$($leak.Pattern)' leaked into the clean copy: $($leak.Path)"
 }
 if ($leaked.Count -eq 0)
 {
@@ -319,6 +245,11 @@ if (-not $freshCloneReproducible)
     [void] $problems.Add("$($untrackedDeclared.Count) declared release input(s) are not tracked by git, so a fresh clone of HEAD cannot reproduce this release")
 }
 
+if ($ignoredDeclared.Count -gt 0)
+{
+    [void] $problems.Add("$($ignoredDeclared.Count) declared release input(s) are excluded by .gitignore and can never be tracked; declare them in ReleaseSources.psd1 Excluded, or stop ignoring them")
+}
+
 $report = [ordered] @{
     Schema       = 'spoutplugin-trackd-clean-source/1'
     GeneratedUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -336,18 +267,25 @@ $report = [ordered] @{
         FreshCloneReproducible = $freshCloneReproducible
         NoExcludedInputLeaked  = ($leaked.Count -eq 0)
         AllDeclaredPatternsMatched = ($missingPatterns.Count -eq 0)
+        NoGitIgnoredInputDeclared  = ($ignoredDeclared.Count -eq 0)
     }
 
     InputManifest = [ordered] @{
-        FileCount      = $declaredFiles.Count
-        TrackedCount   = ($declaredFiles.Count - $untrackedDeclared.Count)
-        UntrackedCount = $untrackedDeclared.Count
-        Files          = $declaredFiles.ToArray()
+        FileCount      = $inputs.FileCount
+        TrackedCount   = $inputs.TrackedCount
+        UntrackedCount = $inputs.UntrackedCount
+        FilteredCount  = $inputs.FilteredCount
+        Files          = $declaredFiles
     }
 
+    # What a declared pattern matched but an exclusion removed, with the rule that removed it. Kept
+    # in the report so an excluded file is visibly excluded rather than silently missing.
+    ExcludedInputs = $filteredFiles
+
     UntrackedDeclaredInputs = @($untrackedDeclared | ForEach-Object { $_.Path })
-    MissingPatterns = $missingPatterns.ToArray()
-    LeakedExclusions = $leaked.ToArray()
+    GitIgnoredDeclaredInputs = $ignoredDeclared
+    MissingPatterns = $missingPatterns
+    LeakedExclusions = $leaked
 
     OutputManifest = [ordered] @{
         ReleaseExitCode = if ($releaseResult) { $releaseResult.ExitCode } else { $null }
@@ -369,11 +307,17 @@ Write-Host "Fresh-clone reproducible : $(if ($freshCloneReproducible) { 'YES' } 
 
 if (-not $freshCloneReproducible)
 {
+    $ignoredSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($ignored in $ignoredDeclared) { [void] $ignoredSet.Add($ignored) }
+
     Write-Host ''
     Write-TrackDWarn 'These declared release inputs exist in the working tree but are not tracked by git:'
     foreach ($file in ($untrackedDeclared | Select-Object -First 25))
     {
-        Write-Host "    $($file.Path)" -ForegroundColor Yellow
+        # Two different fixes, so they are never printed as one. Committing a git-ignored file is
+        # not possible without overriding the ignore rules, and should not be attempted.
+        $note = if ($ignoredSet.Contains($file.Path)) { '   <- git-ignored; this one needs a manifest exclusion, NOT a commit' } else { '' }
+        Write-Host "    $($file.Path)$note" -ForegroundColor Yellow
     }
     if ($untrackedDeclared.Count -gt 25)
     {
