@@ -193,6 +193,7 @@ foreach ($version in $EngineVersions)
         ReportDirectory = $null
         Report          = $null
         MutexRetries    = 0
+        BuildToolWaitSeconds = 0
         Status          = 'NotRun'
         Problems        = @()
     }
@@ -256,24 +257,32 @@ foreach ($version in $EngineVersions)
     while ($true)
     {
         $attempt++
+
+        # Settle BEFORE building, not only after a failure. Engines are built one after another, and
+        # the previous engine's editor holds the machine-global UnrealBuildTool log for a few seconds
+        # after its tests report completion; a build started inside that window dies instantly, and
+        # every remaining engine in the matrix dies with it. Waiting is not a retry - it prevents the
+        # conflict rather than classifying one after the fact.
+        $settled = Wait-TrackDBuildToolIdle -TimeoutSeconds 300
+        if ($settled -gt 0)
+        {
+            $row.BuildToolWaitSeconds += $settled
+            Write-TrackDStep "waited ${settled}s for the previous build tool to release the shared UnrealBuildTool log"
+        }
+
         Write-TrackDStep "Building editor target (attempt $attempt)"
         $buildResult = Invoke-TrackDProcess -FilePath $engine.BuildBat -ArgumentList $buildArgs `
             -StdOutPath $buildLog -TimeoutSeconds $BuildTimeoutSeconds -WorkingDirectory $WorkRoot
 
         if ($buildResult.ExitCode -eq 0) { break }
 
-        # Only the machine-wide UBT mutex is retried, and only once the conflicting process is gone.
+        # Only environmental build-tool contention is retried, and only once the conflict is gone.
         # Nothing is ever killed to make room.
         if ((Test-TrackDLogForBuildMutex $buildLog) -and $row.MutexRetries -lt $MutexRetries)
         {
             $row.MutexRetries++
-            Write-TrackDWarn "UnrealBuildTool mutex conflict; waiting for the other instance to finish"
-            $waited = 0
-            while ((Test-TrackDUnrealBuildToolBusy) -and $waited -lt 300)
-            {
-                Start-Sleep -Seconds 10
-                $waited += 10
-            }
+            Write-TrackDWarn "UnrealBuildTool contention; waiting for the other instance to finish"
+            [void] (Wait-TrackDBuildToolIdle -TimeoutSeconds 300 -PollSeconds 10)
             continue
         }
 

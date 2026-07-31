@@ -364,6 +364,10 @@ function Test-TrackDUnrealBuildToolBusy
         "conflicting instance" error. The pipeline retries those, but only after confirming the conflict
         is genuinely gone - it never kills a process it did not start. The retry is recorded in the
         manifest as an environmental event, kept separate from plugin failures.
+
+        The process-NAME check alone is not enough: UE 5.x runs both UBT and AutomationTool inside
+        `dotnet.exe`, so there is no process called UnrealBuildTool to find. The command line is what
+        identifies them.
     #>
 
     $names = @('UnrealBuildTool', 'AutomationTool', 'UnrealHeaderTool')
@@ -372,14 +376,103 @@ function Test-TrackDUnrealBuildToolBusy
         $running = Get-Process -Name $name -ErrorAction SilentlyContinue
         if ($running) { return $true }
     }
+
+    $hosted = @(Get-CimInstance Win32_Process -Filter "Name='dotnet.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'UnrealBuildTool\.dll|AutomationTool\.dll' })
+    if ($hosted.Count -gt 0) { return $true }
+
     return $false
+}
+
+function Test-TrackDBuildToolLogBusy
+{
+    <#
+    .SYNOPSIS
+        True while another process still holds the machine-global UnrealBuildTool log open.
+
+    .DESCRIPTION
+        Before UBT does anything else - before the mutex, before reading any argument - it rotates
+        one shared log file, %LOCALAPPDATA%\UnrealBuildTool\Log.txt, by renaming it to Log-backup.txt.
+        That file is global to the machine, not per engine and not per project. If any process still
+        holds it, the rename throws and UBT dies with an unhandled IOException from
+        EpicGames.Core.Log.BackupLogFile, having printed nothing about mutexes at all.
+
+        This is what a departing Unreal editor does to the next engine's build for a few seconds
+        after its tests finish, and it is how a matrix run engine by engine can fail several engines
+        within seconds and then recover on its own.
+
+        Probing the file for an exclusive handle tests the actual contended resource rather than
+        guessing at process names. Read-only: the handle is opened and immediately closed.
+    #>
+    param([string] $Path = (Join-Path $env:LOCALAPPDATA 'UnrealBuildTool\Log.txt'))
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+
+    $stream = $null
+    try
+    {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        return $false
+    }
+    catch
+    {
+        return $true
+    }
+    finally
+    {
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
+function Wait-TrackDBuildToolIdle
+{
+    <#
+    .SYNOPSIS
+        Waits until no other build tool is running and the shared UBT log is free. Returns the
+        seconds waited.
+
+    .DESCRIPTION
+        Called BEFORE a build rather than only after one has already failed, because the contention
+        it waits out is normal and transient - the previous engine's editor exiting - and a build
+        that never starts into a conflict needs no retry, no log to classify and no manifest entry
+        arguing that a failure was environmental.
+
+        It waits; it never kills. If the timeout expires the build is attempted anyway, so a
+        genuinely stuck machine still produces a real failure with a real log instead of hanging.
+    #>
+    param(
+        [int] $TimeoutSeconds = 300,
+        [int] $PollSeconds = 5
+    )
+
+    $waited = 0
+    while ($waited -lt $TimeoutSeconds)
+    {
+        if (-not (Test-TrackDUnrealBuildToolBusy) -and -not (Test-TrackDBuildToolLogBusy)) { break }
+        Start-Sleep -Seconds $PollSeconds
+        $waited += $PollSeconds
+    }
+    return $waited
 }
 
 function Test-TrackDLogForBuildMutex
 {
     <#
     .SYNOPSIS
-        True when a captured log shows the environmental UBT mutex rather than a real build failure.
+        True when a captured log shows environmental build-tool contention rather than a real
+        build failure.
+
+    .DESCRIPTION
+        Two signatures, because UBT reports the same underlying conflict two entirely different ways.
+
+        Without -waitmutex it says so plainly: "A conflicting instance of UnrealBuildTool is already
+        running". With -waitmutex it never gets that far - it dies first on the shared log rotation
+        described in Test-TrackDBuildToolLogBusy, as an unhandled IOException with no mention of a
+        mutex anywhere in the text. Matching only the first phrasing would classify every build that
+        passes -waitmutex, which is every build in the automation stage, as a genuine failure and
+        never retry it.
     #>
     param([string] $LogPath)
 
@@ -387,9 +480,17 @@ function Test-TrackDLogForBuildMutex
     $text = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
     if (-not $text) { return $false }
 
-    return ($text -match 'conflicting instance' -or
-            $text -match 'Another instance of UnrealBuildTool is already running' -or
-            $text -match 'Timed out waiting for another instance')
+    if ($text -match 'conflicting instance' -or
+        $text -match 'Another instance of UnrealBuildTool is already running' -or
+        $text -match 'Timed out waiting for another instance')
+    {
+        return $true
+    }
+
+    # The -waitmutex form. Narrow deliberately: an IOException anywhere else in a build is a real
+    # failure, so both the exception and the log-rotation frame that raised it must be present.
+    return (($text -match 'System\.IO\.IOException') -and
+            ($text -match 'Log\.BackupLogFile' -or $text -match 'Log\.AddFileWriter'))
 }
 
 function Test-TrackDLogForResourceExhaustion
@@ -1566,6 +1667,141 @@ function Test-TrackDReleaseSourceFiltering
     return ,([string[]] $problems.ToArray())
 }
 
+function Test-TrackDBuildContentionClassifier
+{
+    <#
+    .SYNOPSIS
+        Proves the build-log classifiers on captured log text. Returns the problems found.
+
+    .DESCRIPTION
+        Deterministic and offline: it feeds recorded log excerpts to the classifiers rather than
+        waiting for the machine to reproduce a race.
+
+        A classifier that recognises only the phrasing UBT uses WITHOUT -waitmutex is blind to every
+        automation build, since each one passes -waitmutex: the failure mode it is meant to absorb
+        would go unretried, and the manifest would record it as though the plugin itself had failed
+        to compile.
+
+        A classifier that answers "no" to everything is indistinguishable from a working one until
+        it matters, so both the positive and the negative cases are pinned here.
+    #>
+
+    $problems = New-Object System.Collections.ArrayList
+
+    # Verbatim from a UE 5.4 automation-stage build-editor.log.
+    $waitMutexLogRotation = @'
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" SpoutHostTestEditor Win64 Development -Project=C:\Temp\SpoutHostTest.uproject -waitmutex
+Log file: C:\Users\x\AppData\Local\UnrealBuildTool\Log.txt
+Total execution time: 0.27 seconds
+Unhandled exception: System.IO.IOException: The process cannot access the file because it is being used by another process.
+   at System.IO.FileSystem.MoveFile(String sourceFullPath, String destFullPath, Boolean overwrite)
+   at EpicGames.Core.Log.BackupLogFile(FileReference outputFile) in D:\UE\UE_5.4\Engine\Source\Programs\Shared\EpicGames.Core\Log.cs:line 257
+   at EpicGames.Core.Log.AddFileWriter(String name, FileReference outputFile) in D:\UE\UE_5.4\Engine\Source\Programs\Shared\EpicGames.Core\Log.cs:line 272
+'@
+
+    $classifierCases = @(
+        @{ Name = 'waitmutex log rotation'; Text = $waitMutexLogRotation; Expect = $true }
+        @{ Name = 'plain conflicting instance'
+           Text = "A conflicting instance of UnrealBuildTool is already running.`nTook 0.29s to run dotnet.exe, ExitCode=6"
+           Expect = $true }
+        @{ Name = 'mutex wait timeout'
+           Text = "Timed out waiting for another instance of UnrealBuildTool to finish"
+           Expect = $true }
+        @{ Name = 'genuine compile error is not contention'
+           Text = "SpoutSender.cpp(120): error C2065: 'Foo': undeclared identifier`nERROR: UBT ERROR: Failed to produce item"
+           Expect = $false }
+        @{ Name = 'unrelated IOException is not contention'
+           Text = "Unhandled exception: System.IO.IOException: There is not enough space on the disk.`n   at UnrealBuildTool.Program.Main()"
+           Expect = $false }
+        @{ Name = 'compiler memory exhaustion is a different class'
+           Text = "c1xx: error C3859: Failed to create virtual memory for PCH"
+           Expect = $false }
+        @{ Name = 'clean build is not contention'
+           Text = "[15/15] WriteMetadata SpoutHostTestEditor.target`nTotal execution time: 25.50 seconds"
+           Expect = $false }
+    )
+
+    $probeRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'spoutplugin-trackd-logprobe'
+
+    try
+    {
+        if (Test-Path -LiteralPath $probeRoot) { Remove-Item -LiteralPath $probeRoot -Recurse -Force }
+        New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+
+        $index = 0
+        foreach ($case in $classifierCases)
+        {
+            $probe = Join-Path $probeRoot ("case-{0}.log" -f $index)
+            ++$index
+            Set-Content -LiteralPath $probe -Value $case.Text -Encoding UTF8
+
+            $actual = Test-TrackDLogForBuildMutex $probe
+            if ($actual -ne $case.Expect)
+            {
+                [void] $problems.Add("build contention '$($case.Name)': expected $($case.Expect), got $actual")
+            }
+        }
+
+        # The two environmental classes must stay distinguishable, because they are counted
+        # separately in every manifest and a reader uses that split to tell a loaded machine from a
+        # contended one.
+        $pchProbe = Join-Path $probeRoot 'pch.log'
+        Set-Content -LiteralPath $pchProbe -Value 'c1xx: fatal error C1076: compiler limit: internal heap limit reached' -Encoding UTF8
+        if (-not (Test-TrackDLogForResourceExhaustion $pchProbe))
+        {
+            [void] $problems.Add('resource-exhaustion classifier no longer recognises C1076')
+        }
+        if (Test-TrackDLogForBuildMutex $pchProbe)
+        {
+            [void] $problems.Add('resource exhaustion was misclassified as build-tool contention')
+        }
+
+        # A file nothing holds must read as free, or the pre-flight settle would wait out its whole
+        # timeout before every single build.
+        $freeProbe = Join-Path $probeRoot 'free.log'
+        Set-Content -LiteralPath $freeProbe -Value 'not held by anyone' -Encoding UTF8
+        if (Test-TrackDBuildToolLogBusy -Path $freeProbe)
+        {
+            [void] $problems.Add('an unlocked log file was reported as busy')
+        }
+
+        # And a file something does hold must read as busy, or the settle is a no-op that silently
+        # never waits - the failure mode this whole check exists to prevent.
+        $heldProbe = Join-Path $probeRoot 'held.log'
+        Set-Content -LiteralPath $heldProbe -Value 'held' -Encoding UTF8
+        $handle = [System.IO.File]::Open($heldProbe, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        try
+        {
+            if (-not (Test-TrackDBuildToolLogBusy -Path $heldProbe))
+            {
+                [void] $problems.Add('a locked log file was reported as free')
+            }
+        }
+        finally
+        {
+            $handle.Dispose()
+        }
+
+        # A path that does not exist yet is not contention either: on a machine that has never run
+        # UBT there is no log to rotate.
+        if (Test-TrackDBuildToolLogBusy -Path (Join-Path $probeRoot 'no-such-file.log'))
+        {
+            [void] $problems.Add('a missing log file was reported as busy')
+        }
+    }
+    catch
+    {
+        [void] $problems.Add("build-contention self-test threw: $($_.Exception.Message)")
+    }
+    finally
+    {
+        if (Test-Path -LiteralPath $probeRoot) { Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    return ,([string[]] $problems.ToArray())
+}
+
 # ---------------------------------------------------------------------------------------------
 # Exit codes
 # ---------------------------------------------------------------------------------------------
@@ -1608,6 +1844,8 @@ Export-ModuleMember -Function @(
     'Resolve-TrackDEnginePath',
     'Get-TrackDEngineFacts',
     'Test-TrackDUnrealBuildToolBusy',
+    'Test-TrackDBuildToolLogBusy',
+    'Wait-TrackDBuildToolIdle',
     'Test-TrackDLogForBuildMutex',
     'Test-TrackDLogForResourceExhaustion',
     'New-TrackDRunContext',
@@ -1626,5 +1864,6 @@ Export-ModuleMember -Function @(
     'New-TrackDCleanCopy',
     'Get-TrackDCleanCopyLeaks',
     'Test-TrackDReleaseSourceFiltering',
+    'Test-TrackDBuildContentionClassifier',
     'Get-TrackDExitCode'
 )

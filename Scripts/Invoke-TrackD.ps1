@@ -130,6 +130,17 @@ function Invoke-Stage
 
     Write-TrackDSection "Stage: $Name"
 
+    # Stages run back to back, and the one that just finished may still be releasing the
+    # machine-global UnrealBuildTool log and mutex - an editor shutting down after the automation
+    # suite is enough. A build started inside that window dies before it reads its own arguments,
+    # which is how a healthy matrix produces a wall of instant failures. Wait it out first; never
+    # kill anything to make room.
+    $settled = Wait-TrackDBuildToolIdle -TimeoutSeconds 300
+    if ($settled -gt 0)
+    {
+        Write-TrackDStep "waited ${settled}s for the previous stage's build tools to exit"
+    }
+
     $logPath = Join-Path $context.RunRoot ("stage-{0}.log" -f ($Name -replace '[^A-Za-z0-9]', '-'))
 
     $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $Arguments
@@ -237,6 +248,14 @@ else
     {
         [void] $selfTestProblems.Add("release-source filtering: $filterProblem")
     }
+}
+
+# The classifiers that decide whether a failed build was the machine's fault or the plugin's. A
+# classifier that silently answers "no" to everything looks exactly like a working one until a real
+# conflict arrives, so both the positive and negative cases are proved here on recorded log text.
+foreach ($contentionProblem in (Test-TrackDBuildContentionClassifier))
+{
+    [void] $selfTestProblems.Add("build contention: $contentionProblem")
 }
 
 # build.ps1 and build.bat are release inputs; their absence is a release failure, not a warning.
