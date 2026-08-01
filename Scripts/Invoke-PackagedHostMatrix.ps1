@@ -75,6 +75,10 @@ param(
     # like the mutex, and counted separately from it in the manifest.
     [int] $ResourceRetries = 2,
 
+    # Retries reserved for the machine-global Zen Store service being unreachable while it restarts.
+    # Environmental, like the two above, and counted separately from both in the manifest.
+    [int] $ZenRetries = 2,
+
     # Keeps the packaged output on disk after the row passes. Off by default: six engines times two
     # configurations of a packaged UE project is tens of gigabytes.
     [switch] $KeepPackages
@@ -237,6 +241,7 @@ foreach ($version in $EngineVersions)
             UatDurationSeconds  = $null
             MutexRetries        = 0
             ResourceRetries     = 0
+            ZenRetries          = 0
             BuildToolWaitSeconds = 0
             ExecutablePath      = $null
             ExecutableSha256    = $null
@@ -355,6 +360,17 @@ foreach ($version in $EngineVersions)
                 # has. Nothing is killed to make room.
                 $row.ResourceRetries++
                 Write-TrackDWarn "the compiler ran out of memory (C3859/C1076); waiting before retrying"
+                Start-Sleep -Seconds 60
+                continue
+            }
+
+            if ((Test-TrackDLogForZenStoreFailure $uatLog) -and $row.ZenRetries -lt $ZenRetries)
+            {
+                # UnrealPak could not reach the Zen Store service. It is machine-global and started
+                # on demand, so it is briefly absent while restarting; waiting lets it come back.
+                # Never started or stopped here - that would be managing another process's service.
+                $row.ZenRetries++
+                Write-TrackDWarn "the Zen Store service was unreachable; waiting before retrying"
                 Start-Sleep -Seconds 60
                 continue
             }

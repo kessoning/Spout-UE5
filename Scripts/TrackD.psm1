@@ -585,6 +585,39 @@ function Test-TrackDLogForResourceExhaustion
             $text -match 'out of heap space')
 }
 
+function Test-TrackDLogForZenStoreFailure
+{
+    <#
+    .SYNOPSIS
+        True when a build failed because the Zen Store service was unreachable.
+
+    .DESCRIPTION
+        From UE 5.5 onward the cooker stores its output in Zen, a machine-global background service
+        that the engine starts on demand and shuts down when idle. It is shared by every project and
+        every engine on the box, exactly like the UnrealBuildTool state, and when it is restarting or
+        has been stopped by something else UnrealPak cannot reach it:
+
+            Zen project 'X' get FAILED: Failed: Could not connect to server (7)
+            Fatal error: [File:...\ZenStoreHttpClient.cpp]
+
+        Curl error 7 is connection refused - nothing was listening. That says nothing about the
+        plugin: a row that hits it has already compiled and cooked successfully.
+
+        Retried and counted as its own class rather than folded into the others, because a reader
+        distinguishing a contended machine from a loaded one from a restarting service needs the
+        three kept apart. Deliberately narrow: the Zen diagnostic AND its source file must both be
+        present, so an ordinary pak or cook failure still fails the row on its first attempt.
+    #>
+    param([string] $LogPath)
+
+    if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) { return $false }
+    $text = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+    if (-not $text) { return $false }
+
+    return (($text -match 'Zen project .* get FAILED' -or $text -match 'Could not connect to server \(7\)') -and
+            ($text -match 'ZenStoreHttpClient' -or $text -match 'Zen project'))
+}
+
 # ---------------------------------------------------------------------------------------------
 # Evidence tree
 # ---------------------------------------------------------------------------------------------
@@ -1825,9 +1858,10 @@ AutomationTool exiting with ExitCode=6 (6)
             }
         }
 
-        # The two environmental classes must stay distinguishable, because they are counted
-        # separately in every manifest and a reader uses that split to tell a loaded machine from a
-        # contended one.
+        # The three environmental classes must stay distinguishable, because each is counted
+        # separately in every manifest and a reader uses that split to tell a contended machine from
+        # a loaded one from a restarting service. Cross-checked both ways: each classifier must
+        # recognise its own class and reject the other two.
         $pchProbe = Join-Path $probeRoot 'pch.log'
         Set-Content -LiteralPath $pchProbe -Value 'c1xx: fatal error C1076: compiler limit: internal heap limit reached' -Encoding UTF8
         if (-not (Test-TrackDLogForResourceExhaustion $pchProbe))
@@ -1837,6 +1871,40 @@ AutomationTool exiting with ExitCode=6 (6)
         if (Test-TrackDLogForBuildMutex $pchProbe)
         {
             [void] $problems.Add('resource exhaustion was misclassified as build-tool contention')
+        }
+        if (Test-TrackDLogForZenStoreFailure $pchProbe)
+        {
+            [void] $problems.Add('resource exhaustion was misclassified as a Zen Store failure')
+        }
+
+        # Verbatim from a UE 5.8 Development packaged-host row.
+        $zenProbe = Join-Path $probeRoot 'zen.log'
+        Set-Content -LiteralPath $zenProbe -Encoding UTF8 -Value @'
+LogWindows: Error: === Critical error: ===
+LogWindows: Error: Zen project 'SpoutHostTest.9f03d224' get FAILED: Failed: Could not connect to server (7) Url: /prj/SpoutHostTest.9f03d224
+LogWindows: Error: Fatal error: [File:D:\build\++UE5\Sync\Engine\Source\Developer\IoStoreUtilities\Private\ZenStoreHttpClient.cpp] [Line: 300]
+Took 38.26s to run UnrealPak.exe, ExitCode=3
+AutomationTool exiting with ExitCode=3 (Error_UnknownCommand)
+'@
+        if (-not (Test-TrackDLogForZenStoreFailure $zenProbe))
+        {
+            [void] $problems.Add('Zen Store classifier does not recognise a captured Zen connection failure')
+        }
+        if (Test-TrackDLogForBuildMutex $zenProbe)
+        {
+            [void] $problems.Add('a Zen Store failure was misclassified as build-tool contention')
+        }
+        if (Test-TrackDLogForResourceExhaustion $zenProbe)
+        {
+            [void] $problems.Add('a Zen Store failure was misclassified as resource exhaustion')
+        }
+
+        # An ordinary pak failure must still fail the row on its first attempt.
+        $pakProbe = Join-Path $probeRoot 'pak.log'
+        Set-Content -LiteralPath $pakProbe -Value 'UnrealPak: Error: Failed to open file for writing. ExitCode=3' -Encoding UTF8
+        if (Test-TrackDLogForZenStoreFailure $pakProbe)
+        {
+            [void] $problems.Add('an ordinary pak failure was misclassified as a Zen Store failure')
         }
 
         # A file nothing holds must read as free, or the pre-flight settle would wait out its whole
@@ -1957,6 +2025,7 @@ Export-ModuleMember -Function @(
     'Wait-TrackDBuildToolIdle',
     'Test-TrackDLogForBuildMutex',
     'Test-TrackDLogForResourceExhaustion',
+    'Test-TrackDLogForZenStoreFailure',
     'New-TrackDRunContext',
     'Write-TrackDJson',
     'Invoke-TrackDProcess',
