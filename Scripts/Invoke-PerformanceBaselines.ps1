@@ -179,12 +179,46 @@ if ([string]::IsNullOrWhiteSpace($executable))
         '-nodebuginfo', '-utf8output', '-unattended', '-nocompileuat'
     )
 
-    $uatResult = Invoke-TrackDProcess -FilePath $engine.RunUAT -ArgumentList $uatArgs `
-        -StdOutPath $uatLog -TimeoutSeconds $PackageTimeoutSeconds -WorkingDirectory $WorkRoot
+    # Settle and retry around the packaging build, the same way every other build in the pipeline
+    # does. A stage-level settle is not sufficient on its own, because an unrelated build elsewhere on
+    # the machine can reacquire UnrealBuildTool's shared state in the gap between the settle and the
+    # build starting; the build then fails at once with an IOException on the shared rules assembly,
+    # having compiled nothing, where a per-attempt retry comes through the same conditions intact.
+    $packageAttempt = 0
+    $uatResult = $null
+    while ($true)
+    {
+        $packageAttempt++
+
+        $settled = Wait-TrackDBuildToolIdle
+        if ($settled -gt 0)
+        {
+            Write-TrackDStep "waited ${settled}s for another build to release the shared UnrealBuildTool state"
+        }
+
+        $uatResult = Invoke-TrackDProcess -FilePath $engine.RunUAT -ArgumentList $uatArgs `
+            -StdOutPath $uatLog -TimeoutSeconds $PackageTimeoutSeconds -WorkingDirectory $WorkRoot
+
+        if ($uatResult.ExitCode -eq 0) { break }
+
+        # Only environmental contention is retried; a genuine packaging failure still throws on its
+        # first attempt with its log intact.
+        if ($packageAttempt -le 3 -and (Test-TrackDLogForBuildMutex $uatLog))
+        {
+            Write-TrackDWarn "shared UnrealBuildTool state was locked by another build; retrying the host packaging"
+            continue
+        }
+
+        break
+    }
 
     if ($uatResult.ExitCode -ne 0)
     {
-        throw "Could not package a host for the baselines: BuildCookRun exited $($uatResult.ExitCode). See $uatLog"
+        throw "Could not package a host for the baselines: BuildCookRun exited $($uatResult.ExitCode) after $packageAttempt attempt(s). See $uatLog"
+    }
+    if ($packageAttempt -gt 1)
+    {
+        Write-TrackDStep "host packaged on attempt $packageAttempt; earlier attempts hit shared build-tool contention"
     }
 
     $binariesDir = Join-Path $archiveDir ('Windows\{0}\Binaries\Win64' -f $hostProjectName)

@@ -381,7 +381,9 @@ function Test-BuildToolContention
         return $true
     }
 
-    if ($text -notmatch 'System\.IO\.IOException') { return $false }
+    # 'IOException' unqualified: UE 5.4 prints System.IO.IOException, UE 5.8 prints IOException.
+    # Narrowness comes from the shared-state frame below, not from the exception's spelling.
+    if ($text -notmatch 'IOException') { return $false }
 
     return ($text -match 'Log\.BackupLogFile' -or
             $text -match 'Log\.AddFileWriter' -or

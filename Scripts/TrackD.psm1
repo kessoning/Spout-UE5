@@ -536,7 +536,12 @@ function Test-TrackDLogForBuildMutex
     #   Log.BackupLogFile / Log.AddFileWriter   %LOCALAPPDATA%\UnrealBuildTool\Log.txt
     #   BuildRules\...Rules.dll                 the shared compiled rules assembly, which each
     #                                           engine version rebuilds to the same one path
-    if ($text -notmatch 'System\.IO\.IOException') { return $false }
+    #
+    # 'IOException' unqualified, not 'System.IO.IOException': engine versions disagree about which
+    # they print. UE 5.4 writes the full type name, UE 5.8 writes the short one, and requiring the
+    # long form would silently miss UE 5.8. Narrowness comes from the shared-state frame below, not
+    # from how verbosely the exception was named.
+    if ($text -notmatch 'IOException') { return $false }
 
     return ($text -match 'Log\.BackupLogFile' -or
             $text -match 'Log\.AddFileWriter' -or
@@ -1761,9 +1766,24 @@ Unhandled exception: System.IO.IOException: The process cannot access the file '
 AutomationTool exiting with ExitCode=6 (6)
 '@
 
+    # Verbatim from a UE 5.8 host packaging log. Same contention as $sharedRulesAssembly, but
+    # UE 5.8 prints the SHORT exception type name and the async frame, so a match that requires
+    # 'System.IO.IOException' finds the UE 5.4 form and misses this one.
+    $sharedRulesAssemblyShortName = @'
+Creating makefile for SpoutHostTestEditor (no existing makefile)
+UbaServer - Listening on 0.0.0.0:1345
+Unhandled exception: IOException: The process cannot access the file 'C:\Users\x\AppData\Local\UnrealEngine\Intermediate\Build\BuildRules\MarketplaceRules.dll' because it is being used by another process.
+   at System.IO.File.Open(String path, FileMode mode)
+   at UnrealBuildTool.DynamicCompilation.CompileAssemblyAsync(FileReference OutputAssemblyPath, IEnumerable`1 SourceFileNames, ILogger Logger)
+Unhandled 1 aggregate exceptions
+Result: Failed (OtherCompilationError)
+AutomationTool exiting with ExitCode=6 (6)
+'@
+
     $classifierCases = @(
         @{ Name = 'waitmutex log rotation'; Text = $waitMutexLogRotation; Expect = $true }
         @{ Name = 'shared rules assembly locked'; Text = $sharedRulesAssembly; Expect = $true }
+        @{ Name = 'shared rules assembly, short exception name'; Text = $sharedRulesAssemblyShortName; Expect = $true }
         @{ Name = 'plain conflicting instance'
            Text = "A conflicting instance of UnrealBuildTool is already running.`nTook 0.29s to run dotnet.exe, ExitCode=6"
            Expect = $true }
