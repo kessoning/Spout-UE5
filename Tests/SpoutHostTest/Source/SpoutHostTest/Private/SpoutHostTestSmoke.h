@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * The unattended lifecycle and level-travel smoke sequence.
  *
@@ -19,6 +23,11 @@
  *     which covers the sender-and-receiver-in-one-process case;
  *   - the level can be travelled away from and back (default 5 cycles) with a stream open;
  *   - closing leaves no stale session advertised;
+ *   - the GameViewportSenderSmoke scenario: a sender fed from the REAL game viewport's back
+ *     buffer (ESpoutSendTextureFrom::GameViewport) advertises externally, its shared texture
+ *     opens on an independent D3D11 device, its cross-process frame count advances over multiple
+ *     real presents, it survives one controlled resolution change, and it disappears after close
+ *     - all observed through FViewportSenderProbe rather than through the plugin's own state;
  *   - the process shuts down cleanly with a sender still publishing.
  *
  * Every step that cannot be genuinely performed fails the run. Nothing is skipped into a pass.
@@ -69,6 +78,14 @@ namespace SpoutHostTest
 			ReceiverCycles,
 			LevelTravel,
 			StaleSessionCheck,
+			ViewportSenderStart,
+			ViewportSenderAdvertise,
+			ViewportSenderFrames,
+			ViewportSenderResize,
+			ViewportSenderResize2,
+			ViewportSenderClose,
+			ViewportAttachDetachStress,
+			ViewportPostCloseResize,
 			ShutdownWithActivity,
 			Finished
 		};
@@ -100,7 +117,44 @@ namespace SpoutHostTest
 		bool StepReceiverCycles();
 		bool StepLevelTravel();
 		bool StepStaleSessionCheck();
+
+		/**
+		 * GameViewportSenderSmoke.
+		 *
+		 * The source is explicitly ESpoutSendTextureFrom::GameViewport: publication happens inside
+		 * the plugin's back-buffer present callback, not from any render target this harness owns.
+		 * Because one queued request publishes at most one present, the frames/resize steps
+		 * re-queue the send every tick, exactly as a real per-tick Blueprint sender does.
+		 *
+		 * Evidence is deliberately external (FViewportSenderProbe): a sender that never really
+		 * publishes cannot advertise in the shared registry, cannot be opened from its share
+		 * handle on an unrelated device, and cannot move its cross-process frame semaphore.
+		 */
+		bool StepViewportSenderStart();
+		bool StepViewportSenderAdvertise();
+		bool StepViewportSenderFrames();
+		bool StepViewportSenderResize();
+		bool StepViewportSenderResize2();
+		bool StepViewportSenderClose();
+
+		/**
+		 * Attach/detach lifecycle stress.
+		 *
+		 * Each cycle drives the producer through a FULL detach and re-attach: CloseAllStreams runs
+		 * the ordered shutdown (which removes the back-buffer delegate — on UE 5.3 from the
+		 * rendering thread, with a completion wait), and the next GameViewport send re-registers
+		 * it. Repeating that proves the bounded waits on both the registration and removal paths
+		 * complete every time instead of deadlocking or timing out, and that a re-attached
+		 * producer still publishes.
+		 */
+		bool StepViewportAttachDetachStress();
+
+		bool StepViewportPostCloseResize();
+
 		bool StepShutdownWithActivity();
+
+		/** Queues one GameViewport publish; fails the run (and returns false) on rejection. */
+		bool QueueViewportSend();
 
 		void Advance(EStep Next);
 		void FailAndFinish(const FString& Reason);
@@ -161,5 +215,27 @@ namespace SpoutHostTest
 		FName LifecycleSenderName;
 		FName ShutdownSenderName;
 		FName WarmupSenderName;
+
+		// --- GameViewportSenderSmoke state -------------------------------------------------------
+
+		/** Unique per process, like the other sender names, so stale senders cannot collide. */
+		FName ViewportSenderName;
+
+		/** The external observer. Created in ViewportSenderStart, closed in ViewportSenderClose. */
+		TUniquePtr<class FViewportSenderProbe> ViewportProbe;
+
+		// External observations. Every one comes from the probe, none from the plugin.
+		int32 ViewportObservedAdvances = 0;
+		long ViewportInitialSenderFrame = 0;
+		long ViewportLastSenderFrame = 0;
+		double ViewportFirstAdvanceSeconds = 0.0;
+		double ViewportLastAdvanceSeconds = 0.0;
+		int32 ViewportResizeObservedAdvances = 0;
+		bool bViewportResizeDimensionsSeen = false;
+		int32 ViewportResize2ObservedAdvances = 0;
+		bool bViewportResize2DimensionsSeen = false;
+		int32 CompletedViewportRestartCycles = 0;
+		double ViewportRestartWorstCycleSeconds = 0.0;
+		double ViewportRestartCycleStartSeconds = 0.0;
 	};
 }

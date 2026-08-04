@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /* SpoutPlugin Docs — reusable component builders (return HTML strings) */
 window.C = (function () {
   const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

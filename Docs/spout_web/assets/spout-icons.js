@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /* SpoutPlugin Docs — inline SVG icons (stroke=currentColor) */
 window.ICON = (function () {
   const s = (p, w) => `<svg width="${w||18}" height="${w||18}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;

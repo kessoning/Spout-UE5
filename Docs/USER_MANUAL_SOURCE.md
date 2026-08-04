@@ -5,12 +5,12 @@ using the plugin in Unreal Engine, mainly through Blueprints. Internal C++ detai
 where it helps explain a requirement, limitation, or troubleshooting step.
 
 - Plugin: SpoutPlugin (Spout Plugin)
-- Version: 0.0.9 (must match `SpoutPlugin.uplugin`; `Scripts/Validate-Documentation.ps1` fails the
+- Version: 1.0.0 (must match `SpoutPlugin.uplugin`; `Scripts/Validate-Documentation.ps1` fails the
   release when it does not)
 - Engine target: Unreal Engine 5.3 - 5.8 (Win64)
 - Module: SpoutPlugin (Runtime)
 - Platform: Windows 64-bit, DirectX 12 RHI
-- Documentation date: 2026-06-05
+- Documentation date: 2026-08-03
 
 ---
 
@@ -191,7 +191,14 @@ Call Spout Receiver continuously with a matching name.
 
 Outputs: Out Texture (transient texture, resized to the stream), Out Mat (dynamic material
 instance created from Input Material on first call, with Out Texture bound to the parameter), and
-Optional Output Render Target (the frame is also copied into it if provided).
+Optional Output Render Target (the frame is also copied into it if provided; its pixel format
+must match the incoming frame and it must be single-sampled, otherwise it is left untouched with
+a logged warning while Out Texture keeps updating).
+
+Color Space (advanced pin): how the received bytes are interpreted. Auto follows the format
+convention and is right for almost every sender; Linear turns decoding off for senders that
+publish linear 8-bit data; sRGB forces decoding and is valid for 8-bit frames only. See the
+Blueprint API Reference for the full contract.
 
 Finding senders: use Spout Info to list active names, widths, and heights. Names must match
 exactly. The receiver reconnects automatically when the sender appears or changes size.
@@ -271,11 +278,22 @@ Removes the named sender and releases its handle. Scoped to senders only.
 
 ### Spout Receiver
 
-`bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr)`
+`bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr, ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto)`
 
-Receives a stream. `OptionalOutputRenderTarget` is an advanced-display pin. Returns true when the
-sender exists and a receive was enqueued. Outputs Out Mat and Out Texture. Texture Parameter Name
-defaults to `SpoutTexture` when empty. Validate outputs before use.
+Receives a stream. `OptionalOutputRenderTarget` and `ColorSpace` are advanced-display pins.
+Returns true when the sender exists and a receive was enqueued. Outputs Out Mat and Out Texture.
+Texture Parameter Name defaults to `SpoutTexture` when empty. Validate outputs before use.
+
+Color Space decides how the received bytes are interpreted. Auto (the default) follows the format
+convention: 8-bit frames decode as sRGB, 10-bit and 16-bit float frames stay linear, which matches
+what other Spout applications publish. Linear applies no decoding; use it when the sender
+publishes linear or data values in an 8-bit format, such as a render target created with Force
+Linear Gamma. sRGB forces decoding and is only valid for 8-bit frames; requesting it for a 10-bit
+or float frame fails the call with a logged diagnostic rather than being silently ignored.
+
+The Optional Output Render Target must match the incoming frame's pixel format exactly and be
+single-sampled. A mismatched target is left untouched and the mismatch is logged; the call still
+succeeds and Out Texture still updates. Size differences are resolved by resizing the target.
 
 ### Spout Info
 
@@ -326,6 +344,8 @@ share (supported: B8G8R8A8, R8G8B8A8, A2B10G10R10, FloatRGBA).
 ### Enums
 
 ESpoutType: Sender, Receiver. ESpoutSendTextureFrom: GameViewport, TextureRenderTarget2D.
+ESpoutColorSpace: Auto (follow the format convention - 8-bit decodes as sRGB, 10-bit and float
+stay linear), SRGB (force sRGB decoding; 8-bit formats only), Linear (no decoding).
 
 ### FSenderStruct
 
@@ -446,7 +466,9 @@ Black texture from SceneCapture2D: set Capture Source to Final Color (HDR) in Li
 Color Space.
 
 Wrong colors or gamma: adjust render target format and Capture Source; try RGBA8 sRGB first, then
-RGB10A2.
+RGB10A2. On the receiving side, set the Spout Receiver node's Color Space pin: Auto for ordinary
+senders, Linear when the sender publishes linear 8-bit data (for example a Force Linear Gamma
+render target sent from another Unreal instance).
 
 Stream name mismatch: names are case-sensitive; use Spout Info to read exact names.
 

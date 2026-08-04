@@ -39,10 +39,13 @@ Prebuilt binaries are distributed through Patreon with free download.
 4. Build the project from Visual Studio or from the Unreal Editor when it prompts to compile.
 
 `Spout.dll` is staged automatically. `SpoutPlugin.Build.cs` registers it as a runtime
-dependency to `$(BinaryOutputDir)/Spout.dll`, which is the plugin's own `Binaries/Win64`
-folder. This is the same location used for normal project builds, for `RunUAT BuildPlugin`
-packaging, and for precompiled release zips, and it matches where the startup diagnostics
-look. Do not manually copy `Spout.dll` elsewhere.
+dependency to `$(BinaryOutputDir)/Spout.dll`. For a source build in your project's `Plugins/`
+folder that resolves to the plugin's own `Binaries/Win64`, which is where the startup
+diagnostics look first. In a packaged (monolithic) game the same rule stages the DLL next to
+your game executable instead. Note that raw `RunUAT BuildPlugin` output does not include the
+DLL; the release pipeline stages it into the precompiled zips explicitly. See
+[PACKAGING_AND_DISTRIBUTION.md](PACKAGING_AND_DISTRIBUTION.md) for every layout. Do not
+manually copy `Spout.dll` elsewhere.
 
 ## Set the project RHI to DirectX 12
 

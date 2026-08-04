@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Implements creation and teardown of the D3D11-on-D3D12 bridge and Spout helpers using
  * UE's D3D12 RHI, providing a shared context for sender and receiver paths.

@@ -12,7 +12,7 @@ sender.
 |---|---|---|
 | Out Texture | `UTexture2D*` (by ref) | Transient texture owned by the plugin, created and resized to match the stream, updated each call. |
 | Out Mat | `UMaterialInstanceDynamic*` (by ref) | Created from Input Material on first call if Input Material is set, with Out Texture bound to the texture parameter. |
-| Optional Output Render Target | `UTextureRenderTarget2D*` (input) | If provided, the received frame is also copied into it. It is resized to match the stream automatically. |
+| Optional Output Render Target | `UTextureRenderTarget2D*` (input) | If provided, the received frame is also copied into it. It is resized to match the stream automatically, but its pixel format must match the incoming frame exactly and it must be single-sampled; a mismatched target is left untouched (see below). |
 
 Always validate Out Mat and Out Texture before using them. The function returns false when the
 named sender is not currently available, in which case the outputs are not updated.
@@ -32,7 +32,7 @@ The receiver has two implementations, selected at runtime by the console variabl
 | Value | Path | Behavior |
 |---|---|---|
 | `1` (default) | GPU-direct | Opens the sender's shared DX11 texture and copies it straight into the UE RHI destination through D3D11-on-12 wrapping. No staging texture, no Map/Unmap, no per-frame CPU copy. |
-| `0` | Legacy CPU readback | Copies into a CPU-readable staging texture, maps it, and uploads via `RHIUpdateTexture2D`. Kept for debugging and parity with older builds. More expensive at high resolution. |
+| `0` | Legacy CPU readback | Copies into a CPU-readable staging texture, maps it, and uploads via `FRHICommandList::UpdateTexture2D`. Kept for debugging and parity with older builds. More expensive at high resolution. |
 
 Both paths produce visually identical output. The difference is performance only. Unless you
 have a specific reason to use the legacy path, leave the default.
@@ -66,8 +66,19 @@ the Optional Output Render Target.
 ## Render target output
 
 If you pass an Optional Output Render Target, the received frame is copied into it on the same
-render path as Out Texture. It is resized to the stream dimensions automatically. The
-recommended format is RGBA8 sRGB. See [RENDER_TARGETS_AND_FORMATS.md](RENDER_TARGETS_AND_FORMATS.md).
+render path as Out Texture. It is resized to the stream dimensions automatically. Two things
+are not adjusted automatically and must match:
+
+- The render target's **pixel format** must equal the received frame's format exactly. The plugin
+  never reformats your asset at runtime.
+- The render target must be **single-sampled** (no MSAA).
+
+A target that fails either check is excluded from the copy and left completely untouched, and a
+warning naming both formats is written to the log; the call still succeeds and Out Texture keeps
+updating. If the target stays black while Out Texture works, check the log for that warning and
+recreate the render target to match the sender. The recommended format is RGBA8 sRGB, which
+matches the most common senders. See
+[RENDER_TARGETS_AND_FORMATS.md](RENDER_TARGETS_AND_FORMATS.md).
 
 Note: the `OutputRenderTarget` field on `FSenderStruct` is a separate, unused field and is not
 the same as this parameter. The functional render-target output is the Optional Output Render

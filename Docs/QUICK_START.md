@@ -43,7 +43,9 @@ If the output is black, the most common cause is the Capture Source setting in s
 4. Read the outputs:
    - Out Texture - a transient `UTexture2D` updated from the stream.
    - Out Mat - a dynamic material instance with the received texture bound to the parameter.
-   - Optional Output Render Target - if provided, the received frame is copied into it.
+   - Optional Output Render Target - if provided, the received frame is copied into it. Its
+     pixel format must match the incoming frame and it must be single-sampled; a mismatched
+     target is left untouched with a logged warning (size is adjusted automatically).
 5. Validate Out Mat and Out Texture before using them. The sender may not be running yet.
 6. Apply Out Mat to a mesh, or sample Out Texture directly.
 

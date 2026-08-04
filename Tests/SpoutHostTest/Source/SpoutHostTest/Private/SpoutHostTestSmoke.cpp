@@ -1,12 +1,19 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 #include "SpoutHostTestSmoke.h"
 
 #include "SpoutHostTestDiagnostics.h"
 #include "SpoutHostTestModule.h"
 #include "SpoutHostTestReport.h"
+#include "SpoutHostTestViewportProbe.h"
 
 #include "SpoutBPFunctionLibrary.h"
 
+#include "DynamicRHI.h"
 #include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
@@ -17,8 +24,16 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/CommandLine.h"
 #include "Misc/CoreDelegates.h"
+// Same macro the plugin's SpoutSender.cpp keys its delegate-signature branch on. Evaluating the
+// identical expression against the identical engine headers is what lets this harness state which
+// viewport access path the plugin compiled (see ViewportAccessPathName below).
+#include "Misc/EngineVersionComparison.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
+// EWindowMode for the controlled resolution change below.
+#include "GenericPlatform/GenericWindow.h"
+// FSystemResolution, used for the controlled mid-run resolution change.
+#include "UnrealEngine.h"
 
 namespace SpoutHostTest
 {
@@ -38,6 +53,71 @@ namespace SpoutHostTest
 		constexpr int32 TravelBudgetFrames = 1800;
 
 		constexpr double DefaultDeadlineSeconds = 600.0;
+
+		// GameViewportSenderSmoke thresholds. Conservative on purpose: the point is "frames are
+		// genuinely advancing across real presents", not a performance assertion. Three distinct
+		// new-frame observations and a sender frame count that moved by at least two cannot be
+		// produced by a single accidental publish.
+		constexpr int32 ViewportMinAdvanceObservations = 3;
+		constexpr long ViewportMinFrameDelta = 2;
+
+		// The controlled resize target. Different from the launch resolution (640x360) in both
+		// dimensions, so a stale registry entry cannot satisfy the check by accident.
+		constexpr int32 ViewportResizeWidth = 800;
+		constexpr int32 ViewportResizeHeight = 450;
+
+		// The second resize target: a third size, distinct from both the launch resolution and
+		// the first resize, so each transition is provably a fresh swap-chain resize.
+		constexpr int32 ViewportResize2Width = 960;
+		constexpr int32 ViewportResize2Height = 540;
+
+		// How many frames the host must stay alive after the post-close resize request. The
+		// resize itself is processed within a frame or two; the margin is for slow machines.
+		constexpr int32 PostCloseResizeSurviveFrames = 60;
+
+		// Full detach/re-attach cycles driven through CloseAllStreams. Each one removes and
+		// re-adds the back-buffer delegate, an operation the plugin performs on the rendering
+		// thread on UE 5.3; three is enough to catch a wait that only sometimes completes.
+		constexpr int32 ViewportRestartCycleCount = 3;
+
+		/**
+		 * Which back-buffer access path the plugin compiled on this engine.
+		 *
+		 * This is decided by the same UE_VERSION_OLDER_THAN(5, 8, 0) expression, against the same
+		 * engine headers, as SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER in the plugin's
+		 * SpoutSender.cpp. The two cannot disagree: the branches change the delegate lambda's
+		 * parameter list, so a plugin built with the wrong branch for this engine would not
+		 * compile at all, let alone publish. Frames advancing in this run therefore prove the
+		 * named path executed, not merely that common code compiled.
+		 */
+		const TCHAR* ViewportAccessPathName()
+		{
+#if !UE_VERSION_OLDER_THAN(5, 8, 0)
+			return TEXT("SlateViewportProvider");
+#else
+			return TEXT("LegacyBackBuffer");
+#endif
+		}
+
+		/**
+		 * Which thread the plugin mutates the back-buffer delegate's invocation list on.
+		 *
+		 * Derived from the same UE_VERSION_OLDER_THAN(5, 4, 0) expression, against the same engine
+		 * headers, as SPOUT_BACKBUFFER_DELEGATE_IS_THREAD_SAFE in the plugin's SpoutSender.cpp:
+		 * UE 5.3 declares FOnBackBufferReadyToPresent non-thread-safe and so mutates it on the
+		 * rendering thread, while 5.4+ use the thread-safe declaration and mutate from the game
+		 * thread. Recording it here lets the matrix assert the right branch was compiled for the
+		 * engine under test; the plugin additionally logs the ACTUAL thread it mutated on, which is
+		 * what proves the branch executed rather than merely compiled.
+		 */
+		const TCHAR* ViewportDelegateMutationThreadName()
+		{
+#if UE_VERSION_OLDER_THAN(5, 4, 0)
+			return TEXT("RenderThread");
+#else
+			return TEXT("GameThread");
+#endif
+		}
 
 		int32 ParseIntSwitch(const TCHAR* Switch, int32 Default, int32 MinValue)
 		{
@@ -102,6 +182,7 @@ namespace SpoutHostTest
 		Instance->LifecycleSenderName = FName(*FString::Printf(TEXT("SpoutHostTest_Life_%u"), ProcessId));
 		Instance->ShutdownSenderName  = FName(*FString::Printf(TEXT("SpoutHostTest_Exit_%u"), ProcessId));
 		Instance->WarmupSenderName    = FName(*FString::Printf(TEXT("SpoutHostTest_Warm_%u"), ProcessId));
+		Instance->ViewportSenderName  = FName(*FString::Printf(TEXT("SpoutHostTest_View_%u"), ProcessId));
 
 		Instance->TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 			FTickerDelegate::CreateRaw(Instance, &FSmokeRunner::Tick), 0.0f);
@@ -123,6 +204,7 @@ namespace SpoutHostTest
 		Instance->SourceRenderTarget.Reset();
 		Instance->ReceivedTexture.Reset();
 		Instance->ReceivedMaterial.Reset();
+		Instance->ViewportProbe.Reset();
 
 		// Deliberately not deleted: HasPassed() is read after Stop() during module shutdown, and the
 		// process is exiting anyway. Leaking one small object at exit beats reading freed memory to
@@ -203,6 +285,14 @@ namespace SpoutHostTest
 		case EStep::ReceiverCycles:       bStepComplete = StepReceiverCycles();       break;
 		case EStep::LevelTravel:          bStepComplete = StepLevelTravel();          break;
 		case EStep::StaleSessionCheck:    bStepComplete = StepStaleSessionCheck();    break;
+		case EStep::ViewportSenderStart:     bStepComplete = StepViewportSenderStart();     break;
+		case EStep::ViewportSenderAdvertise: bStepComplete = StepViewportSenderAdvertise(); break;
+		case EStep::ViewportSenderFrames:    bStepComplete = StepViewportSenderFrames();    break;
+		case EStep::ViewportSenderResize:    bStepComplete = StepViewportSenderResize();    break;
+		case EStep::ViewportSenderResize2:   bStepComplete = StepViewportSenderResize2();   break;
+		case EStep::ViewportSenderClose:     bStepComplete = StepViewportSenderClose();     break;
+		case EStep::ViewportAttachDetachStress: bStepComplete = StepViewportAttachDetachStress(); break;
+		case EStep::ViewportPostCloseResize: bStepComplete = StepViewportPostCloseResize(); break;
 		case EStep::ShutdownWithActivity: bStepComplete = StepShutdownWithActivity(); break;
 		default: break;
 		}
@@ -222,7 +312,15 @@ namespace SpoutHostTest
 			case EStep::SameNameRestart:      Advance(EStep::ReceiverCycles);       break;
 			case EStep::ReceiverCycles:       Advance(EStep::LevelTravel);          break;
 			case EStep::LevelTravel:          Advance(EStep::StaleSessionCheck);    break;
-			case EStep::StaleSessionCheck:    Advance(EStep::ShutdownWithActivity); break;
+			case EStep::StaleSessionCheck:    Advance(EStep::ViewportSenderStart);  break;
+			case EStep::ViewportSenderStart:     Advance(EStep::ViewportSenderAdvertise); break;
+			case EStep::ViewportSenderAdvertise: Advance(EStep::ViewportSenderFrames);    break;
+			case EStep::ViewportSenderFrames:    Advance(EStep::ViewportSenderResize);    break;
+			case EStep::ViewportSenderResize:    Advance(EStep::ViewportSenderResize2);   break;
+			case EStep::ViewportSenderResize2:   Advance(EStep::ViewportSenderClose);     break;
+			case EStep::ViewportSenderClose:     Advance(EStep::ViewportAttachDetachStress); break;
+			case EStep::ViewportAttachDetachStress: Advance(EStep::ViewportPostCloseResize); break;
+			case EStep::ViewportPostCloseResize: Advance(EStep::ShutdownWithActivity);    break;
 			case EStep::ShutdownWithActivity: Advance(EStep::Finished);             break;
 			default: break;
 			}
@@ -695,6 +793,495 @@ namespace SpoutHostTest
 		}
 
 		FReport::Get()->Mark(Markers::NoStaleSessionPass);
+		return true;
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// GameViewportSenderSmoke
+	// ---------------------------------------------------------------------------------------------
+
+	bool FSmokeRunner::QueueViewportSend()
+	{
+		// The source selector is the point of this scenario: GameViewport, never a render target.
+		// The third argument is ignored on this path and passed null so no render target of ours
+		// can possibly be involved.
+		if (!USpoutBPFunctionLibrary::SpoutSender(
+				ViewportSenderName, ESpoutSendTextureFrom::GameViewport, nullptr))
+		{
+			FailAndFinish(FString::Printf(
+				TEXT("viewport sender: SpoutSender rejected a GameViewport request at step %d frame %d"),
+				static_cast<int32>(Step), StepFrames));
+			return false;
+		}
+		return true;
+	}
+
+	bool FSmokeRunner::StepViewportSenderStart()
+	{
+		FReport* Report = FReport::Get();
+
+		if (StepFrames == 1)
+		{
+			Report->Mark(Markers::ViewportBegin);
+			Report->SetField(TEXT("viewportScenario"), TEXT("GameViewportSenderSmoke"));
+			Report->SetField(TEXT("viewportSenderName"), ViewportSenderName.ToString());
+			Report->SetField(TEXT("viewportAdvertiseBudgetFrames"), FString::FromInt(RegistrationBudgetFrames));
+			Report->SetField(TEXT("viewportFrameBudgetFrames"), FString::FromInt(RegistrationBudgetFrames));
+			Report->SetField(TEXT("viewportMinAdvanceObservations"), FString::FromInt(ViewportMinAdvanceObservations));
+			Report->SetField(TEXT("viewportMinFrameDelta"), FString::FromInt(static_cast<int32>(ViewportMinFrameDelta)));
+
+			Report->SetField(TEXT("viewportAccessPath"), ViewportAccessPathName());
+			Report->MarkValue(Markers::ViewportPathValue, ViewportAccessPathName());
+
+			Report->SetField(TEXT("viewportDelegateMutationThread"), ViewportDelegateMutationThreadName());
+			Report->MarkValue(Markers::ViewportDelegateThreadValue, ViewportDelegateMutationThreadName());
+
+			const FString RhiName = GDynamicRHI ? FString(GDynamicRHI->GetName()) : FString(TEXT("none"));
+			Report->SetField(TEXT("viewportRhi"), RhiName);
+			if (!RhiName.Contains(TEXT("D3D12")))
+			{
+				FailAndFinish(FString::Printf(
+					TEXT("viewport sender: the host is running RHI '%s', not the required D3D12"), *RhiName));
+				return false;
+			}
+		}
+
+		// A real viewport and a real window are prerequisites, not things to wait out forever:
+		// in this windowed host both exist from startup, so the budget only absorbs frame noise.
+		const bool bViewportFound = GEngine && GEngine->GameViewport && GEngine->GameViewport->Viewport;
+		const bool bWindowFound = bViewportFound && GEngine->GameViewport->GetWindow().IsValid();
+		Report->SetField(TEXT("viewportGameViewportFound"), bViewportFound ? TEXT("true") : TEXT("false"));
+		Report->SetField(TEXT("viewportGameWindowFound"), bWindowFound ? TEXT("true") : TEXT("false"));
+
+		if (!bViewportFound || !bWindowFound)
+		{
+			if (StepFrames > RegistrationBudgetFrames)
+			{
+				FailAndFinish(TEXT("viewport sender: no game viewport/window appeared within the budget"));
+			}
+			return false;
+		}
+
+		// The external observer. Its failure is the scenario's failure: without it there is no
+		// evidence, and no evidence is a fail, not a skip.
+		ViewportProbe = MakeUnique<FViewportSenderProbe>();
+		FString ProbeError;
+		if (!ViewportProbe->Initialize(ProbeError))
+		{
+			FailAndFinish(FString::Printf(TEXT("viewport sender: %s"), *ProbeError));
+			return false;
+		}
+
+		const bool bFrameCounting = ViewportProbe->IsFrameCountingAvailable();
+		Report->SetField(TEXT("viewportFrameCountEnabled"), bFrameCounting ? TEXT("true") : TEXT("false"));
+		if (!bFrameCounting)
+		{
+			// Frame counting can be disabled machine-wide in SpoutSettings. Without the semaphore
+			// there is no external frame evidence to record, so this machine cannot produce the
+			// validation this scenario exists for.
+			FailAndFinish(TEXT("viewport sender: Spout frame counting is disabled on this machine, so frame advancement cannot be observed externally"));
+			return false;
+		}
+
+		ViewportProbe->BeginFrameObservation(ViewportSenderName.ToString());
+		ViewportInitialSenderFrame = ViewportProbe->GetSenderFrameCount();
+		Report->SetField(TEXT("viewportInitialSenderFrame"), FString::FromInt(static_cast<int32>(ViewportInitialSenderFrame)));
+
+		return QueueViewportSend();
+	}
+
+	bool FSmokeRunner::StepViewportSenderAdvertise()
+	{
+		// One publish per present, so real per-frame use means re-queueing every tick.
+		if (!QueueViewportSend())
+		{
+			return false;
+		}
+
+		FReport* Report = FReport::Get();
+		const FString SenderName = ViewportSenderName.ToString();
+
+		uint32 Width = 0, Height = 0, DxgiFormat = 0;
+		if (ViewportProbe->IsSenderAdvertised(SenderName)
+			&& ViewportProbe->GetSenderDescription(SenderName, Width, Height, DxgiFormat))
+		{
+			if (Width == 0 || Height == 0)
+			{
+				FailAndFinish(FString::Printf(
+					TEXT("viewport sender: advertised with a degenerate size %ux%u"), Width, Height));
+				return false;
+			}
+
+			Report->SetField(TEXT("viewportSenderAdvertised"), TEXT("true"));
+			Report->SetField(TEXT("viewportRegisteredAfterFrames"), FString::FromInt(StepFrames));
+			Report->SetField(TEXT("viewportSenderWidth"), FString::FromInt(static_cast<int32>(Width)));
+			Report->SetField(TEXT("viewportSenderHeight"), FString::FromInt(static_cast<int32>(Height)));
+			Report->SetField(TEXT("viewportSenderDxgiFormat"), FString::FromInt(static_cast<int32>(DxgiFormat)));
+			Report->Mark(Markers::ViewportAdvertisedPass);
+
+			// Open the shared texture on the probe's own device, from the share handle in the
+			// registry - the exact call an external receiver makes.
+			uint32 TexWidth = 0, TexHeight = 0, TexFormat = 0;
+			FString OpenError;
+			if (!ViewportProbe->OpenSharedTexture(SenderName, TexWidth, TexHeight, TexFormat, OpenError))
+			{
+				FailAndFinish(FString::Printf(TEXT("viewport sender: %s"), *OpenError));
+				return false;
+			}
+			if (TexWidth != Width || TexHeight != Height)
+			{
+				FailAndFinish(FString::Printf(
+					TEXT("viewport sender: the opened shared texture is %ux%u but the registry advertises %ux%u"),
+					TexWidth, TexHeight, Width, Height));
+				return false;
+			}
+
+			Report->SetField(TEXT("viewportSharedTextureOpened"), TEXT("true"));
+			Report->SetField(TEXT("viewportSharedTextureWidth"), FString::FromInt(static_cast<int32>(TexWidth)));
+			Report->SetField(TEXT("viewportSharedTextureHeight"), FString::FromInt(static_cast<int32>(TexHeight)));
+			Report->SetField(TEXT("viewportSharedTextureDxgiFormat"), FString::FromInt(static_cast<int32>(TexFormat)));
+			Report->Mark(Markers::ViewportTextureOpenPass);
+			return true;
+		}
+
+		if (StepFrames > RegistrationBudgetFrames)
+		{
+			FailAndFinish(FString::Printf(
+				TEXT("viewport sender '%s' never appeared in the Spout registry within %d frames"),
+				*SenderName, RegistrationBudgetFrames));
+		}
+		return false;
+	}
+
+	bool FSmokeRunner::StepViewportSenderFrames()
+	{
+		if (!QueueViewportSend())
+		{
+			return false;
+		}
+
+		FReport* Report = FReport::Get();
+
+		// The receiver side of the cross-process frame semaphore. Each true is at least one new
+		// frame published since the previous poll; each publish is one completed present-callback
+		// -> render-command -> copy -> announce chain, which is why this doubles as the external
+		// observation of callback executions.
+		if (ViewportProbe->PollNewFrame())
+		{
+			const double NowSeconds = FPlatformTime::Seconds() - StartTimeSeconds;
+			if (ViewportObservedAdvances == 0)
+			{
+				ViewportFirstAdvanceSeconds = NowSeconds;
+			}
+			ViewportLastAdvanceSeconds = NowSeconds;
+			++ViewportObservedAdvances;
+			ViewportLastSenderFrame = ViewportProbe->GetSenderFrameCount();
+		}
+
+		const long FrameDelta = ViewportLastSenderFrame - ViewportInitialSenderFrame;
+		if (ViewportObservedAdvances >= ViewportMinAdvanceObservations && FrameDelta >= ViewportMinFrameDelta)
+		{
+			Report->SetField(TEXT("viewportObservedFrameAdvances"), FString::FromInt(ViewportObservedAdvances));
+			Report->SetField(TEXT("viewportCallbackObservations"), FString::FromInt(ViewportObservedAdvances));
+			Report->SetField(TEXT("viewportFinalSenderFrame"), FString::FromInt(static_cast<int32>(ViewportLastSenderFrame)));
+			Report->SetField(TEXT("viewportFrameAdvanceDelta"), FString::FromInt(static_cast<int32>(FrameDelta)));
+			Report->SetField(TEXT("viewportFirstAdvanceSeconds"), FString::Printf(TEXT("%.3f"), ViewportFirstAdvanceSeconds));
+			Report->SetField(TEXT("viewportLastAdvanceSeconds"), FString::Printf(TEXT("%.3f"), ViewportLastAdvanceSeconds));
+			Report->SetField(TEXT("viewportFramesObservedAfterFrames"), FString::FromInt(StepFrames));
+			Report->Mark(Markers::ViewportFramesPass);
+			return true;
+		}
+
+		if (StepFrames > RegistrationBudgetFrames)
+		{
+			FailAndFinish(FString::Printf(
+				TEXT("viewport sender: only %d frame advance(s) (sender frame moved %d) were observed within %d frames; required %d observation(s) and a delta of %d"),
+				ViewportObservedAdvances, static_cast<int32>(FrameDelta), RegistrationBudgetFrames,
+				ViewportMinAdvanceObservations, static_cast<int32>(ViewportMinFrameDelta)));
+		}
+		return false;
+	}
+
+	bool FSmokeRunner::StepViewportSenderResize()
+	{
+		FReport* Report = FReport::Get();
+
+		if (StepFrames == 1)
+		{
+			// One controlled resolution change while the sender is live. The back buffer is the
+			// source on this path, so the sender must follow the swap chain to the new size.
+			Report->SetField(TEXT("viewportResizeAttempted"), TEXT("true"));
+			Report->SetField(TEXT("viewportResizeRequestedWidth"), FString::FromInt(ViewportResizeWidth));
+			Report->SetField(TEXT("viewportResizeRequestedHeight"), FString::FromInt(ViewportResizeHeight));
+			FSystemResolution::RequestResolutionChange(ViewportResizeWidth, ViewportResizeHeight, EWindowMode::Windowed);
+		}
+
+		if (!QueueViewportSend())
+		{
+			return false;
+		}
+
+		if (ViewportProbe->PollNewFrame())
+		{
+			ViewportLastSenderFrame = ViewportProbe->GetSenderFrameCount();
+			if (bViewportResizeDimensionsSeen)
+			{
+				// A publish AFTER the registry showed the new size: the resized swap chain is
+				// genuinely flowing.
+				++ViewportResizeObservedAdvances;
+			}
+		}
+
+		if (!bViewportResizeDimensionsSeen)
+		{
+			uint32 Width = 0, Height = 0, DxgiFormat = 0;
+			if (ViewportProbe->GetSenderDescription(ViewportSenderName.ToString(), Width, Height, DxgiFormat)
+				&& Width == static_cast<uint32>(ViewportResizeWidth)
+				&& Height == static_cast<uint32>(ViewportResizeHeight))
+			{
+				bViewportResizeDimensionsSeen = true;
+				Report->SetField(TEXT("viewportResizeObservedWidth"), FString::FromInt(static_cast<int32>(Width)));
+				Report->SetField(TEXT("viewportResizeObservedHeight"), FString::FromInt(static_cast<int32>(Height)));
+			}
+		}
+
+		if (bViewportResizeDimensionsSeen && ViewportResizeObservedAdvances >= 1)
+		{
+			// Re-open the shared texture: the resize recreated it, so the registry's share handle
+			// changed, and the reopened resource must report the new geometry.
+			uint32 TexWidth = 0, TexHeight = 0, TexFormat = 0;
+			FString OpenError;
+			if (!ViewportProbe->OpenSharedTexture(ViewportSenderName.ToString(), TexWidth, TexHeight, TexFormat, OpenError))
+			{
+				FailAndFinish(FString::Printf(TEXT("viewport sender: after resize, %s"), *OpenError));
+				return false;
+			}
+			if (TexWidth != static_cast<uint32>(ViewportResizeWidth) || TexHeight != static_cast<uint32>(ViewportResizeHeight))
+			{
+				FailAndFinish(FString::Printf(
+					TEXT("viewport sender: after resize the reopened shared texture is %ux%u, expected %dx%d"),
+					TexWidth, TexHeight, ViewportResizeWidth, ViewportResizeHeight));
+				return false;
+			}
+
+			Report->SetField(TEXT("viewportResizeObservedFrameAdvances"), FString::FromInt(ViewportResizeObservedAdvances));
+			Report->SetField(TEXT("viewportResizeCompletedAfterFrames"), FString::FromInt(StepFrames));
+			// The RESIZE_PASS marker is emitted after the SECOND resize completes: one marker
+			// covering the whole resize block, so a host that survives one resize but not the
+			// next cannot pass.
+			return true;
+		}
+
+		if (StepFrames > TravelBudgetFrames)
+		{
+			FailAndFinish(FString::Printf(
+				TEXT("viewport sender: the resize to %dx%d was not observed within %d frames (registry size seen: %s, post-resize advances: %d)"),
+				ViewportResizeWidth, ViewportResizeHeight, TravelBudgetFrames,
+				bViewportResizeDimensionsSeen ? TEXT("yes") : TEXT("no"),
+				ViewportResizeObservedAdvances));
+		}
+		return false;
+	}
+
+	bool FSmokeRunner::StepViewportSenderResize2()
+	{
+		FReport* Report = FReport::Get();
+
+		// A second full resize cycle to a third size, and deliberately a RAPID one: the request
+		// is issued on two consecutive frames (the system coalesces them) to prove back-to-back
+		// resize requests cannot wedge the sender or the swap chain.
+		if (StepFrames == 1 || StepFrames == 2)
+		{
+			if (StepFrames == 1)
+			{
+				Report->SetField(TEXT("viewportResize2RequestedWidth"), FString::FromInt(ViewportResize2Width));
+				Report->SetField(TEXT("viewportResize2RequestedHeight"), FString::FromInt(ViewportResize2Height));
+			}
+			FSystemResolution::RequestResolutionChange(ViewportResize2Width, ViewportResize2Height, EWindowMode::Windowed);
+		}
+
+		if (!QueueViewportSend())
+		{
+			return false;
+		}
+
+		if (ViewportProbe->PollNewFrame())
+		{
+			ViewportLastSenderFrame = ViewportProbe->GetSenderFrameCount();
+			if (bViewportResize2DimensionsSeen)
+			{
+				++ViewportResize2ObservedAdvances;
+			}
+		}
+
+		if (!bViewportResize2DimensionsSeen)
+		{
+			uint32 Width = 0, Height = 0, DxgiFormat = 0;
+			if (ViewportProbe->GetSenderDescription(ViewportSenderName.ToString(), Width, Height, DxgiFormat)
+				&& Width == static_cast<uint32>(ViewportResize2Width)
+				&& Height == static_cast<uint32>(ViewportResize2Height))
+			{
+				bViewportResize2DimensionsSeen = true;
+				Report->SetField(TEXT("viewportResize2ObservedWidth"), FString::FromInt(static_cast<int32>(Width)));
+				Report->SetField(TEXT("viewportResize2ObservedHeight"), FString::FromInt(static_cast<int32>(Height)));
+			}
+		}
+
+		if (bViewportResize2DimensionsSeen && ViewportResize2ObservedAdvances >= 1)
+		{
+			uint32 TexWidth = 0, TexHeight = 0, TexFormat = 0;
+			FString OpenError;
+			if (!ViewportProbe->OpenSharedTexture(ViewportSenderName.ToString(), TexWidth, TexHeight, TexFormat, OpenError))
+			{
+				FailAndFinish(FString::Printf(TEXT("viewport sender: after the second resize, %s"), *OpenError));
+				return false;
+			}
+			if (TexWidth != static_cast<uint32>(ViewportResize2Width) || TexHeight != static_cast<uint32>(ViewportResize2Height))
+			{
+				FailAndFinish(FString::Printf(
+					TEXT("viewport sender: after the second resize the reopened shared texture is %ux%u, expected %dx%d"),
+					TexWidth, TexHeight, ViewportResize2Width, ViewportResize2Height));
+				return false;
+			}
+
+			Report->SetField(TEXT("viewportResize2ObservedFrameAdvances"), FString::FromInt(ViewportResize2ObservedAdvances));
+			Report->SetField(TEXT("viewportResize2CompletedAfterFrames"), FString::FromInt(StepFrames));
+			Report->Mark(Markers::ViewportResizePass);
+			return true;
+		}
+
+		if (StepFrames > TravelBudgetFrames)
+		{
+			FailAndFinish(FString::Printf(
+				TEXT("viewport sender: the second resize to %dx%d was not observed within %d frames (registry size seen: %s, post-resize advances: %d)"),
+				ViewportResize2Width, ViewportResize2Height, TravelBudgetFrames,
+				bViewportResize2DimensionsSeen ? TEXT("yes") : TEXT("no"),
+				ViewportResize2ObservedAdvances));
+		}
+		return false;
+	}
+
+	bool FSmokeRunner::StepViewportSenderClose()
+	{
+		FReport* Report = FReport::Get();
+
+		if (StepFrames == 1)
+		{
+			// The real public lifecycle path, and no more queueing after it: a re-queued send
+			// would legitimately re-open the stream and make this step test nothing.
+			USpoutBPFunctionLibrary::CloseSender(ViewportSenderName);
+			Report->SetField(TEXT("viewportCloseRequested"), TEXT("true"));
+			return false;
+		}
+
+		// Give the close a few frames to reach the shared registry before asserting, mirroring
+		// StepStaleSessionCheck.
+		if (StepFrames < (SettleFrames * 4))
+		{
+			return false;
+		}
+
+		if (ViewportProbe->IsSenderAdvertised(ViewportSenderName.ToString()))
+		{
+			if (StepFrames > RegistrationBudgetFrames)
+			{
+				FailAndFinish(FString::Printf(
+					TEXT("viewport sender '%s' is still advertised %d frames after CloseSender"),
+					*ViewportSenderName.ToString(), StepFrames));
+			}
+			return false;
+		}
+
+		Report->SetField(TEXT("viewportAdvertisedAfterClose"), TEXT("false"));
+		Report->Mark(Markers::ViewportClosePass);
+
+		ViewportProbe->Close();
+		ViewportProbe.Reset();
+
+		// The scenario's own pass marker comes after the post-close resize below.
+		return true;
+	}
+
+	bool FSmokeRunner::StepViewportAttachDetachStress()
+	{
+		FReport* Report = FReport::Get();
+
+		// One cycle per invocation of the "start" phase: CloseAllStreams performs the ordered
+		// shutdown, which detaches the back-buffer delegate (on UE 5.3 that is a render-thread
+		// removal with a completion wait); the following sends re-attach it. A deadlock or an
+		// unbounded wait in either direction shows up here as the run's overall timeout rather
+		// than as a silent pass, and the per-cycle wall time is recorded.
+		if (StepFrames == 1)
+		{
+			ViewportRestartCycleStartSeconds = FPlatformTime::Seconds();
+			USpoutBPFunctionLibrary::CloseAllStreams();
+			return false;
+		}
+
+		// Re-attach: queue the viewport sender again under a per-cycle name.
+		const FName CycleName(*FString::Printf(TEXT("%s_r%d"), *ViewportSenderName.ToString(), CompletedViewportRestartCycles));
+		if (!USpoutBPFunctionLibrary::SpoutSender(CycleName, ESpoutSendTextureFrom::GameViewport, nullptr))
+		{
+			// A rejection right after a full teardown is legitimate for a frame or two while the
+			// session leaves the stopping state and the viewport is revalidated.
+			if (StepFrames > RegistrationBudgetFrames)
+			{
+				FailAndFinish(FString::Printf(
+					TEXT("viewport restart cycle %d: SpoutSender never re-accepted a GameViewport request within %d frames"),
+					CompletedViewportRestartCycles, RegistrationBudgetFrames));
+			}
+			return false;
+		}
+
+		// Give the re-registered delegate a few presents, then close this cycle's name and move on.
+		if ((StepFrames % SettleFrames) != 1)
+		{
+			return false;
+		}
+
+		USpoutBPFunctionLibrary::CloseSender(CycleName);
+
+		const double CycleSeconds = FPlatformTime::Seconds() - ViewportRestartCycleStartSeconds;
+		ViewportRestartWorstCycleSeconds = FMath::Max(ViewportRestartWorstCycleSeconds, CycleSeconds);
+		++CompletedViewportRestartCycles;
+
+		if (CompletedViewportRestartCycles >= ViewportRestartCycleCount)
+		{
+			Report->SetField(TEXT("viewportRestartCyclesCompleted"), FString::FromInt(CompletedViewportRestartCycles));
+			Report->SetField(TEXT("viewportRestartWorstCycleSeconds"),
+				FString::Printf(TEXT("%.3f"), ViewportRestartWorstCycleSeconds));
+			Report->Mark(Markers::ViewportRestartPass);
+			return true;
+		}
+
+		// Next cycle starts with another full teardown.
+		StepFrames = 0;
+		return false;
+	}
+
+	bool FSmokeRunner::StepViewportPostCloseResize()
+	{
+		FReport* Report = FReport::Get();
+
+		// Close followed by resize, back to the original resolution. The sender is gone, but on
+		// UE 5.3-5.7 the pre-resize hook remains registered until the ordered teardown and must
+		// clear a (now empty) cache without incident; on UE 5.8 nothing was retained. Surviving
+		// this proves a resize after the last sender closed cannot crash either.
+		if (StepFrames == 1)
+		{
+			FSystemResolution::RequestResolutionChange(640, 360, EWindowMode::Windowed);
+			return false;
+		}
+
+		if (StepFrames < PostCloseResizeSurviveFrames)
+		{
+			return false;
+		}
+
+		// Still ticking N frames after the request: the resize was processed (or coalesced away)
+		// without taking the process down.
+		Report->SetField(TEXT("viewportPostCloseResizeSurvived"), TEXT("true"));
+		Report->Mark(Markers::ViewportSenderPass);
 		return true;
 	}
 

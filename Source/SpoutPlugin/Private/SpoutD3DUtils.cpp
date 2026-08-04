@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Implements D3D11-on-12 wrapping and scoped acquire/release helpers used by the Spout
  * sender path to copy from UE D3D12 textures into shared DX11 resources.

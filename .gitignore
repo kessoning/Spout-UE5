@@ -18,6 +18,11 @@
 # inputs.
 Docs/*.pdf
 
+# The canonical generated user manual is the exception: it is a public release artefact, shipped to
+# users and referenced by the public documentation, so the verified copy is tracked with the release
+# it belongs to.
+!Docs/2026-06-05-SpoutPlugin-User-Manual.pdf
+
 # --- Release validation evidence --------------------------------------------------------------------
 # Build logs, packaged-host smoke results, performance JSON, traces and manifests. Reproducible by
 # re-running the pipeline, and deliberately kept out of the plugin release archive.

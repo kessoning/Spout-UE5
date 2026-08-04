@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Declares the singleton D3D11-on-D3D12 context used for Spout interop, exposing devices,
  * Spout helper objects, and shared mutexes for sender/receiver code.

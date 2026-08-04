@@ -1,3 +1,8 @@
+// Copyright (c) 2023 RockmanZuyi
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 using System;
 using System.IO;
 using UnrealBuildTool;
@@ -68,12 +73,13 @@ public class SpoutPlugin : ModuleRules
             // resolved late, and so the loader picks it up from the staged binary dir.
             PublicDelayLoadDLLs.Add("Spout.dll");
 
-            // Stage Spout.dll next to the plugin's own module binary via Unreal's
-            // RuntimeDependencies system instead of manually copying it into the project
-            // folder. $(BinaryOutputDir) (the plugin's Binaries/Win64) is used rather than
-            // $(TargetOutputDir) so the DLL lands in the same place for normal project
-            // builds, RunUAT BuildPlugin packaging, and precompiled release zips — and so
-            // it matches the location the startup diagnostics check.
+            // Stage Spout.dll beside the binary this module links into via Unreal's
+            // RuntimeDependencies system instead of manually copying it. $(BinaryOutputDir)
+            // resolves to the plugin's own Binaries/Win64 in editor/modular project builds,
+            // and to the project's Binaries/Win64 (next to the game executable) in packaged
+            // monolithic games. Raw RunUAT BuildPlugin output runs no target staging and so
+            // does not carry the DLL; build.ps1 stages it into release zips explicitly. The
+            // startup loader (LoadSpoutRuntime) checks all of these locations.
             RuntimeDependencies.Add("$(BinaryOutputDir)/Spout.dll", SpoutDllPath);
         }
     }

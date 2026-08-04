@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /* SpoutPlugin Docs — render part B: quick-start cards + reference sections */
 
 /* ---- Quick-start card data (each becomes an anchored card) ---- */
@@ -143,7 +147,7 @@ window.RENDER_B = function () {
     <div class="reveal">${C.leadList([
       "A release folder contains <strong>Binaries</strong> (with Spout.dll), Content, Resources, Source, and SpoutPlugin.uplugin.",
       "Precompiled releases must include <code>Spout.dll</code> in <code>Binaries/Win64</code>.",
-      "Releases are built per engine version with <code>RunUAT BuildPlugin ... -TargetPlatforms=Win64 -Rocket</code>, then .pdb and Intermediate are stripped and a clean folder is zipped per version.",
+      "Releases are built per engine version with <code>RunUAT BuildPlugin ... -TargetPlatforms=Win64 -Rocket</code>, then .pdb files are removed and a clean folder is zipped per version. <code>Intermediate/Build</code> is deliberately kept, so Blueprint-only users can package a project without a compiler.",
       "The repository <code>build.ps1</code> does this for UE 5.3 through 5.8. A binary built for one engine version will not load in another."
     ])}</div>
     <h3 class="block-title reveal">Clean rebuild after an engine upgrade</h3>
@@ -221,7 +225,7 @@ window.RENDER_B = function () {
     <div class="reveal"><p>Single Runtime module <strong>SpoutPlugin</strong>, Win64 only.</p>
     <div class="grid grid-2">
       <div class="panel"><div class="mono" style="color:var(--accent);font-size:12px;margin-bottom:8px">PUBLIC DEPENDENCIES</div><div style="display:flex;gap:6px;flex-wrap:wrap">${["Core","CoreUObject","Engine","RHI","RenderCore"].map(d=>`<span class="pill">${d}</span>`).join("")}</div></div>
-      <div class="panel"><div class="mono" style="color:var(--warn);font-size:12px;margin-bottom:8px">PRIVATE DEPENDENCIES</div><div style="display:flex;gap:6px;flex-wrap:wrap">${["ApplicationCore","Slate","SlateCore","Projects","D3D12RHI","D3D11RHI","d3dcompiler.lib"].map(d=>`<span class="pill">${d}</span>`).join("")}</div></div>
+      <div class="panel"><div class="mono" style="color:var(--warn);font-size:12px;margin-bottom:8px">PRIVATE DEPENDENCIES</div><div style="display:flex;gap:6px;flex-wrap:wrap">${["ApplicationCore","Slate","SlateCore","Projects","D3D12RHI","D3D11RHI"].map(d=>`<span class="pill">${d}</span>`).join("")}</div></div>
     </div>
     <p style="font-size:14px;color:var(--muted);margin-top:12px">Plus the engine DX12 and DX11 third-party libraries. Spout.dll is delay-loaded and staged as a runtime dependency.</p></div>
 

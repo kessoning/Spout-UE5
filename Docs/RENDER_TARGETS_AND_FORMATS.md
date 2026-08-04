@@ -25,11 +25,13 @@ the transient texture it creates:
 | R8G8B8A8 (UNORM / TYPELESS / SRGB) | `PF_R8G8B8A8` |
 | R10G10B10A2 (UNORM / TYPELESS) | `PF_A2B10G10R10` |
 | R16G16B16A16_FLOAT (or TYPELESS) | `PF_FloatRGBA` |
-| Anything else | Falls back to `PF_B8G8R8A8` |
+| Anything else | Refused; a warning naming the format is logged |
 
-This mapping defines what the receiver can interpret. The "recommended" table above reflects
-what has been tested end to end; the fallback exists so unexpected formats still produce an
-image rather than failing.
+This mapping defines what the receiver can interpret. A format outside this table is never
+reinterpreted: the frame is refused and a warning naming the advertised format is written to
+the log, so an unsupported sender shows up as a clear rejection rather than as corrupted or
+misread output. The typeless rows are a deliberate mapping to the typed layout Spout peers
+expect, not a fallback.
 
 ## Create Texture Render Target 2D defaults
 

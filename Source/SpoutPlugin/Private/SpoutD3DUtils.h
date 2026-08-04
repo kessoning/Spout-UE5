@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Declares D3D helper utilities for wrapping D3D12 resources and managing D3D11-on-12
  * acquire/release scopes used by sender/receiver interop.

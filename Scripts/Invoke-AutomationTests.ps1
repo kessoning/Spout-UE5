@@ -1,3 +1,7 @@
+# Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+# SPDX-License-Identifier: MIT
+# Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 <#
 .SYNOPSIS
     Builds the host test project and runs the SpoutPlugin automation suite on one or more engines.
@@ -69,6 +73,14 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $EngineVersions = Expand-TrackDList $EngineVersions
 $EnginePaths = Expand-TrackDList $EnginePaths
+
+# "-EngineVersions ','" satisfies [Parameter(Mandatory)] yet expands to nothing, the per-engine
+# loop then runs zero times, and the manifest would record Success=true with exit 0 - validation
+# that validated nothing, presented as a pass. Refuse it before any work happens.
+if ($EngineVersions.Count -eq 0)
+{
+    throw '-EngineVersions expanded to an empty engine list; a run that validates zero engines cannot be recorded as a pass.'
+}
 
 $explicitMap = @{}
 foreach ($pair in $EnginePaths)
@@ -339,6 +351,15 @@ foreach ($version in $EngineVersions)
     if ($testResult.TimedOut)
     {
         [void] $problems.Add("the automation run did not finish within $TestTimeoutSeconds s and was terminated")
+    }
+
+    # A passing report does not excuse a bad exit. An editor that writes an all-pass index.json and
+    # then crashes during module teardown exits nonzero after the report is already complete on
+    # disk. The packaged-host and performance stages fail on a bad exit code, and so does this one.
+    if ($null -eq $testResult.ExitCode -or $testResult.ExitCode -ne 0)
+    {
+        $observedExit = if ($null -eq $testResult.ExitCode) { 'none' } else { [string] $testResult.ExitCode }
+        [void] $problems.Add("the editor exited with code $observedExit; a nonzero or missing exit code fails the stage even when the test report passes")
     }
 
     $report = Read-AutomationReport -ReportDirectory $reportDir

@@ -1,3 +1,8 @@
+// Copyright (c) 2023 RockmanZuyi
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Blueprint-facing API and data types for Spout send/receive, implemented in SpoutBPFunctionLibrary.cpp
  * and backed by the private sender/receiver and D3D interop systems.

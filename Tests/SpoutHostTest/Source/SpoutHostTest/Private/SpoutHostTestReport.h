@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * The machine-readable result channel for the packaged-host smoke and performance runs.
  *
@@ -49,6 +53,20 @@ namespace SpoutHostTest
 		inline const TCHAR* PerfBegin            = TEXT("SPOUT_PERF_BEGIN");
 		inline const TCHAR* PerfPass             = TEXT("SPOUT_PERF_PASS");
 		inline const TCHAR* PerfFailPrefix       = TEXT("SPOUT_PERF_FAIL:");
+
+		// GameViewportSenderSmoke. Every pass marker below is backed by an EXTERNAL
+		// observation through FViewportSenderProbe (shared registry, opened shared texture,
+		// frame-count semaphore), never by the plugin's own return values alone.
+		inline const TCHAR* ViewportBegin           = TEXT("SPOUT_VIEWPORT_BEGIN");
+		inline const TCHAR* ViewportPathValue       = TEXT("SPOUT_VIEWPORT_PATH");
+		inline const TCHAR* ViewportDelegateThreadValue = TEXT("SPOUT_VIEWPORT_DELEGATE_THREAD");
+		inline const TCHAR* ViewportRestartPass     = TEXT("SPOUT_VIEWPORT_RESTART_PASS");
+		inline const TCHAR* ViewportAdvertisedPass  = TEXT("SPOUT_VIEWPORT_ADVERTISED_PASS");
+		inline const TCHAR* ViewportTextureOpenPass = TEXT("SPOUT_VIEWPORT_TEXTURE_OPEN_PASS");
+		inline const TCHAR* ViewportFramesPass      = TEXT("SPOUT_VIEWPORT_FRAMES_PASS");
+		inline const TCHAR* ViewportResizePass      = TEXT("SPOUT_VIEWPORT_RESIZE_PASS");
+		inline const TCHAR* ViewportClosePass       = TEXT("SPOUT_VIEWPORT_CLOSE_PASS");
+		inline const TCHAR* ViewportSenderPass      = TEXT("SPOUT_VIEWPORT_SENDER_PASS");
 	}
 
 	/**

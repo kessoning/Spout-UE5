@@ -1,3 +1,7 @@
+# Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+# SPDX-License-Identifier: MIT
+# Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 <#
 .SYNOPSIS
     Rebuilds the aggregate packaged-host manifest from the per-row manifests in an evidence tree.
@@ -167,6 +171,7 @@ foreach ($row in $rows)
             SameNameRestart  = ($launch.ObservedMarkers -contains 'SPOUT_SAME_NAME_RESTART_PASS')
             LevelTravel      = ($launch.ObservedMarkers -contains 'SPOUT_LEVEL_TRAVEL_PASS')
             NoStaleSession   = ($launch.ObservedMarkers -contains 'SPOUT_NO_STALE_SESSION_PASS')
+            ViewportSender   = ($launch.ObservedMarkers -contains 'SPOUT_VIEWPORT_SENDER_PASS')
             ShutdownComplete = ($launch.ObservedMarkers -contains 'SPOUT_SHUTDOWN_COMPLETE')
             ExitCode         = $launch.ExitCode
             TimedOut         = $launch.TimedOut

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+# SPDX-License-Identifier: MIT
+# Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 """Builds the SpoutPlugin User Manual PDF with reportlab Platypus.
 
 Screenshots: drop PNG/JPG files named exactly as listed in FIGURES into
@@ -51,8 +55,24 @@ def _read_supported_engines():
     return versions
 
 
+def _read_documentation_date():
+    """Reads the documentation date from USER_MANUAL_SOURCE.md, for the same reason as the version.
+
+    A second hard-coded date here would let the PDF carry a date the manual source does not state;
+    the source file's own date line is the single place it is stated.
+    """
+    source = os.path.join(ROOT, "USER_MANUAL_SOURCE.md")
+    with open(source, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    match = re.search(r"^- Documentation date:\s*(\d{4}-\d{2}-\d{2})\s*$", text, re.MULTILINE)
+    if not match:
+        raise RuntimeError("Could not read the documentation date from USER_MANUAL_SOURCE.md")
+    return match.group(1)
+
+
 VERSION = _read_plugin_version()
 ENGINES = _read_supported_engines()
+DOC_DATE = _read_documentation_date()
 ENGINE_RANGE = "UE %s through UE %s" % (ENGINES[0], ENGINES[-1])
 CONTENT_W = A4[0] - 4*cm
 
@@ -225,7 +245,7 @@ story.append(Spacer(1,4))
 story.append(Paragraph("User Manual",S("Sub2",fontName="Helvetica-Oblique",fontSize=12,textColor=MUTE,alignment=TA_CENTER)))
 story.append(Spacer(1,1.8*cm))
 meta=[["Plugin version",VERSION+"  (beta)"],["Engine target","Unreal Engine 5.3 - 5.8"],
-      ["Module","SpoutPlugin (Runtime)"],["Platform","Windows 64-bit, DirectX 12 RHI"],["Documentation date","2026-06-05"]]
+      ["Module","SpoutPlugin (Runtime)"],["Platform","Windows 64-bit, DirectX 12 RHI"],["Documentation date",DOC_DATE]]
 mt=Table(meta,colWidths=[5*cm,8*cm],hAlign="CENTER")
 mt.setStyle(TableStyle([("FONT",(0,0),(0,-1),"Helvetica-Bold",10),("FONT",(1,0),(1,-1),"Helvetica",10),
     ("TEXTCOLOR",(0,0),(0,-1),ACCENT2),("TEXTCOLOR",(1,0),(1,-1),INK),
@@ -420,8 +440,10 @@ api("Spout Sender","bool SpoutSender(FName SpoutName, ESpoutSendTextureFrom Send
     "Publishes a texture to Spout; the GPU copy runs on the render thread. Returns true when accepted or queued. Provide the render target when using the TextureRenderTarget2D source. Call continuously. Common mistakes: empty render target with the render-target source; calling once; name mismatch.")
 api("Close Sender","void CloseSender(FName SpoutName)",
     "Removes the named sender and releases its handle. Scoped to senders only, so a receiver using the same name is unaffected.")
-api("Spout Receiver","bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial,\n                   FName TextureParameterName, UMaterialInstanceDynamic*& OutMat,\n                   UTexture2D*& OutTexture,\n                   UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr)",
-    "Receives a stream. OptionalOutputRenderTarget is an advanced-display pin. Returns true when the sender exists and a receive was enqueued. Outputs Out Mat and Out Texture, which are OUTPUTS and not ownership: the received texture belongs to the plugin, which keeps it alive while the receiver is open. Keep the values this node returns and pass them back on later calls and to Close Receiver. Texture Parameter Name defaults to SpoutTexture when empty. The frame is only copied when the sender published a new one.")
+api("Spout Receiver","bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial,\n                   FName TextureParameterName, UMaterialInstanceDynamic*& OutMat,\n                   UTexture2D*& OutTexture,\n                   UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,\n                   ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto)",
+    "Receives a stream. OptionalOutputRenderTarget and Color Space are advanced-display pins. Returns true when the sender exists and a receive was enqueued. Outputs Out Mat and Out Texture, which are OUTPUTS and not ownership: the received texture belongs to the plugin, which keeps it alive while the receiver is open. Keep the values this node returns and pass them back on later calls and to Close Receiver. Texture Parameter Name defaults to SpoutTexture when empty. The frame is only copied when the sender published a new one.")
+P("<b>Optional Output Render Target.</b> When provided, the received frame is also copied into it. Its pixel format must match the incoming frame's format exactly and it must be single-sampled (no MSAA); no implicit format conversion is performed. A mismatched target is left completely untouched and the mismatch is logged - the call still succeeds and Out Texture still updates - which is what a target that stays black is telling you. Size differences are not a mismatch: the target is resized to match the stream.")
+P("<b>Color Space.</b> Decides how the received bytes are interpreted. <b>Auto</b> (the default) follows the format convention the Spout ecosystem publishes: 8-bit frames decode as sRGB, while 10-bit and 16-bit float frames stay linear. <b>Linear</b> applies no decoding; use it when the sender publishes linear or data values in an 8-bit format, such as a render target created with Force Linear Gamma. <b>sRGB</b> forces decoding, and is only representable for 8-bit frames: requesting it for a 10-bit or float frame fails the call and logs, rather than being silently ignored.")
 api("Close Receiver","void CloseReceiver(FName SpoutName, UTexture2D*& ReceivedTexture,\n                   UMaterialInstanceDynamic*& ReceivedMaterial)",
     "Closes the receiver session for that name. There is one session per sender name, so this closes it for every graph receiving it, and it detaches the Spout texture parameter from every material the plugin bound it into. The NAME decides what is released, not the pointers: pass back the Out Texture and Out Mat this plugin gave you and both are cleared; pass anything else and it is left untouched with a warning. This node will not destroy a texture it did not create.")
 api("Spout Info","bool SpoutInfo(TArray<FSenderStruct>& Senders)",
@@ -436,6 +458,8 @@ api("Create Texture Render Target 2D","UTextureRenderTarget2D* CreateTextureRend
     "Creates a render target at runtime, sets wrap addressing on both axes, and initializes its resource. The result is NOT rooted: keep a reference to it exactly as you would with Create Render Target 2D, or it will be collected. Returns null for invalid dimensions or for a pixel format the plugin cannot share (supported: B8G8R8A8, R8G8B8A8, A2B10G10R10, FloatRGBA). Force Linear Gamma decides what colour space the sender advertises for 8-bit formats: true publishes a plain _UNORM (pair it with Color Space = Linear on the receiver), false publishes _UNORM_SRGB.")
 H3("Enums")
 P("<b>ESpoutType:</b> Sender, Receiver. &nbsp; <b>ESpoutSendTextureFrom:</b> GameViewport, TextureRenderTarget2D.")
+P("<b>ESpoutColorSpace:</b> Auto (follow the format convention - 8-bit decodes as sRGB, 10-bit and float stay linear), Linear (no decoding), SRGB (force sRGB decoding; representable for 8-bit formats only, and refused otherwise).")
+P("<b>Supported formats.</b> The plugin shares B8G8R8A8, R8G8B8A8, A2B10G10R10 and FloatRGBA, including their typeless variants. Anything else is refused: a warning naming the advertised format is written to the log and nothing is published or received for that frame. Unsupported formats are never reinterpreted as B8G8R8A8 and no fallback conversion is fabricated, because advertising a layout the source does not have produces silently garbled frames rather than an honest failure.")
 H3("Struct: FSenderStruct")
 table([["Field","Type","Filled by plugin?"],
     ["Name","FName","Yes (Info nodes)"],["bIsAlive","bool","Yes (Info nodes)"],

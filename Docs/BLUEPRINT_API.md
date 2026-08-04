@@ -70,7 +70,12 @@ advanced-display pins (hidden until expanded).
 - Inputs: `SpoutName` (must match the sender); `InputMaterial` (optional base material to create
   a dynamic instance from); `TextureParameterName` (texture parameter to bind, defaults to
   `SpoutTexture` when empty); `OptionalOutputRenderTarget` (optional render target to also copy
-  the frame into).
+  the frame into); `ColorSpace` (how the received bytes are interpreted — see
+  [ESpoutColorSpace](#espoutcolorspace) below).
+- `OptionalOutputRenderTarget` must match the incoming frame's pixel format exactly and be
+  single-sampled. A mismatched target is excluded from the copy and left completely untouched,
+  and the mismatch is logged; the call still succeeds and `OutTexture` still updates. A size
+  mismatch is recoverable: the target is resized to the incoming frame automatically.
 - Outputs: `OutMat` (dynamic material instance, created on first call when `InputMaterial` is
   set); `OutTexture` (transient texture updated from the stream).
 - Ownership: `OutMat` and `OutTexture` are **outputs, not ownership**. The received texture
@@ -141,7 +146,12 @@ Looks up one sender by name and fills `Name`, `Width`, `Height`, and `bIsAlive`.
 static int32 SetMaxSenders(int32 Max);
 ```
 
-Sets the maximum number of senders Spout's shared registry tracks. Returns the value passed in.
+Sets the maximum number of senders Spout's shared registry tracks and returns the limit that is
+actually in effect afterwards. It does not echo the requested value back.
+
+- Returns: the effective limit, read back from Spout after the change. Returns `0` when nothing
+  was changed: either the requested value was outside the accepted range (1–1024) or Spout is
+  unavailable.
 
 ## Get Max Senders
 
@@ -190,6 +200,16 @@ Blueprint instead of an asset.
 |---|---|
 | `GameViewport` | Uses the active game viewport backbuffer. |
 | `TextureRenderTarget2D` | Uses a user-provided `UTextureRenderTarget2D`. |
+
+### ESpoutColorSpace
+
+How the Spout Receiver node interprets the received bytes.
+
+| Value | Meaning |
+|---|---|
+| `Auto` | Follows the format convention: 8-bit frames decode as sRGB, 10-bit and 16-bit float frames stay linear. Matches what other Spout applications publish; the right answer for almost every sender. |
+| `SRGB` | Forces sRGB decoding. Only valid for 8-bit formats; requesting it for a 10-bit or float frame fails the call with a logged diagnostic rather than being silently ignored. |
+| `Linear` | No decoding. Use when the sender publishes linear or data values in an 8-bit format, such as a render target created with Force Linear Gamma. |
 
 ## Struct: FSenderStruct
 

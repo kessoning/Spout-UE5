@@ -4,6 +4,49 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ---
 
+## AUGUST 2026 UPDATES
+
+**Version 1.0.0 is here.** After a long stretch of testing, fixing and proving things, the plugin is
+out of beta.
+
+I want to be straight about what that means. It does not mean the plugin suddenly does more than it
+did last month. It means I can now show you why I trust it. Every supported version of Unreal gets a
+real packaged game built and launched automatically, streams get opened and closed hundreds of
+times, and an independent checker outside the plugin confirms the picture is genuinely being
+published. If any of that stops being true, the release stops. That is the difference between beta
+and 1.0.0 for me.
+
+The big things this month:
+
+- **Sending your game viewport is now properly tested, not just assumed to work.** Sending a render
+  target has been well covered for a while, but sending the actual game window went untested, which
+  is a bit embarrassing given it is one of the two things people use this for. There is now a test
+  that opens a viewport sender in a real packaged game, waits for actual frames to be presented, and
+  then checks from the outside that the stream is really there, really the right size, and really
+  updating. Not "the function returned true", but "another program can see it".
+- **Resizing your game window while sending the viewport no longer crashes it.** This one was a real
+  bug, and the new test above is exactly what found it. If you changed resolution, resized the
+  window, or went fullscreen while streaming your viewport, the game could die on the spot. It was
+  the plugin holding on to the old window buffers for a fraction of a second too long. It lets go at
+  the right moment now, and resizing mid-stream is safe.
+- **A threading fix specific to Unreal 5.3.** On 5.3 only, the way the plugin hooked into Unreal's
+  frame-presentation callback could in theory collide with the engine doing the same thing at the
+  same moment. Rare, but real, and the sort of thing that produces a crash nobody can reproduce.
+  Fixed for 5.3, and left alone on 5.4 and newer where the engine already handles it.
+- **The documentation now matches what the plugin actually does.** A few pages had drifted and were
+  describing behaviour that had changed. The colour space options, what happens when you hand the
+  receiver a render target that does not match, what Set Max Senders gives you back, and where the
+  Spout file ends up for each way of installing. All corrected, and there is now an automatic check
+  that fails the release if the docs and the code ever disagree again.
+
+Smaller things worth mentioning: publishing your viewport to several Spout names at once got a lot
+cheaper, streams left running when you quit no longer risk taking the process down with them, and
+every release archive is now opened back up and inspected before it goes anywhere near you.
+
+Same scope as always: Windows, DirectX 12, Unreal 5.3 through 5.8.
+
+---
+
 ## JULY 2026 UPDATES
 
 A crash fix and a packaging fix month. Later in the month I also did a full audit of the plugin, hunting specifically for the things that made packaged games misbehave, and fixed what I found. Right at the end of the month I turned my attention to proving all of it, and to the documentation, which had quietly fallen a long way behind.

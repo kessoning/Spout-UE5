@@ -1,3 +1,7 @@
+# Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+# SPDX-License-Identifier: MIT
+# Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 <#
 .SYNOPSIS
     Shared helpers for the release validation pipeline.
@@ -1117,6 +1121,224 @@ function Read-TrackDSmokeResult
     return $verdict
 }
 
+function Test-TrackDViewportEvidence
+{
+    <#
+    .SYNOPSIS
+        Validates the GameViewportSenderSmoke evidence carried in one launch's result.json fields.
+
+    .DESCRIPTION
+        The marker contract proves the scenario RAN; this proves what it OBSERVED. Every required
+        field must be present with a sane value - a missing field is a failure, never a partial
+        green, because an old host binary that predates the scenario would otherwise pass on
+        markers alone.
+
+        The expected access path is derived from the engine version: UE 5.8 changed the
+        back-buffer delegate's signature to ISlateViewportProvider, and the plugin's two compile
+        branches are mutually exclusive, so 5.8+ evidence must say SlateViewportProvider and older
+        engines must say LegacyBackBuffer. Frames advancing under that path name is what proves
+        the named branch executed.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $EngineVersion,
+        $HostFields
+    )
+
+    $problems = New-Object System.Collections.ArrayList
+    $evidence = [ordered] @{}
+
+    $get = {
+        param([string] $Name)
+        if ($HostFields -and ($HostFields.PSObject.Properties.Name -contains $Name))
+        {
+            return [string] $HostFields.$Name
+        }
+        return $null
+    }
+
+    $getInt = {
+        param([string] $Name)
+        $raw = & $get $Name
+        $value = 0
+        if ($null -ne $raw -and [int]::TryParse($raw, [ref] $value)) { return $value }
+        return $null
+    }
+
+    if ($null -eq $HostFields)
+    {
+        [void] $problems.Add('viewport evidence: the launch produced no result.json fields at all')
+    }
+
+    # --- Scenario identity and environment -----------------------------------------------------
+    $scenario = & $get 'viewportScenario'
+    $evidence.Scenario = $scenario
+    if ($scenario -ne 'GameViewportSenderSmoke')
+    {
+        [void] $problems.Add("viewport evidence: field 'viewportScenario' is '$scenario', expected 'GameViewportSenderSmoke'")
+    }
+
+    $senderName = & $get 'viewportSenderName'
+    $evidence.SenderName = $senderName
+    if ([string]::IsNullOrWhiteSpace($senderName))
+    {
+        [void] $problems.Add("viewport evidence: field 'viewportSenderName' is missing or empty")
+    }
+
+    $rhi = & $get 'viewportRhi'
+    $evidence.Rhi = $rhi
+    if ($rhi -notlike '*D3D12*')
+    {
+        [void] $problems.Add("viewport evidence: RHI is '$rhi', expected D3D12")
+    }
+
+    $expectedPath = if ([version] $EngineVersion -ge [version] '5.8') { 'SlateViewportProvider' } else { 'LegacyBackBuffer' }
+    $path = & $get 'viewportAccessPath'
+    $evidence.AccessPath = $path
+    $evidence.ExpectedAccessPath = $expectedPath
+    if ($path -ne $expectedPath)
+    {
+        [void] $problems.Add("viewport evidence: access path is '$path' but UE $EngineVersion must use '$expectedPath'")
+    }
+
+    # UE 5.3 declares the back-buffer delegate non-thread-safe and must mutate its
+    # invocation list on the rendering thread; 5.4+ use the thread-safe declaration and keep the
+    # game-thread path. A row whose evidence reports the wrong branch means the version guard did
+    # not select what this engine requires.
+    $expectedDelegateThread = if ([version] $EngineVersion -ge [version] '5.4') { 'GameThread' } else { 'RenderThread' }
+    $delegateThread = & $get 'viewportDelegateMutationThread'
+    $evidence.DelegateMutationThread = $delegateThread
+    $evidence.ExpectedDelegateMutationThread = $expectedDelegateThread
+    if ($delegateThread -ne $expectedDelegateThread)
+    {
+        [void] $problems.Add("viewport evidence: delegate mutation thread is '$delegateThread' but UE $EngineVersion must use '$expectedDelegateThread'")
+    }
+
+    $restartCycles = & $getInt 'viewportRestartCyclesCompleted'
+    $evidence.RestartCyclesCompleted = $restartCycles
+    $evidence.RestartWorstCycleSeconds = & $get 'viewportRestartWorstCycleSeconds'
+    if ($null -eq $restartCycles -or $restartCycles -lt 3)
+    {
+        [void] $problems.Add("viewport evidence: '$restartCycles' attach/detach restart cycle(s) completed; at least 3 are required")
+    }
+
+    foreach ($required in @(
+        @{ Field = 'viewportGameViewportFound'; Expected = 'true';  What = 'a game viewport was found' },
+        @{ Field = 'viewportGameWindowFound';   Expected = 'true';  What = 'a game window was found' },
+        @{ Field = 'viewportFrameCountEnabled'; Expected = 'true';  What = 'Spout frame counting is enabled' },
+        @{ Field = 'viewportSenderAdvertised';  Expected = 'true';  What = 'the sender was advertised in the shared registry' },
+        @{ Field = 'viewportSharedTextureOpened'; Expected = 'true'; What = 'the shared texture opened on the independent device' },
+        @{ Field = 'viewportResizeAttempted';   Expected = 'true';  What = 'the controlled resize was attempted' },
+        @{ Field = 'viewportCloseRequested';    Expected = 'true';  What = 'the sender close was requested' },
+        @{ Field = 'viewportAdvertisedAfterClose'; Expected = 'false'; What = 'the sender disappeared after close' }))
+    {
+        $value = & $get $required.Field
+        $evidence[$required.Field] = $value
+        if ($value -ne $required.Expected)
+        {
+            [void] $problems.Add("viewport evidence: field '$($required.Field)' is '$value', expected '$($required.Expected)' ($($required.What))")
+        }
+    }
+
+    # --- Geometry -------------------------------------------------------------------------------
+    $width = & $getInt 'viewportSenderWidth'
+    $height = & $getInt 'viewportSenderHeight'
+    $evidence.SenderWidth = $width
+    $evidence.SenderHeight = $height
+    if ($null -eq $width -or $width -le 0 -or $null -eq $height -or $height -le 0)
+    {
+        [void] $problems.Add("viewport evidence: sender dimensions are '$width'x'$height'; both must be positive")
+    }
+
+    $texWidth = & $getInt 'viewportSharedTextureWidth'
+    $texHeight = & $getInt 'viewportSharedTextureHeight'
+    $evidence.SharedTextureWidth = $texWidth
+    $evidence.SharedTextureHeight = $texHeight
+    if ($null -eq $texWidth -or $texWidth -le 0 -or $null -eq $texHeight -or $texHeight -le 0)
+    {
+        [void] $problems.Add("viewport evidence: opened shared-texture dimensions are '$texWidth'x'$texHeight'; both must be positive")
+    }
+    elseif (($null -ne $width) -and (($texWidth -ne $width) -or ($texHeight -ne $height)))
+    {
+        [void] $problems.Add("viewport evidence: the opened texture ($texWidth x $texHeight) disagrees with the registry ($width x $height)")
+    }
+
+    $evidence.SenderDxgiFormat = & $get 'viewportSenderDxgiFormat'
+    $evidence.SharedTextureDxgiFormat = & $get 'viewportSharedTextureDxgiFormat'
+
+    # --- Frame advancement ----------------------------------------------------------------------
+    $advances = & $getInt 'viewportObservedFrameAdvances'
+    $delta = & $getInt 'viewportFrameAdvanceDelta'
+    $callbacks = & $getInt 'viewportCallbackObservations'
+    $evidence.ObservedFrameAdvances = $advances
+    $evidence.FrameAdvanceDelta = $delta
+    $evidence.CallbackObservations = $callbacks
+    $evidence.InitialSenderFrame = & $get 'viewportInitialSenderFrame'
+    $evidence.FinalSenderFrame = & $get 'viewportFinalSenderFrame'
+    $evidence.FirstAdvanceSeconds = & $get 'viewportFirstAdvanceSeconds'
+    $evidence.LastAdvanceSeconds = & $get 'viewportLastAdvanceSeconds'
+
+    if ($null -eq $advances -or $advances -lt 3)
+    {
+        [void] $problems.Add("viewport evidence: only '$advances' frame-advance observation(s); at least 3 are required")
+    }
+    if ($null -eq $delta -or $delta -lt 2)
+    {
+        [void] $problems.Add("viewport evidence: the sender frame count moved by '$delta'; at least 2 is required")
+    }
+    if ($null -eq $callbacks -or $callbacks -lt 3)
+    {
+        [void] $problems.Add("viewport evidence: only '$callbacks' externally observed callback execution(s); at least 3 are required")
+    }
+
+    # --- Resize (two full cycles plus a post-close resize) --------------------------------------
+    $resizeW = & $getInt 'viewportResizeObservedWidth'
+    $resizeH = & $getInt 'viewportResizeObservedHeight'
+    $resizeAdvances = & $getInt 'viewportResizeObservedFrameAdvances'
+    $evidence.ResizeObservedWidth = $resizeW
+    $evidence.ResizeObservedHeight = $resizeH
+    $evidence.ResizeObservedFrameAdvances = $resizeAdvances
+    if ($null -eq $resizeW -or $resizeW -le 0 -or $null -eq $resizeH -or $resizeH -le 0)
+    {
+        [void] $problems.Add("viewport evidence: post-resize dimensions are '$resizeW'x'$resizeH'; both must be positive")
+    }
+    if ($null -eq $resizeAdvances -or $resizeAdvances -lt 1)
+    {
+        [void] $problems.Add("viewport evidence: '$resizeAdvances' frame advance(s) observed after the resize; at least 1 is required")
+    }
+
+    $resize2W = & $getInt 'viewportResize2ObservedWidth'
+    $resize2H = & $getInt 'viewportResize2ObservedHeight'
+    $resize2Advances = & $getInt 'viewportResize2ObservedFrameAdvances'
+    $evidence.Resize2ObservedWidth = $resize2W
+    $evidence.Resize2ObservedHeight = $resize2H
+    $evidence.Resize2ObservedFrameAdvances = $resize2Advances
+    if ($null -eq $resize2W -or $resize2W -le 0 -or $null -eq $resize2H -or $resize2H -le 0)
+    {
+        [void] $problems.Add("viewport evidence: second-resize dimensions are '$resize2W'x'$resize2H'; both must be positive")
+    }
+    if (($null -ne $resize2W) -and ($null -ne $resizeW) -and ($resize2W -eq $resizeW) -and ($resize2H -eq $resizeH))
+    {
+        [void] $problems.Add("viewport evidence: the second resize reports the same size as the first ($resize2W x $resize2H); it must be a distinct third size")
+    }
+    if ($null -eq $resize2Advances -or $resize2Advances -lt 1)
+    {
+        [void] $problems.Add("viewport evidence: '$resize2Advances' frame advance(s) observed after the second resize; at least 1 is required")
+    }
+
+    $postClose = & $get 'viewportPostCloseResizeSurvived'
+    $evidence.PostCloseResizeSurvived = $postClose
+    if ($postClose -ne 'true')
+    {
+        [void] $problems.Add("viewport evidence: field 'viewportPostCloseResizeSurvived' is '$postClose', expected 'true' (a resize after the sender closed must not crash the host)")
+    }
+
+    return [ordered] @{
+        Problems = $problems.ToArray()
+        Evidence = $evidence
+        Passed   = ($problems.Count -eq 0)
+    }
+}
+
 # ---------------------------------------------------------------------------------------------
 # Release-source enumeration
 #
@@ -2032,6 +2254,7 @@ Export-ModuleMember -Function @(
     'Copy-TrackDTree',
     'New-TrackDHostStaging',
     'Read-TrackDSmokeResult',
+    'Test-TrackDViewportEvidence',
     'Get-TrackDExcludedPathSegments',
     'ConvertTo-TrackDPathRegex',
     'Test-TrackDPathMatchesPattern',

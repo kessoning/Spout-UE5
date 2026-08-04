@@ -1,3 +1,8 @@
+// Copyright (c) 2023 RockmanZuyi
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Declares the sender API that bridges Blueprint requests to the render-thread Spout
  * publishing path implemented in SpoutSender.cpp.

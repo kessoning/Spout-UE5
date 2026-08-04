@@ -1,3 +1,7 @@
+# Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+# SPDX-License-Identifier: MIT
+# Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 <#
 .SYNOPSIS
     Builds, stages, validates and hashes SpoutPlugin release archives for one or more Unreal
@@ -648,6 +652,18 @@ function Test-ReleaseArchive
             [void] $problems.Add('missing Source/SpoutPlugin/Public/')
         }
 
+        # Shipped example content and the plugin icon. BuildPlugin stages Content/ (the descriptor
+        # declares CanContainContent) and Resources/ by default, so their absence means the filter
+        # or staging behaviour changed.
+        if (-not (Test-EntryPrefix $entries 'Content/'))
+        {
+            [void] $problems.Add('missing Content/ example assets')
+        }
+        if (-not (Test-Entry $entries 'Resources/Icon128.png'))
+        {
+            [void] $problems.Add('missing Resources/Icon128.png')
+        }
+
         # Module binary.
         $moduleBinaries = @($entries | Where-Object {
             $_ -like "$PluginName/Binaries/Win64/*.dll" -and $_ -notlike '*/Spout.dll'
@@ -1109,7 +1125,9 @@ try
             # --- Packaged-output checks ------------------------------------------------------
             # BuildPlugin only copies /ThirdParty/... when Config/FilterPlugin.ini asks for it, and
             # consuming projects compile from the shipped Source/, where SpoutPlugin.Build.cs reads
-            # all three of these from the plugin root. UBT hard-fails if any is missing.
+            # all three of these from the plugin root. UBT hard-fails if any is missing. Content/
+            # and Resources\Icon128.png are staged by BuildPlugin's default behaviour, and are
+            # checked here so that their absence cannot ship unnoticed.
             $requiredInOutput = @(
                 (Join-Path $buildOut 'ThirdParty\Spout\include'),
                 (Join-Path $buildOut 'ThirdParty\Spout\lib\amd64\Spout.lib'),
@@ -1119,7 +1137,9 @@ try
                 (Join-Path $buildOut 'LICENSE'),
                 (Join-Path $buildOut 'THIRD_PARTY_NOTICES.md'),
                 (Join-Path $buildOut 'README.md'),
-                (Join-Path $buildOut 'Intermediate\Build')
+                (Join-Path $buildOut 'Intermediate\Build'),
+                (Join-Path $buildOut 'Content'),
+                (Join-Path $buildOut 'Resources\Icon128.png')
             )
 
             $outputMissing = $false

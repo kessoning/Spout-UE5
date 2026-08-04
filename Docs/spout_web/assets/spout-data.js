@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /* ============================================================
    SpoutPlugin Docs — content data
    Source of truth: SpoutPlugin.uplugin (version) + Docs/USER_MANUAL_SOURCE.md (content).
@@ -7,11 +11,11 @@
 window.SPOUT = {};
 
 SPOUT.facts = {
-  version: "0.0.9 beta",
+  version: "1.0.0",
   engine: "UE 5.3 - 5.8",
   module: "SpoutPlugin (Runtime)",
   platform: "Windows 64-bit",
-  date: "2026-06-05"
+  date: "2026-08-03"
 };
 
 /* ---- Sidebar navigation groups ---- */
@@ -151,9 +155,9 @@ SPOUT.api = [
   {
     name: "Set Max Senders", cat: "utility", ret: "int32",
     sig: "int32 SetMaxSenders(int32 Max)",
-    purpose: "Sets the maximum sender count in Spout's registry. Returns the value passed in.",
-    inputs: [["Max", "int32 — the new maximum sender count."]],
-    returns: "The value passed in.",
+    purpose: "Sets the maximum sender count in Spout's registry and returns the limit actually in effect afterwards. It does not echo the requested value back.",
+    inputs: [["Max", "int32 — the new maximum sender count (accepted range 1–1024)."]],
+    returns: "The limit actually in effect afterwards. 0 when nothing was changed: the requested value was outside 1–1024 or Spout is unavailable.",
     when: "When you need more (or fewer) concurrent senders than Spout's default registry size."
   },
   {

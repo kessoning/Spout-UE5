@@ -1,3 +1,7 @@
+# Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+# SPDX-License-Identifier: MIT
+# Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 <#
 .SYNOPSIS
     Cooks, packages, inspects and launches the Spout host test project for every requested
@@ -97,6 +101,19 @@ $EngineVersions = Expand-TrackDList $EngineVersions
 $Configurations = Expand-TrackDList $Configurations
 $EnginePaths = Expand-TrackDList $EnginePaths
 
+# A degenerate list like "-EngineVersions ','" or "-Configurations ','" survives the mandatory
+# check, expands to nothing, and the row loop never runs - the matrix would then print
+# "PASSED - 0 row(s)" with exit 0, which validates nothing. Refuse both before any work
+# happens.
+if ($EngineVersions.Count -eq 0)
+{
+    throw '-EngineVersions expanded to an empty engine list; a matrix with zero rows cannot be recorded as a pass.'
+}
+if ($Configurations.Count -eq 0)
+{
+    throw '-Configurations expanded to an empty configuration list; a matrix with zero rows cannot be recorded as a pass.'
+}
+
 foreach ($configuration in $Configurations)
 {
     if ($configuration -notin @('Development', 'Shipping'))
@@ -148,7 +165,10 @@ if (-not $repoSpoutDllHash)
 $SmokeMapA = '/Engine/Maps/Entry'
 $SmokeMapB = '/Engine/Maps/Templates/Template_Default'
 
-# Every marker the smoke sequence must emit. Missing any one fails the row.
+# Every marker the smoke sequence must emit. Missing any one fails the row. The
+# SPOUT_VIEWPORT_* block is the GameViewportSenderSmoke scenario: a host binary that
+# predates the scenario, or a run in which the scenario was skipped, is missing these and fails -
+# a skipped required scenario can never be counted as a pass.
 $RequiredSmokeMarkers = @(
     'SPOUT_SMOKE_BEGIN',
     'SPOUT_PLUGIN_MODULE_LOADED',
@@ -160,6 +180,16 @@ $RequiredSmokeMarkers = @(
     'SPOUT_RECEIVER_CREATE_PASS',
     'SPOUT_LEVEL_TRAVEL_PASS',
     'SPOUT_NO_STALE_SESSION_PASS',
+    'SPOUT_VIEWPORT_BEGIN',
+    'SPOUT_VIEWPORT_PATH',
+    'SPOUT_VIEWPORT_DELEGATE_THREAD',
+    'SPOUT_VIEWPORT_RESTART_PASS',
+    'SPOUT_VIEWPORT_ADVERTISED_PASS',
+    'SPOUT_VIEWPORT_TEXTURE_OPEN_PASS',
+    'SPOUT_VIEWPORT_FRAMES_PASS',
+    'SPOUT_VIEWPORT_RESIZE_PASS',
+    'SPOUT_VIEWPORT_CLOSE_PASS',
+    'SPOUT_VIEWPORT_SENDER_PASS',
     'SPOUT_SHUTDOWN_BEGIN',
     'SPOUT_SHUTDOWN_COMPLETE',
     'SPOUT_SMOKE_PASS'
@@ -610,6 +640,11 @@ foreach ($version in $EngineVersions)
                     $launchProblems += "the host loaded Spout.dll from '$reportedDllPath' but the packaged copy is at '$($row.ExpectedSpoutDllPath)'"
                 }
 
+                # GameViewport evidence: the markers prove the scenario ran; the field
+                # validation proves what it observed. A missing required field fails the launch.
+                $viewportCheck = Test-TrackDViewportEvidence -EngineVersion $version -HostFields $verdict.HostFields
+                $launchProblems += @($viewportCheck.Problems)
+
                 $launchRecord = [ordered] @{
                     Attempt          = $attempt
                     EvidenceDir      = $launchEvidence
@@ -625,6 +660,8 @@ foreach ($version in $EngineVersions)
                     HostFailureReason = $verdict.HostFailureReason
                     ReportedDllPath  = $reportedDllPath
                     DllPathMatchesPackagedCopy = $dllPathMatches
+                    ViewportEvidence = $viewportCheck.Evidence
+                    ViewportEvidencePassed = $viewportCheck.Passed
                     Problems         = $launchProblems
                     Passed           = ($launchProblems.Count -eq 0)
                 }
@@ -633,7 +670,7 @@ foreach ($version in $EngineVersions)
 
                 if ($launchRecord.Passed)
                 {
-                    Write-TrackDGood "launch $attempt passed (exit 0, all markers, DLL path verified)"
+                    Write-TrackDGood "launch $attempt passed (exit 0, all markers, DLL path verified, viewport evidence complete)"
                 }
                 else
                 {
@@ -748,6 +785,7 @@ foreach ($row in $rows)
             SameNameRestart  = ($launch.ObservedMarkers -contains 'SPOUT_SAME_NAME_RESTART_PASS')
             LevelTravel      = ($launch.ObservedMarkers -contains 'SPOUT_LEVEL_TRAVEL_PASS')
             NoStaleSession   = ($launch.ObservedMarkers -contains 'SPOUT_NO_STALE_SESSION_PASS')
+            ViewportSender   = ($launch.ObservedMarkers -contains 'SPOUT_VIEWPORT_SENDER_PASS')
             ShutdownComplete = ($launch.ObservedMarkers -contains 'SPOUT_SHUTDOWN_COMPLETE')
             ExitCode         = $launch.ExitCode
             TimedOut         = $launch.TimedOut

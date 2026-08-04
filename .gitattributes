@@ -1,0 +1,10 @@
+# -------------------------------------------------------------------------------------------------
+# Generated PDFs are binary and must never be line-ending converted.
+#
+# Git's automatic binary detection looks for a NUL byte in the first 8 KB, and a PDF's header and
+# object table are plain ASCII, so it can misclassify a manual as text. With core.autocrlf=true that
+# injects a CR before every LF on checkout, which shifts every xref offset and produces a file no
+# reader will open. The rule below is general on purpose, so future generated manuals are covered
+# the moment they are added.
+# -------------------------------------------------------------------------------------------------
+*.pdf binary

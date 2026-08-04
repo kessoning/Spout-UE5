@@ -1,3 +1,8 @@
+// Copyright (c) 2023 RockmanZuyi
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Implements the Blueprint API for Spout by routing game-thread calls into the D3D/Spout
  * subsystems and enqueuing render-thread work where required.

@@ -1,3 +1,8 @@
+// Copyright (c) 2023 RockmanZuyi
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /**
  * Implements the Spout sender flow by copying UE D3D12 textures into shared DX11 textures
  * via D3D11-on-12, coordinating with the sender registry and D3D context.
@@ -37,6 +42,15 @@
 // also pulls in ENGINE_*_VERSION (via Version.h), so no separate Version.h include is needed.
 #include "Misc/EngineVersionComparison.h"
 #define SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER (!UE_VERSION_OLDER_THAN(5, 8, 0))
+
+// UE 5.3 declares FOnBackBufferReadyToPresent with the plain DECLARE_MULTICAST_DELEGATE_TwoParams,
+// whose invocation list has NO synchronisation (FDefaultDelegateUserPolicy ->
+// FNotThreadSafe[NotChecked]DelegateMode: the delegate's access scopes are empty). UE 5.4 switched
+// it to DECLARE_TS_MULTICAST_DELEGATE_TwoParams, whose FThreadSafeDelegateMode takes a real
+// critical section around Add, Remove and Broadcast alike. Since the delegate is broadcast on the
+// rendering thread, mutating the list from the game thread is a data race on 5.3 and only on 5.3,
+// so 5.3 alone performs the mutation on the rendering thread.
+#define SPOUT_BACKBUFFER_DELEGATE_IS_THREAD_SAFE (!UE_VERSION_OLDER_THAN(5, 4, 0))
 
 #if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
 #include "Slate/SlateViewportProvider.h"
@@ -476,16 +490,49 @@ namespace
 		 */
 		void DetachProducer()
 		{
+			// The session has already entered Stopping by the time the ordered teardown calls this
+			// (EnterStoppingState precedes DetachProducers), so a callback entered after this point
+			// early-outs before touching sender state. Removal below is what stops new ones.
 			if (bDelegateRegistered && FSlateApplication::IsInitialized())
 			{
 				if (FSlateRenderer* Renderer = FSlateApplication::Get().GetRenderer())
 				{
-					Renderer->OnBackBufferReadyToPresent().Remove(BackBufferHandle);
+					const FDelegateHandle HandleToRemove = BackBufferHandle;
+					auto UnsubscribeFromBackBuffer = [Renderer, HandleToRemove]()
+					{
+						UE_LOG(LogSpoutPlugin, Log,
+							TEXT("Spout: removing the viewport back-buffer delegate on the %s thread."),
+							IsInRenderingThread() ? TEXT("rendering") : TEXT("game"));
+
+						Renderer->OnBackBufferReadyToPresent().Remove(HandleToRemove);
+					};
+
+#if SPOUT_BACKBUFFER_DELEGATE_IS_THREAD_SAFE
+					UnsubscribeFromBackBuffer();
+#else
+					// UE 5.3: remove on the broadcasting thread, and do not continue until it has
+					// happened - the in-flight wait and the resource teardown below both assume no
+					// further callback can start.
+					RunDelegateMutationAndWait(UnsubscribeFromBackBuffer);
+#endif
+
+#if !SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+					// The pre-resize subscription lives and dies with the producer, in
+					// this same ordered detach - but on the GAME thread, on every version. It is
+					// broadcast on the game thread, so it must not be marshalled to the rendering
+					// thread; on 5.3 this detach is asymmetric by design (see RegisterIfNeeded).
+					Renderer->OnPreResizeWindowBackBuffer().Remove(PreResizeHandle);
+#endif
 				}
 			}
 
+			// Cleared after the removal has completed, so the handle stays valid for as long as the
+			// mutation that consumes it can still be running.
 			bDelegateRegistered = false;
 			BackBufferHandle.Reset();
+#if !SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+			PreResizeHandle.Reset();
+#endif
 
 			// Never wait from inside the callback itself; that would be waiting on this thread.
 			if (IsInRenderingThread())
@@ -529,6 +576,30 @@ namespace
 			BackBufferWrapCache.Reset();
 		}
 
+		/**
+		 * Drops every cached back-buffer wrap and drains their destruction, so no plugin-held
+		 * reference to the swap chain's buffers survives this call.
+		 *
+		 * IDXGISwapChain::ResizeBuffers refuses to run - fatally, DXGI_ERROR_INVALID_CALL - while
+		 * ANY reference to the old back buffers is alive, and every cached wrap keeps the
+		 * underlying ID3D12Resource alive. Resetting the cache releases the D3D11 wrappers, which
+		 * only QUEUES their destruction inside the D3D11-on-12 device; the Flush is what actually
+		 * drains it, so the D3D12 references are genuinely gone when this returns rather than
+		 * merely scheduled to go. No ReleaseWrappedResources call is needed here: wraps are only
+		 * ever acquired inside a copy's FScopedD3D11On12Acquire, whose destructor has already
+		 * returned them (and flushed the copy) before this can run on either of its call sites.
+		 */
+		void InvalidateBackBufferWraps()
+		{
+			FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+			FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
+			BackBufferWrapCache.Reset();
+			if (ID3D11DeviceContext* Immediate = Context.GetImmediateContext())
+			{
+				Immediate->Flush();
+			}
+		}
+
 	private:
 		/** Counts invocations of the back-buffer delegate that have entered but not yet returned. */
 		struct FBroadcastScope
@@ -546,6 +617,52 @@ namespace
 
 			std::atomic<int32>& Counter;
 		};
+
+#if !SPOUT_BACKBUFFER_DELEGATE_IS_THREAD_SAFE
+		/**
+		 * Runs one back-buffer delegate mutation on the rendering thread and returns only once it
+		 * has actually run (UE 5.3 only; see SPOUT_BACKBUFFER_DELEGATE_IS_THREAD_SAFE).
+		 *
+		 * The wait is what makes this correct rather than merely asynchronous: callers read the
+		 * resulting handle, and DetachProducer must know the subscription is gone before it
+		 * continues into the in-flight wait and resource teardown. FRenderCommandFence is used
+		 * rather than FlushRenderingCommands because it waits for exactly this command instead of
+		 * draining every pending RHI resource operation, and because the ordered teardown already
+		 * owns its own flush step - adding a second global flush inside detach would blur that
+		 * ordering.
+		 *
+		 * Renderer lifetime: the caller resolves FSlateRenderer* on the game thread and this
+		 * function blocks that same thread until the command completes. FSlateApplication owns the
+		 * renderer and is only torn down from the game thread, which cannot proceed while it is
+		 * parked here, so the captured pointer cannot be destroyed mid-command.
+		 *
+		 * Already on the rendering thread: mutate directly. Waiting for the rendering thread from
+		 * the rendering thread would deadlock, and a direct mutation there is safe for the same
+		 * reason the whole mechanism exists - it is the thread that broadcasts, so nothing can be
+		 * iterating the list concurrently.
+		 */
+		template <typename FunctorType>
+		static void RunDelegateMutationAndWait(const FunctorType& Functor)
+		{
+			if (IsInRenderingThread())
+			{
+				Functor();
+				return;
+			}
+
+			ENQUEUE_RENDER_COMMAND(SpoutViewportDelegateMutation)(
+				[Functor](FRHICommandListImmediate&)
+				{
+					Functor();
+				});
+
+			// Bounded by the rendering thread reaching this command; with threaded rendering
+			// disabled the command above already ran inline and the fence is satisfied at once.
+			FRenderCommandFence Fence;
+			Fence.BeginFence();
+			Fence.Wait();
+		}
+#endif
 
 		bool RegisterIfNeeded()
 		{
@@ -575,7 +692,17 @@ namespace
 				return false;
 			}
 
-			BackBufferHandle =
+			// The subscription itself is identical on every engine; only the THREAD that mutates the
+			// invocation list differs (see SPOUT_BACKBUFFER_DELEGATE_IS_THREAD_SAFE). Writing it once
+			// as a functor keeps the two paths from drifting apart.
+			FDelegateHandle NewHandle;
+			auto SubscribeToBackBuffer = [this, Renderer, &NewHandle]()
+			{
+				UE_LOG(LogSpoutPlugin, Log,
+					TEXT("Spout: subscribing to the viewport back-buffer delegate on the %s thread."),
+					IsInRenderingThread() ? TEXT("rendering") : TEXT("game"));
+
+				NewHandle =
 			Renderer->OnBackBufferReadyToPresent().AddLambda(
 #if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
 				[this](SWindow& SlateWindow, ISlateViewportProvider& ViewportProvider)
@@ -642,12 +769,76 @@ namespace
 								RHICmdList,
 								&BackBufferWrapCache
 							);
+
+#if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+							// UE 5.8: the ISlateViewportProvider refactor removed the
+							// Slate pre-resize delegates, so there is no release point before
+							// IDXGISwapChain::ResizeBuffers - and ResizeBuffers dies with
+							// DXGI_ERROR_INVALID_CALL while any cached wrap keeps a back buffer
+							// alive. The only correct design without a hook is to retain nothing
+							// across frames: this present's wrap is dropped, and its destruction
+							// drained, before the command returns. Costs one CreateWrappedResource
+							// per present plus this flush (the copy itself was already flushed by
+							// the acquire scope); the render-target send path keeps its per-sender
+							// caches and is unaffected.
+							InvalidateBackBufferWraps();
+#endif
 						}
 					);
 				}
 			);
+			}; // SubscribeToBackBuffer
 
+#if SPOUT_BACKBUFFER_DELEGATE_IS_THREAD_SAFE
+			// UE 5.4+: the delegate synchronises its own invocation list, so the game thread may
+			// mutate it directly while the rendering thread broadcasts.
+			SubscribeToBackBuffer();
+#else
+			// UE 5.3: mutate the list on the thread that broadcasts it. NewHandle is captured by
+			// reference into the render command and read below only after the mutation has
+			// completed, which the helper guarantees before it returns.
+			RunDelegateMutationAndWait(SubscribeToBackBuffer);
+#endif
+			BackBufferHandle = NewHandle;
 			bDelegateRegistered = BackBufferHandle.IsValid();
+
+			if (!bDelegateRegistered)
+			{
+				// Nothing was subscribed, so report the attach as failed rather than leaving the
+				// producer believing it is attached. The caller retries on the next send.
+				return false;
+			}
+
+#if !SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
+			// UE 5.3-5.7 broadcast OnPreResizeWindowBackBuffer on the game thread from
+			// FSlateRHIRenderer::ConditionalResizeViewport, after FlushRenderingCommands() and
+			// immediately before RHIResizeViewport -> IDXGISwapChain::ResizeBuffers. It is the
+			// engine's designed release point for externally cached back-buffer references (the
+			// engine asserts the back buffer's own refcount right after the broadcast). Because
+			// the render thread is drained at that moment, no back-buffer callback or queued copy
+			// can be using the wraps, and the invalidation completes synchronously before the
+			// broadcast returns - which is exactly what ResizeBuffers needs. The delegate fires
+			// for every window; clearing on an unrelated window's resize merely costs one re-wrap
+			// at the next present, so no window filtering is attempted.
+			// (UE 5.8 removed these delegates in the ISlateViewportProvider refactor; its path
+			// never retains wraps across frames instead - see the send command below.)
+			//
+			// This subscription stays on the GAME thread on every version, including 5.3, and is
+			// deliberately not routed through RunDelegateMutationAndWait: OnPreResizeWindowBackBuffer
+			// is broadcast on the game thread, so game-thread Add/Remove is single-threaded use of a
+			// non-TS delegate - exactly what it is designed for. On 5.3 the detach path is therefore
+			// asymmetric on purpose: the back-buffer delegate is mutated on the rendering thread and
+			// this one on the game thread, because they are broadcast on different threads.
+			if (bDelegateRegistered && !PreResizeHandle.IsValid())
+			{
+				PreResizeHandle = Renderer->OnPreResizeWindowBackBuffer().AddLambda(
+					[this](void* /*ViewportRHIPtr*/)
+					{
+						InvalidateBackBufferWraps();
+					});
+			}
+#endif
+
 			return bDelegateRegistered;
 		}
 
@@ -664,6 +855,10 @@ namespace
 		std::atomic<int32> InFlightBroadcasts{0};
 
 		FDelegateHandle BackBufferHandle;
+		// Subscription to FSlateRenderer::OnPreResizeWindowBackBuffer, which exists on
+		// UE 5.3-5.7 only (5.8 removed it with the viewport-provider refactor). Registered and
+		// removed alongside BackBufferHandle; unused when the provider path is compiled.
+		FDelegateHandle PreResizeHandle;
 		// Whether the Slate back-buffer delegate is subscribed. Distinct from
 		// FSpoutSenderRegistration, which tracks whether Spout accepted a sender NAME; this is only
 		// about this object's hook into the renderer.

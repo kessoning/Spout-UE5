@@ -14,9 +14,9 @@ source.
 ## Formats
 
 - Tested and recommended render target formats are limited to RGBA8 sRGB and RGB10A2.
-- The receiver maps a handful of DXGI formats (BGRA8, RGBA8, R10G10B10A2, RGBA16F) and falls
-  back to BGRA8 for anything else. Untested formats may look wrong even though they produce an
-  image.
+- The receiver accepts a fixed set of DXGI formats (BGRA8, RGBA8, R10G10B10A2, RGBA16F, and
+  their typeless variants). Anything else is refused with a logged warning naming the format;
+  frames are never reinterpreted as a different layout.
 
 ## Color
 

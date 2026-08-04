@@ -2,34 +2,76 @@
 
 ## Unreleased
 
-Validation, release-evidence and documentation work. No runtime plugin behaviour changed;
-no Blueprint API changes; no exported-symbol removals or breaking changes.
+_Nothing yet._
+
+## 1.0.0 - 2026-08-03
+
+First stable release. The plugin leaves beta: the sender and receiver lifecycles, the cross-process
+synchronisation protocol and the packaging layout are now covered by automated validation that runs
+on every supported engine version, and the documentation matches the implementation.
+
+Supported scope is unchanged: Windows 64-bit, Direct3D 12, Unreal Engine 5.3 through 5.8.
+
+### Highlights
+- **Game viewport senders are validated end to end.** A packaged game now proves, on every release
+  build, that a viewport sender is published through the real present loop: it appears in Spout's
+  shared sender registry, its shared texture can be opened by an independent Direct3D 11 device, and
+  its cross-process frame count advances across successive presented frames.
+- **Resizing a window while sending the viewport no longer crashes the game.** Cached interop
+  wrappers of the swap chain's back buffers kept those buffers alive, which made the engine's resize
+  fail fatally. The wrappers are now released before the swap chain resizes (and, on Unreal 5.8,
+  never held across frames), so resolution changes, window resizes and fullscreen transitions are
+  safe while a viewport sender is running.
+- **Unreal 5.3 back-buffer callback synchronisation corrected.** On 5.3 the engine's back-buffer
+  callback list is not internally synchronised, so subscribing and unsubscribing is now performed on
+  the thread that invokes it. Unreal 5.4 and newer are unaffected and keep their existing path.
 
 ### Added
-- **Tracked host test project** at `Tests/SpoutHostTest/`. A minimal Win64 code project that builds on UE 5.3-5.8 and exists to be packaged and launched unattended. It carries no content assets: both maps the smoke sequence travels between are engine maps, so the whole project is reproducible from tracked text.
-- **Packaged-host validation matrix** (`Scripts/Invoke-PackagedHostMatrix.ps1`). Per engine and per configuration it cooks, packages, inspects and launches the host, then reads back a machine-readable verdict. A pass requires the process to exit 0 *and* every required marker to be present *and* the host's own `result.json` to say it passed. `BuildPlugin` succeeding, and the executable merely existing, are explicitly not accepted as evidence.
-- **Runtime DLL loading verification.** The host asks the Windows loader which `Spout.dll` is mapped into the process and where it resolved it from; the matrix compares that against the path it staged and searches the whole package for conflicting copies. File presence proves staging, not loading, and the two are now checked separately.
-- **Lifecycle and level-travel smoke sequence.** Ten sender create/close cycles, ten receiver create/close cycles, a same-name close-and-reopen, five level-travel round trips with a sender open across every transition, a stale-session check after close, and an orderly shutdown with a sender still publishing. Run three times per matrix row, so a defect that only appears on a second launch is visible.
-- **Performance baselines** (`Scripts/Invoke-PerformanceBaselines.ps1`): 1080p60 and 4K60 send and receive, multi-stream, CPU fallback (`r.Spout.GPUReceiver=0`), idle receiver with no new frame, resize/reconnect churn, and repeated stream start/stop. Each records frame-time mean, p95, p99 and peak, game and render thread times, GPU time where the engine exposes it, process CPU, peak working set and RHI texture memory. A scenario that cannot genuinely run fails rather than reporting zeros. `-Trace` captures an Unreal Insights `.utrace` per scenario.
-- **Five automation tests** covering what the existing tests could not: that the plugin module is loaded, that `Spout.dll` resolved from one of the four locations the plugin declares rather than from `PATH`, that the Spout API genuinely answers, and that a hundred open/close cycles and twenty-five receiver-ownership cycles leave no state behind.
-- **Clean-source reproducibility check** (`Scripts/ReleaseSources.psd1` + `Scripts/New-CleanSourceCopy.ps1`). Builds a copy containing only the declared release inputs and runs the release from it, reporting separately whether anything *undeclared* was needed and whether every declared input is *tracked by git*.
-- **Documentation drift check** (`Scripts/Validate-Documentation.ps1`). 47 checks, every fact derived from source: the version from the descriptor, the engine matrix from `build.ps1`, the DLL name from `PublicDelayLoadDLLs`, the supported formats from `SpoutFormatPolicy.cpp`, the Blueprint API from the `UFUNCTION` declarations. It also asserts that specific known false claims are absent.
-- **Unified entry point**: `build.bat -TrackD` with `-BoundaryOnly`, `-FullMatrix`, `-Performance`, `-CleanSource` and `-All`. Every stage propagates its exit code, and a stage that was not run is recorded as `Skipped` with a reason rather than omitted.
+- Frame-count protocol support, so receivers can tell a newly published frame from a repeated one
+  and skip redundant copies.
+- Cross-process texture-access synchronisation around every shared-texture read and write, with
+  balanced acquire and release on all paths including failures and timeouts.
+- Colour-space control on the receiver: `Auto` follows the format convention (8-bit decodes as sRGB,
+  10-bit and float stay linear), with explicit `Linear` and `sRGB` options. An unsupported request,
+  such as forcing sRGB on a float frame, is refused and logged rather than silently applied.
+- A shipped `README.md` inside every release archive, so an unzipped plugin is self-describing.
 
 ### Changed
-- **`README.md` now ships inside every release archive.** It is a required release input, listed in `Config/FilterPlugin.ini`, required in the packaged output, and required inside every ZIP, so an unzipped plugin is self-describing.
-- **Archive validation rejects internal material.** A release archive containing `Artifacts/`, `Scripts/`, `Tests/`, `Docs/`, `.git/`, `.vs/`, `UPDATES_NOTES.md`, the build scripts or any internal development record now fails the release, as does a shipped `README.md` containing a machine-specific user path.
-- **`.gitignore` no longer ignores the documentation set or the manual generator.** Previously every Markdown document, `Docs/build_user_manual.py` and the entire generated website were ignored, which is why a clean clone could not reproduce the working-folder documentation. Only genuinely generated or machine-local output is ignored now.
+- Sender registration and same-name restart are now deterministic: closing a stream cancels work
+  already queued for it, so a close followed immediately by a reopen of the same name cannot be
+  overtaken by the frame in flight.
+- Receiver-owned textures and materials are tracked explicitly and released in a defined order
+  during teardown, so they cannot be collected while the render thread still holds their resources.
+- Shutdown follows one fixed ordered sequence, and a stream left publishing when the process exits
+  is torn down without taking the process with it.
+- Streams started in Play-In-Editor are closed when that session ends, instead of lingering on their
+  last frame until the editor exits.
+- Unsupported pixel formats are refused with a warning naming the format. Frames are never
+  reinterpreted as a different layout.
+- A user-supplied output render target must match the incoming frame's pixel format exactly and be
+  single-sampled; a mismatched target is left untouched and the mismatch is logged, rather than
+  producing a silently black target.
+- `Set Max Senders` returns the limit actually in effect afterwards, and returns 0 when nothing was
+  changed, rather than echoing the requested value.
 
-### Fixed (documentation)
-- `Docs/build_user_manual.py` derives the version from `SpoutPlugin.uplugin` and the engine range from `build.ps1` instead of hard-coding them. The hard-coded `VERSION = "0.0.5"` is what let the manual, the PDF and the website drift three releases behind the descriptor.
-- Removed every reference to the sender gamma pipeline (`FSpoutGammaPipeline`, `EnsureGammaResources`, `SanitizeGamma`), deleted in 0.0.9 but still described in `LIMITATIONS.md`, `RENDER_TARGETS_AND_FORMATS.md`, `SENDER.md`, `USER_MANUAL_SOURCE.md`, the manual generator and the website. Replaced with the actual format-driven colour-space contract.
-- Removed the `d3dcompiler.lib` dependency from the documented module dependencies; it went with the gamma pipeline.
-- Corrected the claim that `CreateTextureRenderTarget2D` roots its result. It does not, and callers that believed otherwise would lose the render target to garbage collection.
-- Documented `CloseReceiver`, which was exposed in the Blueprint API but absent from the API guide, the manual, the PDF and the website, including its ownership rules and the fact that the name decides what is released rather than the pointers.
-- Corrected the claim that `RuntimeDependencies` places `Spout.dll` into raw `RunUAT BuildPlugin` output. It does not; `build.ps1` stages it explicitly. All five distinct DLL layouts are now documented and distinguished.
-- Corrected the claim that release archives strip `Intermediate`. They deliberately keep `Intermediate/Build`, which is what lets Blueprint-only users package without a compiler.
-- Corrected the supported engine range in `README.md` from "5.5 and newer" to UE 5.3-5.8, and removed the struck-through legacy text claiming 5.3 and 5.4 could not be built.
+### Fixed
+- Publishing the game viewport to several Spout names now costs a single GPU round trip in total
+  rather than one per name.
+- Unreal 5.8 compatibility for the changed back-buffer callback signature.
+- Documentation corrected against the implementation: the format-refusal behaviour, the receiver's
+  full parameter list including colour space, the `Set Max Senders` contract, the output render
+  target requirements, where `Spout.dll` is staged for each install layout, and the removal of a
+  dependency the plugin no longer uses.
+
+### Release validation
+- Every release archive is reopened and checked before it ships: plugin descriptor version, source
+  tree, module binary, `Spout.dll` verified byte for byte against the repository copy, example
+  content, plugin icon, licence and third-party notices, with internal material and debug symbols
+  rejected.
+- Validation stages now fail on a non-zero editor exit code and refuse to report success for a run
+  that executed no test rows, so a report cannot pass on absent evidence.
+- The documentation drift checker covers version 1.0.0 and later, scans the published website
+  sources, and enforces each corrected behaviour contract.
 
 ## 0.0.9 - 2026-07-27
 

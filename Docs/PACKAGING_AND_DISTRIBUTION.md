@@ -8,8 +8,10 @@ How the plugin is built for release and what must ship with it.
 `$(BinaryOutputDir)/Spout.dll`. `$(BinaryOutputDir)` is the folder of the binary the module
 is linked into, so it resolves to two different places depending on the build type:
 
-- **Editor / modular builds** (normal project builds, `RunUAT BuildPlugin`, precompiled
-  release zips): the plugin's own `Binaries/Win64`, beside `UnrealEditor-SpoutPlugin.dll`.
+- **Editor / modular builds** (normal project builds): the plugin's own `Binaries/Win64`,
+  beside `UnrealEditor-SpoutPlugin.dll`. Raw `RunUAT BuildPlugin` output does not include the
+  DLL — plugin packaging runs no target staging — so `build.ps1` stages it into that same
+  location explicitly when it assembles the precompiled release zips.
 - **Packaged (monolithic) games**: the plugin module is linked into the game executable, so
   the DLL is staged into the project's `Binaries/Win64` next to the game `.exe`. The plugin's
   own `Binaries` and `ThirdParty` folders are not staged at all in a packaged game.
@@ -63,7 +65,7 @@ RunUAT BuildPlugin -Plugin="<...>/SpoutPlugin.uplugin" -Package="<out>" -TargetP
 ```
 
 then strips `.pdb` files and zips a `SpoutPlugin/` folder per version (for example
-`SpoutPlugin_0.0.9_UE5.7_Win64.zip`). `build.bat` is a one-line launcher for `build.ps1`.
+`SpoutPlugin_1.0.0_UE5.7_Win64.zip`). `build.bat` is a one-line launcher for `build.ps1`.
 
 `Intermediate/Build` is kept in the zips on purpose (since 0.0.9). `BuildPlugin` emits
 precompiled `UnrealGame` Development and Shipping objects plus `.precompiled` manifests

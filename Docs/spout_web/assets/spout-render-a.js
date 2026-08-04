@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 /* SpoutPlugin Docs — render part A: hero -> materials */
 window.RENDER_A = function () {
   const out = [];
@@ -18,7 +22,7 @@ window.RENDER_A = function () {
           <a class="btn ghost" href="#install">${ICON.download(16)} Download <span class="mono tiny">(Patreon)</span></a>
         </div>
         <div class="hero-pills">
-          <span class="pill"><span class="dot"></span>v0.0.5 beta</span>
+          <span class="pill"><span class="dot"></span>v${C.esc(SPOUT.facts.version)}</span>
           <span class="pill"><span class="dot"></span>UE 5.3 - 5.8</span>
           <span class="pill warn"><span class="dot"></span>Windows only</span>
           <span class="pill warn"><span class="dot"></span>DX12 required</span>
@@ -203,7 +207,7 @@ window.RENDER_A = function () {
       "Cost scales with resolution. Use a timer when full frame rate is not needed.",
       "The shared texture and the interop wrap are cached and reused while size and format are stable.",
       "No CPU readback happens on the send path - it is a GPU-to-GPU copy.",
-      "No sender-side gamma or color correction is applied (a gamma pipeline exists in the source but is reserved and not active). Manage color on the source side."
+      "No sender-side gamma or color correction is applied. Manage color on the source side."
     ])}</div>
   `));
 

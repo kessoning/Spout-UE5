@@ -1,10 +1,14 @@
+# Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+# SPDX-License-Identifier: MIT
+# Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
 <#
 .SYNOPSIS
     Validates the documentation set against the implementation, and fails on drift.
 
 .DESCRIPTION
     Documentation that is merely correct today goes stale silently. This script is what stops that:
-    it re-derives the facts from source on every run and fails when they disagree.
+    it re-derives the facts from source on every run and fails the release when they disagree.
 
     Every fact it checks is DERIVED from tracked source and then looked for in the documentation,
     rather than being restated here:
@@ -18,14 +22,19 @@
       - release artifact name       <- build.ps1's archive-name format string
       - licensing files             <- LICENSE, THIRD_PARTY_NOTICES.md and Config/FilterPlugin.ini
 
-    It also checks that a set of known-false claims stays ABSENT from the current documentation:
-    the removed gamma pipeline, the removed d3dcompiler dependency, the false claim that the
-    render-target factory roots its result, the false claim that RuntimeDependencies puts Spout.dll
-    into raw BuildPlugin output, and the false claim that release Intermediate data is stripped.
+    It also checks that a set of known-false claims stays ABSENT from everything a user reads:
+    the removed gamma pipeline, the removed d3dcompiler dependency, the BGRA8-fallback claim, the
+    SetMaxSenders echo claim, the claim that the render-target factory roots its result, the claim
+    that RuntimeDependencies puts Spout.dll into raw BuildPlugin output, and the claim that
+    release Intermediate data is stripped.
 
-    Historical records are exempt from the forbidden-claim checks, and deliberately so: they QUOTE
-    the false claims in order to record them. They are listed explicitly rather than skipped by
-    pattern, so adding a new exemption is a visible decision.
+    Claims-exposure checks are scoped to an explicit allowlist of public documents: the canonical
+    documentation set plus the website and generated-manual sources. Other records may QUOTE stale
+    claims in order to record them, so they are out of scope for the claims-exposure checks, and
+    only for those. The changelogs are exempt from the claim patterns for the same reason (a
+    correction entry must be able to name what it corrected) and are validated for version
+    currency instead. Both lists are explicit, so widening or narrowing the scope is a visible
+    decision.
 
     Nothing is ever rewritten. -ShowDetail prints every check; without it only problems are printed.
 
@@ -282,98 +291,308 @@ foreach ($function in $blueprintFunctions)
 Add-Check -Name 'changelog.hasCurrentVersion' -Passed ($changelogText -match [regex]::Escape($pluginVersion)) `
     -Detail "CHANGELOG.md has an entry for $pluginVersion"
 
+# Docs/CHANGELOG.md is deliberately a version-free pointer to the canonical root changelog: any
+# version number appearing there is drift by definition.
+$docsChangelogText = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\CHANGELOG.md')
+$docsChangelogVersions = @([regex]::Matches($docsChangelogText, '\b\d+\.\d+\.\d+\b') |
+    ForEach-Object { $_.Value } | Sort-Object -Unique)
+Add-Check -Name 'changelog.docsPointerVersionFree' `
+    -Passed (($docsChangelogVersions.Count -eq 0) -and ($docsChangelogText -match 'canonical changelog')) `
+    -Detail "Docs/CHANGELOG.md stays a version-free pointer to the canonical changelog$(if ($docsChangelogVersions.Count -gt 0) { " - found: $($docsChangelogVersions -join ', ')" })"
+
 # =================================================================================================
-# 4. Known-false claims must be absent
+# 4. Known-false claims must be absent from everything a user reads
 # =================================================================================================
 
-# Historical records quote the false claims deliberately, to record them. Exempting them by name
-# rather than by pattern keeps each exemption a visible decision.
-$historicalRecords = @(
-    'Docs/2026-07-27-AUDIT.md',
-    'Docs/2026-07-30-PRODUCTION-READINESS-AUDIT.md',
-    'Docs/TRACK_B_DEVIATIONS.md',
-    'Docs/TRACK_B_IMPLEMENTATION_PROGRESS.md',
-    'Docs/TRACK_B_MANUAL_VALIDATION_CHECKLIST.md',
-    'Docs/TRACK_B_SAME_NAME_RECEIVER_REVIEW.md',
-    'Docs/TRACK_B_TEST_RESULTS.md',
-    'Docs/TRACK_C_DEVIATIONS.md',
-    'Docs/TRACK_C_IMPLEMENTATION_PROGRESS.md',
-    'Docs/TRACK_C_MANUAL_VALIDATION_CHECKLIST.md',
-    'Docs/TRACK_C_TEST_RESULTS.md',
-    'Docs/TRACK_D_IMPLEMENTATION_REPORT.md',
-    'Docs/TRACK_D_VALIDATION_MATRIX.md',
-    'Docs/TRACK_D_PERFORMANCE_BASELINES.md',
-    'Docs/TRACK_D_RELEASE_EVIDENCE.md',
-    'Docs/TRACK_D_DEVIATIONS.md',
-    'TRACK_A_DEVIATIONS.md',
-    'TRACK_A_IMPLEMENTATION_PROGRESS.md',
-    'TRACK_A_TEST_RESULTS.md',
+# Claims-exposure checks run against an explicit allowlist of the documents users actually see:
+# the canonical public documentation set plus the website and generated-manual sources. Other
+# records may QUOTE stale claims in order to record them; they are out of scope for the
+# claims-exposure checks, and only for those. Listing the public set explicitly rather than
+# sweeping a directory keeps every scope decision visible: a new public page must be added here
+# to be scanned at all.
+$publicDocRelatives = @(
+    'README.md',
     'CHANGELOG.md',
     'UPDATES_NOTES.md',
-    'Docs/CHANGELOG.md'
+    'Docs/BLUEPRINT_API.md',
+    'Docs/CHANGELOG.md',
+    'Docs/INSTALLATION.md',
+    'Docs/LIMITATIONS.md',
+    'Docs/PACKAGING_AND_DISTRIBUTION.md',
+    'Docs/QUICK_START.md',
+    'Docs/RECEIVER.md',
+    'Docs/RENDER_TARGETS_AND_FORMATS.md',
+    'Docs/SCENECAPTURE2D.md',
+    'Docs/SENDER.md',
+    'Docs/TROUBLESHOOTING.md',
+    'Docs/USER_MANUAL_SOURCE.md'
 )
 
-$forbiddenClaims = @(
-    @{ Pattern = 'd3dcompiler';                                    Finding = 'AUD-012'; Detail = 'the d3dcompiler dependency was removed from SpoutPlugin.Build.cs' }
-    @{ Pattern = 'EnsureGammaResources';                           Finding = 'AUD-012'; Detail = 'the sender gamma pipeline was removed' }
-    @{ Pattern = 'SanitizeGamma';                                  Finding = 'AUD-012'; Detail = 'the sender gamma pipeline was removed' }
-    @{ Pattern = 'gamma pipeline';                                 Finding = 'AUD-012'; Detail = 'the reserved sender gamma pipeline no longer exists' }
-    @{ Pattern = 'RuntimeDependencies[^.]{0,80}automatically[^.]{0,80}BuildPlugin'; Finding = 'AUD-012'; Detail = 'raw BuildPlugin output does NOT receive Spout.dll from RuntimeDependencies; build.ps1 stages it explicitly' }
-    @{ Pattern = 'Intermediate[^.]{0,40}(is |are )?stripped';      Finding = 'AUD-012'; Detail = 'release archives deliberately KEEP Intermediate/Build for no-compiler packaging' }
-)
-
-$docFiles = New-Object System.Collections.ArrayList
-foreach ($candidate in @(Get-ChildItem -LiteralPath $RepoRoot -Filter '*.md' -File))
+# The website has no build step: the checked-in page, data, render and style sources ARE the
+# deployed site, so they are scanned as public documents too.
+$websiteRoot = Join-Path $RepoRoot 'Docs\spout_web'
+$websiteFiles = @()
+if (Test-Path -LiteralPath $websiteRoot -PathType Container)
 {
-    [void] $docFiles.Add($candidate.FullName)
+    $websiteFiles = @(Get-ChildItem -LiteralPath $websiteRoot -Recurse -File -Include *.js, *.html, *.css)
 }
-$docsDir = Join-Path $RepoRoot 'Docs'
-if (Test-Path -LiteralPath $docsDir -PathType Container)
+
+# Every allowlisted public document must actually exist: a rename or deletion would otherwise
+# silently drop the file out of every claims-exposure check below.
+$missingPublicDocs = @($publicDocRelatives | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path $RepoRoot ($_ -replace '/', '\')) -PathType Leaf) })
+Add-Check -Name 'publicDocs.allPresent' -Passed ($missingPublicDocs.Count -eq 0) `
+    -Detail "every allowlisted public document exists$(if ($missingPublicDocs.Count -gt 0) { " - missing: $($missingPublicDocs -join ', ')" })"
+
+$claimScanFiles = New-Object System.Collections.ArrayList
+foreach ($relative in $publicDocRelatives)
 {
-    foreach ($candidate in @(Get-ChildItem -LiteralPath $docsDir -Filter '*.md' -File -Recurse))
+    $path = Join-Path $RepoRoot ($relative -replace '/', '\')
+    if (Test-Path -LiteralPath $path -PathType Leaf)
     {
-        [void] $docFiles.Add($candidate.FullName)
+        [void] $claimScanFiles.Add(@{ Relative = $relative; Path = $path })
     }
 }
+foreach ($file in $websiteFiles)
+{
+    $relative = $file.FullName.Substring($RepoRoot.Length).TrimStart('\').Replace('\', '/')
+    [void] $claimScanFiles.Add(@{ Relative = $relative; Path = $file.FullName })
+}
+
+# The changelogs are records of change: a correction entry must be able to QUOTE the claim it
+# corrects ("removed the d3dcompiler dependency", "corrected the claim that ..."), so they are
+# exempt from the claim patterns - and from nothing else. Their own drift risk is version
+# currency, which changelog.hasCurrentVersion and changelog.docsPointerVersionFree cover.
+$correctionRecords = @('CHANGELOG.md', 'UPDATES_NOTES.md', 'Docs/CHANGELOG.md')
+
+$forbiddenClaims = @(
+    @{ Name = 'ddcompiler';           Pattern = 'd3dcompiler';                                    Finding = 'AUD-012'; Detail = 'the d3dcompiler dependency was removed from SpoutPlugin.Build.cs' }
+    @{ Name = 'EnsureGammaResources'; Pattern = 'EnsureGammaResources';                           Finding = 'AUD-012'; Detail = 'the sender gamma pipeline was removed' }
+    @{ Name = 'SanitizeGamma';        Pattern = 'SanitizeGamma';                                  Finding = 'AUD-012'; Detail = 'the sender gamma pipeline was removed' }
+    @{ Name = 'gammapipeline';        Pattern = 'gamma pipeline';                                 Finding = 'AUD-012'; Detail = 'the reserved sender gamma pipeline no longer exists' }
+    @{ Name = 'RuntimeDependenciesautomaticallyBuildPlugin'; Pattern = 'RuntimeDependencies[^.]{0,80}automatically[^.]{0,80}BuildPlugin'; Finding = 'AUD-012'; Detail = 'raw BuildPlugin output does NOT receive Spout.dll from RuntimeDependencies; build.ps1 stages it explicitly' }
+    @{ Name = 'Intermediateisarestripped'; Pattern = 'Intermediate[^.]{0,40}(is |are )?stripped'; Finding = 'AUD-012'; Detail = 'release archives deliberately KEEP Intermediate/Build for no-compiler packaging' }
+    @{ Name = 'bgraFallback';         Pattern = 'fall(s|ing)? back to (BGRA8|B8G8R8A8)';          Finding = 'SPUE-002'; Detail = 'unsupported formats are refused with a logged warning, never converted to BGRA8' }
+    @{ Name = 'setMaxSendersEcho';    Pattern = 'Returns the value passed in';                    Finding = 'SPUE-003'; Detail = 'SetMaxSenders returns the limit actually in effect (0 on failure), not an echo of the request' }
+)
 
 foreach ($claim in $forbiddenClaims)
 {
     $offenders = New-Object System.Collections.ArrayList
-    foreach ($file in $docFiles)
+    foreach ($file in $claimScanFiles)
     {
-        $relative = $file.Substring($RepoRoot.Length).TrimStart('\').Replace('\', '/')
-        if ($historicalRecords -contains $relative) { continue }
+        if ($correctionRecords -contains $file.Relative) { continue }
 
-        $text = Get-TextOrEmpty $file
+        $text = Get-TextOrEmpty $file.Path
         if ($text -match $claim.Pattern)
         {
-            [void] $offenders.Add($relative)
+            [void] $offenders.Add($file.Relative)
         }
     }
 
-    Add-Check -Name "staleClaim.$($claim.Pattern -replace '[^A-Za-z]','')" -Passed ($offenders.Count -eq 0) `
+    Add-Check -Name "staleClaim.$($claim.Name)" -Passed ($offenders.Count -eq 0) `
         -Detail "$($claim.Finding): $($claim.Detail)$(if ($offenders.Count -gt 0) { " - found in: $($offenders -join ', ')" })"
 }
 
 # The render-target factory does NOT root its result, and documentation that says otherwise makes
 # callers leak or crash.
 $rootingClaimOffenders = New-Object System.Collections.ArrayList
-foreach ($file in $docFiles)
+foreach ($file in $claimScanFiles)
 {
-    $relative = $file.Substring($RepoRoot.Length).TrimStart('\').Replace('\', '/')
-    if ($historicalRecords -contains $relative) { continue }
+    if ($correctionRecords -contains $file.Relative) { continue }
 
-    $text = Get-TextOrEmpty $file
+    $text = Get-TextOrEmpty $file.Path
     if ($text -match 'CreateTextureRenderTarget2D[\s\S]{0,300}?(AddToRoot|adds it to the root|is rooted|automatically rooted)')
     {
-        [void] $rootingClaimOffenders.Add($relative)
+        [void] $rootingClaimOffenders.Add($file.Relative)
     }
 }
 Add-Check -Name 'staleClaim.renderTargetRooting' -Passed ($rootingClaimOffenders.Count -eq 0) `
     -Detail "AUD-012: CreateTextureRenderTarget2D does NOT root its result$(if ($rootingClaimOffenders.Count -gt 0) { " - claimed in: $($rootingClaimOffenders -join ', ')" })"
 
 # =================================================================================================
-# 5. DLL staging layouts must be distinguished
+# 5. Corrected behaviour contracts must stay stated
+# =================================================================================================
+
+# Each check pins a behaviour contract the documentation must keep stating. The presence checks
+# anchor to wording only the correct contract would use, so reverting a correction fails the
+# release instead of quietly shipping the false claim again. Where the contract is visible in a
+# source declaration, the check derives it from the header first rather than restating it here.
+
+$installationText = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\INSTALLATION.md')
+$packagingText    = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\PACKAGING_AND_DISTRIBUTION.md')
+$receiverText     = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\RECEIVER.md')
+$quickStartText   = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\QUICK_START.md')
+$limitationsText  = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\LIMITATIONS.md')
+$renderTargetsText = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\RENDER_TARGETS_AND_FORMATS.md')
+$manualSourceText = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\USER_MANUAL_SOURCE.md')
+
+# Unsupported formats are refused with a logged warning naming the format (SpoutFormatPolicy.cpp);
+# both format-facing pages must state refusal, not conversion.
+foreach ($page in @(
+    @{ Name = 'renderTargets'; Text = $renderTargetsText; Relative = 'Docs/RENDER_TARGETS_AND_FORMATS.md' },
+    @{ Name = 'limitations';   Text = $limitationsText;   Relative = 'Docs/LIMITATIONS.md' }))
+{
+    Add-Check -Name "contract.formatRefusal.$($page.Name)" -Passed ($page.Text -match '(?i)refused') `
+        -Detail "$($page.Relative) states the refuse-and-log format contract"
+}
+
+# SetMaxSenders returns the limit actually in effect afterwards (0 when nothing changed), not an
+# echo of the requested value.
+Add-Check -Name 'contract.setMaxSendersEffectiveLimit' -Passed ($blueprintApiText -match 'actually in effect') `
+    -Detail 'Docs/BLUEPRINT_API.md states that SetMaxSenders returns the limit actually in effect'
+
+# The receiver signature carries an ESpoutColorSpace parameter; derived from the header so the
+# doc checks only apply while the parameter actually exists.
+$receiverHasColorSpace = ($bpHeaderText -match 'SpoutReceiver\s*\([\s\S]{0,800}?ESpoutColorSpace\s+ColorSpace')
+Add-Check -Name 'contract.colorSpace.derived' -Passed $receiverHasColorSpace `
+    -Detail 'SpoutBPFunctionLibrary.h declares ESpoutColorSpace ColorSpace on SpoutReceiver'
+if ($receiverHasColorSpace)
+{
+    foreach ($page in @(
+        @{ Name = 'blueprintApi'; Text = $blueprintApiText; Relative = 'Docs/BLUEPRINT_API.md' },
+        @{ Name = 'userManual';   Text = $manualSourceText; Relative = 'Docs/USER_MANUAL_SOURCE.md' }))
+    {
+        Add-Check -Name "contract.colorSpace.$($page.Name)" -Passed ($page.Text -match 'ESpoutColorSpace') `
+            -Detail "$($page.Relative) documents the ESpoutColorSpace parameter"
+    }
+}
+
+# OptionalOutputRenderTarget must match the incoming frame's pixel format exactly and be
+# single-sampled; a mismatched target is left untouched, which reads as "black render target"
+# without this documentation. Every receiver guide must state both constraints.
+$headerHasOptionalTarget = ($bpHeaderText -match 'OptionalOutputRenderTarget')
+Add-Check -Name 'contract.outputTarget.derived' -Passed $headerHasOptionalTarget `
+    -Detail 'SpoutBPFunctionLibrary.h declares OptionalOutputRenderTarget'
+if ($headerHasOptionalTarget)
+{
+    foreach ($page in @(
+        @{ Name = 'receiver';     Text = $receiverText;     Relative = 'Docs/RECEIVER.md' },
+        @{ Name = 'blueprintApi'; Text = $blueprintApiText; Relative = 'Docs/BLUEPRINT_API.md' },
+        @{ Name = 'quickStart';   Text = $quickStartText;   Relative = 'Docs/QUICK_START.md' }))
+    {
+        $statesBoth = ($page.Text -match '(?i)single.sample') -and ($page.Text -match '(?i)pixel format')
+        Add-Check -Name "contract.outputTarget.$($page.Name)" -Passed $statesBoth `
+            -Detail "$($page.Relative) states the exact-pixel-format and single-sample requirements"
+    }
+}
+
+# Raw BuildPlugin output does not include Spout.dll - build.ps1 stages it into the release zips.
+# The two install-facing guides must keep saying so.
+Add-Check -Name 'contract.dllStaging.installation' -Passed ($installationText -match 'output does not include the\s+DLL') `
+    -Detail 'Docs/INSTALLATION.md states that raw BuildPlugin output does not include the DLL'
+Add-Check -Name 'contract.dllStaging.packaging' -Passed ($packagingText -match 'runs no target staging') `
+    -Detail 'Docs/PACKAGING_AND_DISTRIBUTION.md states that plugin packaging runs no target staging'
+
+# =================================================================================================
+# 5b. The manual GENERATOR must state the same contracts as the Markdown source
+# =================================================================================================
+
+# Docs/USER_MANUAL_SOURCE.md and Docs/build_user_manual.py both carry public prose, maintained
+# independently: the PDF's body lives in the generator and is NOT rendered from the Markdown, so
+# a correction to one does not reach the other. Until the two are consolidated, this section
+# checks the generator's own text so they cannot diverge.
+$manualGeneratorText = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\build_user_manual.py')
+if (-not [string]::IsNullOrWhiteSpace($manualGeneratorText))
+{
+    # Whitespace-insensitive view, so line wrapping inside the generator's string literals cannot
+    # break a check that is really about wording.
+    $generatorFlat = ($manualGeneratorText -replace '\\n', ' ') -replace '\s+', ' '
+
+    foreach ($contract in @(
+        @{ Name = 'receiverSignatureHasColorSpace'; Pattern = 'SpoutReceiver\([^)]{0,400}ESpoutColorSpace\s+ColorSpace';
+           Detail = 'the manual generator documents the current SpoutReceiver signature including ESpoutColorSpace ColorSpace' },
+        # Negative lookahead on the second colon: without it this matches the scoped value
+        # ESpoutColorSpace::Auto inside the signature and would pass with the enum undocumented.
+        @{ Name = 'colorSpaceEnumDocumented';      Pattern = 'ESpoutColorSpace:(?!:)';
+           Detail = 'the manual generator documents the ESpoutColorSpace enum values' },
+        @{ Name = 'colorSpaceAutoBehaviour';       Pattern = '(?i)8-bit\s+decodes\s+as\s+sRGB';
+           Detail = 'the manual generator describes Auto colour-space behaviour' },
+        @{ Name = 'formatRefusal';                 Pattern = '(?i)Anything else is refused';
+           Detail = 'the manual generator states that unsupported formats are refused' },
+        @{ Name = 'formatRefusalNoFallback';       Pattern = '(?i)never reinterpreted as B8G8R8A8';
+           Detail = 'the manual generator states that unsupported formats are not reinterpreted as B8G8R8A8' },
+        @{ Name = 'outputTargetFormatMatch';       Pattern = '(?i)must match the incoming frame''s format exactly';
+           Detail = 'the manual generator states the OptionalOutputRenderTarget exact-format requirement' },
+        @{ Name = 'outputTargetSingleSampled';     Pattern = '(?i)single-sampled';
+           Detail = 'the manual generator states the OptionalOutputRenderTarget single-sample requirement' }))
+    {
+        Add-Check -Name "manualGenerator.$($contract.Name)" -Passed ($generatorFlat -match $contract.Pattern) `
+            -Detail $contract.Detail
+    }
+
+    # The stale six-parameter form: a SpoutReceiver signature whose parameter list ends at
+    # OptionalOutputRenderTarget. Matching the END of the list rather than counting commas keeps
+    # this robust against reformatting.
+    Add-Check -Name 'manualGenerator.noSixParameterReceiver' `
+        -Passed (-not ($generatorFlat -match 'SpoutReceiver\([^)]{0,400}OptionalOutputRenderTarget\s*=\s*nullptr\s*\)')) `
+        -Detail 'the manual generator no longer documents the superseded six-parameter SpoutReceiver signature'
+
+    Add-Check -Name 'manualGenerator.noBgraFallback' `
+        -Passed (-not ($generatorFlat -match '(?i)fall(s|ing)? back to (BGRA8|B8G8R8A8)')) `
+        -Detail 'the manual generator does not claim a BGRA8 fallback'
+}
+
+# =================================================================================================
+# 5c. The RENDERED manual must carry the same contracts
+# =================================================================================================
+
+# Checking the generator's source proves what it would write; it does not prove what the shipped
+# PDF says. Extraction is attempted with the interpreter the generator already requires; when no
+# extractor is available the result is recorded as UNVERIFIED rather than silently passing, so a
+# green run never implies the rendered PDF was machine-checked when it was not.
+$manualPdfPath = Join-Path $RepoRoot 'Docs\2026-06-05-SpoutPlugin-User-Manual.pdf'
+$pdfTextVerified = $false
+$pdfTextProblems = @()
+if ((-not $SkipGeneratedDocs) -and (Test-Path -LiteralPath $manualPdfPath -PathType Leaf))
+{
+    $extractScript = @'
+import sys
+try:
+    from pypdf import PdfReader
+except Exception:
+    print("NO_EXTRACTOR"); sys.exit(0)
+try:
+    r = PdfReader(sys.argv[1])
+    t = "".join((p.extract_text() or "") for p in r.pages)
+except Exception as e:
+    print("EXTRACT_FAILED"); sys.exit(0)
+flat = " ".join(t.split()).lower()
+checks = {
+    "colorspace_param": "espoutcolorspace colorspace" in flat,
+    "colorspace_enum": "espoutcolorspace:" in flat,
+    "format_refusal": "anything else is refused" in flat,
+    "output_format_match": "must match the incoming frame's format exactly" in flat,
+    "single_sampled": "single-sampled" in flat,
+    "no_six_param": "optionaloutputrendertarget = nullptr)" not in flat,
+    "no_bgra_fallback": "falls back to bgra8" not in flat,
+}
+print("OK|" + "|".join(k for k, v in checks.items() if not v))
+'@
+    $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) 'spout-manual-pdf-check.py'
+    Set-Content -LiteralPath $tempScript -Value $extractScript -Encoding utf8
+    $extractOutput = ''
+    try { $extractOutput = (& python $tempScript $manualPdfPath 2>&1 | Out-String).Trim() } catch { $extractOutput = 'NO_EXTRACTOR' }
+    Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+
+    if ($extractOutput -like 'OK|*')
+    {
+        $pdfTextVerified = $true
+        $failed = @($extractOutput.Substring(3).Split('|') | Where-Object { $_ })
+        $pdfTextProblems = $failed
+        Add-Check -Name 'manualPdf.renderedContractsVerified' -Passed ($failed.Count -eq 0) `
+            -Detail "the rendered manual PDF states every corrected contract$(if ($failed.Count -gt 0) { " - missing: $($failed -join ', ')" })"
+    }
+    else
+    {
+        # Visible, and deliberately not a silent pass: the report records PdfTextVerified=false.
+        Add-Check -Name 'manualPdf.renderedContractsVerified' -Passed $true `
+            -Detail 'UNVERIFIED: no PDF text extractor is available on this machine, so the rendered manual was NOT machine-checked (the generator source was). Verify the PDF manually or install pypdf.'
+    }
+}
+
+# =================================================================================================
+# 6. DLL staging layouts must be distinguished
 # =================================================================================================
 
 # Documentation must distinguish five distinct DLL layouts. Each is checked by a phrase that only
@@ -393,7 +612,7 @@ foreach ($marker in $layoutMarkers)
 }
 
 # =================================================================================================
-# 6. Generated documentation freshness
+# 7. Generated documentation freshness
 # =================================================================================================
 
 $generatedDocs = @()
@@ -424,8 +643,10 @@ if (-not $SkipGeneratedDocs)
 
         $text = Get-TextOrEmpty $generated.Path
 
-        # Any OTHER x.y.z version string that is not the descriptor's is drift.
-        $versions = @([regex]::Matches($text, '\b0\.\d+\.\d+\b') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+        # Any OTHER x.y.z version string that is not the descriptor's is drift. The pattern must
+        # match ANY three-part version, not just 0.x.y: anchoring it to a leading 0 would make the
+        # check pass vacuously forever the moment the plugin ships 1.0.0.
+        $versions = @([regex]::Matches($text, '\b\d+\.\d+\.\d+\b') | ForEach-Object { $_.Value } | Sort-Object -Unique)
         $stale = @($versions | Where-Object { $_ -ne $pluginVersion })
 
         Add-Check -Name "generatedDocs.version.$($generated.Kind -replace '[^A-Za-z]','')" -Passed ($stale.Count -eq 0) `
@@ -470,6 +691,17 @@ $report = [ordered] @{
         SupportedPixelFormats = $supportedPixelFormats
         BlueprintFunctions    = $blueprintFunctions
         ArchiveNamePattern    = $archiveNamePattern
+    }
+    ClaimScanScope = [ordered] @{
+        PublicDocuments            = $publicDocRelatives
+        WebsiteSources             = @($claimScanFiles | Where-Object { $_.Relative -like 'Docs/spout_web/*' } | ForEach-Object { $_.Relative })
+        CorrectionRecordExemptions = $correctionRecords
+    }
+    ManualPdf = [ordered] @{
+        # False means the rendered PDF was not machine-checked on this run; the generator source
+        # still was. Recorded so a green run cannot be mistaken for rendered-PDF verification.
+        PdfTextVerified = $pdfTextVerified
+        MissingContracts = $pdfTextProblems
     }
     GeneratedDocs = $generatedDocs
     Checks        = $checks.ToArray()
