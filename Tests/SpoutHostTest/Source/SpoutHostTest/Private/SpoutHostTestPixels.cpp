@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Giovanni Muzio (Kesson)
 // SPDX-License-Identifier: MIT
 #include "SpoutHostTestPixels.h"
+#include "SpoutHostTestReport.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -111,20 +112,49 @@ namespace SpoutHostTest
 		AActor* Receiver=World->SpawnActor<AActor>(ReceiverClass);
 		ON_SCOPE_EXIT { if(Receiver) Receiver->Destroy(); UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr; USpoutBPFunctionLibrary::CloseReceiver(ReceiverName,Texture,Material); SetEvent(Stop); FinishPeer(Writer,3.0); CloseHandle(Ready); CloseHandle(Stop); FlushRenderingCommands(); };
 		if (!Receiver || !Writer.IsValid() || WaitForSingleObject(Ready,10000)!=WAIT_OBJECT_0) { Error=TEXT("shipped receiver or external sender failed to start"); return false; }
-		int32 Verified=0, Last=-1; TSet<int32> Widths;
+		int32 Verified=0, Last=-1, AwaitingCopy=0; TSet<int32> Widths;
 		const double ReceiverDeadline=FPlatformTime::Seconds()+12.0;
 		while (Verified<64 && FPlatformTime::Seconds()<ReceiverDeadline)
 		{
+			const int32 WidthBefore=ReceiverTarget->SizeX;
+			const int64 MissesBefore=USpoutBPFunctionLibrary::GetSpoutStreamStatus(ReceiverName,ESpoutType::Receiver).AccessMisses;
 			Receiver->Tick(1.0f/60.0f); FlushRenderingCommands();
 			const auto Pixels=ReadPixels(ReceiverTarget->GetResource(),ReceiverTarget->SizeX,ReceiverTarget->SizeY);
 			if (Pixels.Num() && Pixels[0].A==255)
 			{
-				if (Pixels!=Pattern(ReceiverTarget->SizeX,ReceiverTarget->SizeY,Pixels[0].R)) { Error=TEXT("shipped receiver output contains corrupted pixels"); return false; }
-				Widths.Add(ReceiverTarget->SizeX);
-				if (Last!=Pixels[0].R) { Last=Pixels[0].R; ++Verified; }
+				// Resizing the target clears it to its Clear Color. When the transfer in that call is
+				// skipped because the sender holds the access mutex, the whole target still shows the
+				// clear colour until the next successful transfer: a delivery not yet made, as the
+				// receiver documentation states, not corruption. The test pattern is never uniform,
+				// so this cannot hide a partially written frame, and sustained delivery is still
+				// required below.
+				const FColor Clear=ReceiverTarget->ClearColor.ToFColor(false);
+				bool bAllClear=true;
+				for (const FColor& P : Pixels) { if (P!=Clear) { bAllClear=false; break; } }
+				if (bAllClear)
+				{
+					++AwaitingCopy;
+				}
+				else if (Pixels!=Pattern(ReceiverTarget->SizeX,ReceiverTarget->SizeY,Pixels[0].R))
+				{
+					// Record what was read, so a failure can be classified from its result file alone.
+					int32 Uniform=0, ClearPixels=0;
+					for (const FColor& P : Pixels) { Uniform+=(P==Pixels[0]); ClearPixels+=(P==Clear); }
+					const FSpoutStreamStatus Status=USpoutBPFunctionLibrary::GetSpoutStreamStatus(ReceiverName,ESpoutType::Receiver);
+					Error=FString::Printf(TEXT("shipped receiver output contains corrupted pixels (%dx%d, resized this call %d, verified %d, pixel0 %d/%d/%d/%d, uniform %d, clear colour %d of %d, submitted %lld, access misses this call %lld)"),
+						ReceiverTarget->SizeX,ReceiverTarget->SizeY,ReceiverTarget->SizeX!=WidthBefore?1:0,Verified,Pixels[0].R,Pixels[0].G,Pixels[0].B,Pixels[0].A,
+						Uniform,ClearPixels,Pixels.Num(),Status.FramesSubmitted,Status.AccessMisses-MissesBefore);
+					return false;
+				}
+				else
+				{
+					Widths.Add(ReceiverTarget->SizeX);
+					if (Last!=Pixels[0].R) { Last=Pixels[0].R; ++Verified; }
+				}
 			}
 			FPlatformProcess::Sleep(0.01f);
 		}
+		if (FReport* Report=FReport::Get()) Report->SetField(TEXT("shippedReceiverAwaitingCopyObservations"),FString::FromInt(AwaitingCopy));
 		TInlineComponentArray<UMeshComponent*> Meshes(Receiver);
 		bool Bound=false;
 		for(auto* Mesh : Meshes) if(auto* MID=Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0))) Bound |= MID->K2_GetTextureParameterValue(TEXT("SpoutTexture")) != nullptr;

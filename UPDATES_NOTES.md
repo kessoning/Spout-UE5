@@ -6,6 +6,14 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ## SEPTEMBER 2026 UPDATES
 
+While running the final checks, one test launch out of roughly 180 reported broken pictures from the
+example receiver. I dug into it, and it was the test being too strict, not the plugin sending bad
+pictures. When the incoming picture changes size, the plugin resizes your output picture, and if the
+other app happens to be busy at that exact moment, the output shows its plain background colour for
+one update before the new picture lands. The test mistook that plain colour for damage. I taught it
+to recognise that case, kept it strict about everything else, and added a line to the docs so nobody
+is surprised by it.
+
 I'm wrapping up the last checks before my own final hands-on test of the release.
 The 1.0.0 version I prepared back in August never actually went out, so everything from this month
 is going into 1.0.0 too. I also added a calmer restart test to the release checks: it closes and

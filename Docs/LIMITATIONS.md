@@ -89,7 +89,9 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
 ## Performance and diagnostics
 
 - Named and keyed texture-access attempts are nonblocking. A busy peer causes a skipped transfer;
-  the next call retries. A pending receiver frame is retained until a copy succeeds.
+  the next call retries. A pending receiver frame is retained until a copy succeeds. If the skipped
+  transfer is on the call that resizes an optional render target, that target shows its Clear
+  Color until the next successful transfer; a replaced received texture starts transparent.
 - Once access is acquired, GPU completion is required before handing the shared resource back.
   This can stall the render thread. Zero-wait peer acquisition does not imply nonblocking GPU work.
 - When frame counting reports no new frame, the receiver avoids another upstream copy. Discovery,

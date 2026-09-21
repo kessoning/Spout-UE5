@@ -102,7 +102,9 @@ advanced-display pins (hidden until expanded).
 - `OptionalOutputRenderTarget` must match the incoming frame's pixel format exactly and be
   single-sampled. A mismatched target is excluded from the copy and left completely untouched,
   and the mismatch is logged; the call still succeeds and `OutTexture` still updates. A size
-  mismatch is recoverable: the target is resized to the incoming frame automatically.
+  mismatch is recoverable: the target is resized to the incoming frame automatically. Resizing
+  clears the target to its Clear Color; if the transfer in that call is skipped because the
+  sender is busy, the target shows its clear colour until the next successful transfer.
 - Outputs: `OutMat` (dynamic material instance, created on first call when `InputMaterial` is
   set); `OutTexture` (transient texture updated from the stream).
 - Ownership: `OutMat` and `OutTexture` are **outputs, not ownership**. The received texture

@@ -23,6 +23,13 @@ from the August preparation.
   by restart automation tests. Trace scopes now mark every native send/receive/create/close step.
   Ownership, GPU completion, peer access and retention accounting are unchanged; closed outputs still
   stay reserved until Unreal garbage collection, which the retention budget documents.
+- Release qualification: the packaged check of the shipped receiver example treated an optional
+  render target that had just been resized and was still at its clear colour as corrupted pixels.
+  That happens when the resizing call's transfer is skipped because the sender holds the access
+  mutex. It failed one launch in about 180 and was reproduced every time under forced contention.
+  Such a target now counts as not yet delivered; every other mismatch still fails and records the
+  pixels read, and sustained delivery is still required. The receiver documentation now states
+  that a resized target shows its clear colour until the next successful transfer.
 - Technical debt: record Unreal editor module build IDs from `UnrealEditor.modules`, preserve full
   engine version/changelist metadata and hash the source files; report metadata parse failures.
 - Share engine metadata resolution across release tools and reject engine-path overrides whose
