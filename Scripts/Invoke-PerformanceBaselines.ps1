@@ -54,9 +54,12 @@ param(
 
     # 60 s per scenario by default: long enough for frame times to stabilise and for percentiles
     # over several thousand frames to mean something.
-    [int] $Seconds = 60,
-    [int] $WarmupSeconds = 5,
-    [int] $Streams = 4,
+    [ValidateRange(1,86400)][int] $Seconds = 60,
+    [ValidateRange(0,3600)][int] $WarmupSeconds = 5,
+    [ValidateRange(1,32)][int] $Streams = 4,
+
+    # Explicit diagnostic override; zero preserves the plugin's configured default.
+    [ValidateRange(0,65536)][int] $RetainedBudgetMiB = 0,
 
     [switch] $Trace,
     [switch] $RhiValidation,
@@ -85,6 +88,8 @@ $EnginePaths = Expand-TrackDList $EnginePaths
 # The required performance scenarios, plus two that catch regressions the throughput numbers alone
 # would hide (no-new-frame cost and resize/reconnect churn).
 $AllScenarios = @(
+    @{ Name = 'noplugin'; Title = 'Independent host with Spout disabled'; Covers = 'No-plugin control' }
+    @{ Name = 'baseline'; Title = 'Idle host without stream work'; Covers = 'Host baseline for comparison' }
     @{ Name = 'sender1080p';     Title = '1080p60 single sender';        Covers = '1080p60 baseline (send)' }
     @{ Name = 'receiver1080p';   Title = '1080p60 single receiver';      Covers = '1080p60 baseline (receive)' }
     @{ Name = 'sender4k';        Title = '4K60 single sender';           Covers = '4K60 baseline (send)' }
@@ -94,6 +99,7 @@ $AllScenarios = @(
     @{ Name = 'idlereceiver';    Title = 'Receiver with no new frame';   Covers = 'No-new-frame receiver cost' }
     @{ Name = 'resizechurn';     Title = 'Repeated resize and reconnect'; Covers = 'Resize/reconnect spikes' }
     @{ Name = 'startupshutdown'; Title = 'Repeated stream start/stop';   Covers = 'Startup and shutdown spikes' }
+    @{ Name = 'restartpaced';    Title = 'Paced stream start/stop (2 s)'; Covers = 'Qualified close/reopen workload at the default retention budget' }
 )
 
 if ($Scenarios.Count -gt 0)
@@ -118,6 +124,9 @@ foreach ($dir in @($EvidenceRoot, $performanceEvidence, $insightsEvidence))
 $EvidenceRoot = (Resolve-Path -LiteralPath $EvidenceRoot).Path
 $performanceEvidence = (Resolve-Path -LiteralPath $performanceEvidence).Path
 $insightsEvidence = (Resolve-Path -LiteralPath $insightsEvidence).Path
+$invocation = New-TrackDEvidenceRun -Parent $performanceEvidence -Label 'measurement'
+$runInputs = Get-TrackDSourceIdentity -Root $RepoRoot
+$nativeTools = Build-TrackDNativeTools -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory
 
 $hostProjectName = Get-TrackDHostProjectName
 
@@ -140,18 +149,7 @@ Write-TrackDStep "Evidence  : $performanceEvidence"
 
 $failures = New-Object System.Collections.ArrayList
 
-# ECrashExitCodes::CrashReporterCrashed, from GenericPlatformCrashContext.h.
-#
-# With -trace active, a packaged host that shuts down completely cleanly - engine exited, plugin
-# unloaded, every marker emitted, "LogExit: Exiting." in the log - still reports this as its process
-# exit code, because Unreal's out-of-process crash monitor is what supplies the code and it cannot
-# read the real one once the trace session has torn down.
-#
-# It is exempted ONLY when -Trace was requested, ONLY for this exact value, and ONLY as a separate
-# decision from every other check - the result file must still exist, still say passed, and still
-# contain measured frames, or the scenario fails regardless. The exemption is recorded in the row so
-# a reader can see it was applied rather than having a clean exit code silently assumed.
-$TraceExitCodeExemption = 777003
+# All nonzero process exits fail, including traced shutdowns.
 
 # --- Obtain a packaged host --------------------------------------------------------------------
 $executable = $ExistingExecutable
@@ -168,6 +166,7 @@ if ([string]::IsNullOrWhiteSpace($executable))
 
     Write-TrackDStep "Packaging a host for the baselines"
     $staging = New-TrackDHostStaging -RepoRoot $RepoRoot -StagingProjectDir $stagingDir -Force
+    $hostBuildInputs = Get-TrackDSourceIdentity -Root $staging.ProjectDir -Kind Host
     if (Test-Path -LiteralPath $archiveDir) { Remove-Item -LiteralPath $archiveDir -Recurse -Force }
     New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null
 
@@ -233,7 +232,11 @@ if ([string]::IsNullOrWhiteSpace($executable))
         throw "No packaged executable was produced under $binariesDir"
     }
     $executable = ($candidates | Sort-Object Length -Descending | Select-Object -First 1).FullName
+    if ((Get-TrackDSourceIdentity -Root $staging.PluginDir).Digest -ne $runInputs.Digest) { throw 'Source changed during performance host staging' }
+    $artifactIdentity = New-TrackDArtifactIdentity -Artifact $executable -SourceIdentity $runInputs -Engine $engine -Configuration $Configuration -Git (Get-TrackDGitInfo $RepoRoot) -HostSourceIdentity $hostBuildInputs -CompanionRoot $archiveDir
 }
+else { $artifactIdentity = Read-TrackDArtifactIdentity -Artifact $executable }
+if ($artifactIdentity.Engine.Version -ne $EngineVersion -or $artifactIdentity.Configuration -ne $Configuration) { throw 'Requested engine/configuration differs from the original artifact build' }
 
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf))
 {
@@ -241,15 +244,23 @@ if (-not (Test-Path -LiteralPath $executable -PathType Leaf))
 }
 Write-TrackDGood "host: $executable"
 
+$control = $null
+if (@($AllScenarios | Where-Object { $_.Name -eq 'noplugin' }).Count -gt 0) {
+    Write-TrackDStep 'Packaging independent no-plugin control'
+    $control = Build-TrackDControlHost -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory -Engine $engine -Configuration $Configuration -TimeoutSeconds $PackageTimeoutSeconds
+}
+
 # --- Run each scenario ---------------------------------------------------------------------------
 $rows = New-Object System.Collections.ArrayList
 
 foreach ($scenario in $AllScenarios)
 {
     $name = $scenario.Name
+    $scenarioExecutable = if ($name -eq 'noplugin') { $control.Executable } else { $executable }
+    $scenarioIdentity = if ($name -eq 'noplugin') { $control.BuildIdentity } else { $artifactIdentity }
     Write-TrackDSection "Scenario: $name - $($scenario.Title)"
 
-    $scenarioEvidence = Join-Path $performanceEvidence $name
+    $scenarioEvidence = Join-Path $invocation.Directory $name
     New-Item -ItemType Directory -Path $scenarioEvidence -Force | Out-Null
 
     $stdOutLog = Join-Path $scenarioEvidence 'stdout.log'
@@ -261,15 +272,17 @@ foreach ($scenario in $AllScenarios)
         "-SpoutPerfSeconds=$Seconds",
         "-SpoutPerfWarmupSeconds=$WarmupSeconds",
         "-SpoutPerfStreams=$Streams",
+        "-SpoutNativePeer=$($nativeTools.Executable)",
         '-unattended', '-nopause', '-nosplash', '-NoSound',
         '-windowed', '-ResX=640', '-ResY=360',
         '-stdout', "-abslog=$absLog"
     )
 
     $tracePath = $null
+    if ($RetainedBudgetMiB -gt 0) { $launchArgs += "-ExecCmds=r.Spout.MaxRetainedMiB $RetainedBudgetMiB" }
     if ($Trace)
     {
-        $tracePath = Join-Path $insightsEvidence ("{0}-{1}-{2}.utrace" -f $name, $EngineVersion, $Configuration)
+        $tracePath = Join-Path $scenarioEvidence 'capture.utrace'
         $launchArgs += "-trace=cpu,gpu,frame,bookmark,log"
         $launchArgs += "-tracefile=$tracePath"
         $launchArgs += '-statnamedevents'
@@ -278,9 +291,11 @@ foreach ($scenario in $AllScenarios)
     if ($D3DDebug) { $launchArgs += '-d3ddebug' }
 
     $timeout = $Seconds + $WarmupSeconds + $ScenarioTimeoutMarginSeconds
+    $identity = New-TrackDLaunchIdentity -Directory $scenarioEvidence -Executable $scenarioExecutable -ArtifactIdentity $scenarioIdentity
+    $launchArgs += Get-TrackDIdentityArguments $identity
 
-    $launchResult = Invoke-TrackDProcess -FilePath $executable -ArgumentList $launchArgs `
-        -StdOutPath $stdOutLog -TimeoutSeconds $timeout -WorkingDirectory (Split-Path -Parent $executable)
+    $launchResult = Invoke-TrackDProcess -FilePath $scenarioExecutable -ArgumentList $launchArgs `
+        -StdOutPath $stdOutLog -TimeoutSeconds $timeout -WorkingDirectory (Split-Path -Parent $scenarioExecutable)
 
     $resultFile = Join-Path $scenarioEvidence ("perf-{0}.json" -f $name)
 
@@ -290,7 +305,7 @@ foreach ($scenario in $AllScenarios)
         Covers          = $scenario.Covers
         EngineVersion   = $EngineVersion
         Configuration   = $Configuration
-        Executable      = $executable
+        Executable      = $scenarioExecutable
         CommandLine     = $launchResult.CommandLine
         ExitCode        = $launchResult.ExitCode
         TimedOut        = $launchResult.TimedOut
@@ -303,12 +318,14 @@ foreach ($scenario in $AllScenarios)
         D3DDebug        = [bool] $D3DDebug
         ResultFile      = $resultFile
         Results         = $null
-        ExitCodeExemption = $null
         Status          = 'NotRun'
         Problems        = @()
+        Identity        = Test-TrackDLaunchIdentity $identity $launchResult
+        BuildIdentity   = $scenarioIdentity
     }
 
     $problems = New-Object System.Collections.ArrayList
+    foreach ($problem in $row.Identity.Problems) { [void] $problems.Add($problem) }
 
     if ($launchResult.TimedOut)
     {
@@ -316,15 +333,7 @@ foreach ($scenario in $AllScenarios)
     }
     if ($null -eq $launchResult.ExitCode -or $launchResult.ExitCode -ne 0)
     {
-        if ($Trace -and $launchResult.ExitCode -eq $TraceExitCodeExemption)
-        {
-            $row.ExitCodeExemption = "exit code $TraceExitCodeExemption (ECrashExitCodes::CrashReporterCrashed) accepted because -Trace was active; see the comment on `$TraceExitCodeExemption. Every other check still applied."
-            Write-TrackDWarn $row.ExitCodeExemption
-        }
-        else
-        {
-            [void] $problems.Add("the host exited with code $($launchResult.ExitCode)")
-        }
+        [void] $problems.Add("the host exited with code $($launchResult.ExitCode)")
     }
 
     if (Test-Path -LiteralPath $resultFile -PathType Leaf)
@@ -333,15 +342,8 @@ foreach ($scenario in $AllScenarios)
         {
             $json = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
             $row.Results = $json
-            if (-not $json.passed)
-            {
-                [void] $problems.Add("the host reported a failure: $($json.failureReason)")
-            }
-            elseif ([int] $json.results.frameCount -le 0)
-            {
-                # A "pass" with no measured frames is not a baseline.
-                [void] $problems.Add('the scenario measured zero frames')
-            }
+            $measurement = Test-TrackDPerformanceResult -Result $json -Scenario $name -RunId $identity.RunId -Seconds $Seconds -Streams $Streams
+            foreach ($problem in $measurement.Problems) { [void] $problems.Add($problem) }
         }
         catch
         {
@@ -381,7 +383,11 @@ $aggregate = [ordered] @{
     Schema        = 'spoutplugin-trackd-performance/1'
     GeneratedUtc  = (Get-Date).ToUniversalTime().ToString('o')
     RepoRoot      = $RepoRoot
-    PluginVersion = Get-TrackDPluginVersion $RepoRoot
+    PluginVersion = 'See immutable BuildIdentity.SourceIdentity descriptor hash'
+    RunId         = $invocation.RunId
+    BuildIdentity = $artifactIdentity
+    ControlBuild = $control
+    NativeTools = $nativeTools
     EngineVersion = $EngineVersion
     EngineBuildId = $engine.BuildId
     Configuration = $Configuration
@@ -392,9 +398,7 @@ $aggregate = [ordered] @{
     TraceEnabled  = [bool] $Trace
     RhiValidation = [bool] $RhiValidation
     D3DDebug      = [bool] $D3DDebug
-    ExitCodeExemptions = @($rows | Where-Object { $_.ExitCodeExemption } | ForEach-Object {
-        [ordered] @{ Scenario = $_.Scenario; ExitCode = $_.ExitCode; Reason = $_.ExitCodeExemption } })
-    Git           = Get-TrackDGitInfo $RepoRoot
+    ValidationInvocationGit = Get-TrackDGitInfo $RepoRoot
     Host          = Get-TrackDHostSummary
     Scenarios     = $rows.ToArray()
     Failures      = $failures.ToArray()
@@ -402,11 +406,13 @@ $aggregate = [ordered] @{
 }
 
 $aggregatePath = Join-Path $performanceEvidence 'performance-baselines.json'
+Write-TrackDJson -InputObject $aggregate -Path (Join-Path $invocation.Directory 'performance-baselines.json')
 Write-TrackDJson -InputObject $aggregate -Path $aggregatePath
 
 # --- Markdown summary ----------------------------------------------------------------------------
 $summary = New-Object System.Text.StringBuilder
 [void] $summary.AppendLine('# Spout performance baselines')
+[void] $summary.AppendLine('Timing includes a serialized pixel observer and queue drain. observerSeconds includes waiting for queued plugin work and cannot be subtracted as isolated validation overhead. Compare with the idle host baseline and separate no-plugin control; delivery latency is reported separately. These numbers do not represent unobserved asynchronous throughput.')
 [void] $summary.AppendLine()
 [void] $summary.AppendLine("Generated: $($aggregate.GeneratedUtc)")
 [void] $summary.AppendLine()
@@ -418,16 +424,13 @@ $summary = New-Object System.Text.StringBuilder
 [void] $summary.AppendLine("| Measured window | ${Seconds}s after ${WarmupSeconds}s warmup |")
 if ($aggregate.Host.Gpus -and @($aggregate.Host.Gpus).Count -gt 0)
 {
-    $gpu = @($aggregate.Host.Gpus)[0]
-    [void] $summary.AppendLine("| GPU | $($gpu.Name) (driver $($gpu.DriverVersion)) |")
+    $inventory = @($aggregate.Host.Gpus | ForEach-Object { "$($_.Name) (driver $($_.DriverVersion))" }) -join '; '
+    [void] $summary.AppendLine("| GPU inventory (see engine log for selected adapter) | $inventory |")
 }
 [void] $summary.AppendLine("| OS | $($aggregate.Host.OperatingSystem) $($aggregate.Host.OsVersion) |")
 [void] $summary.AppendLine("| CPU | $($aggregate.Host.ProcessorName) |")
 [void] $summary.AppendLine("| Unreal Insights trace | $(if ($Trace) { 'captured' } else { 'not captured' }) |")
-if (@($aggregate.ExitCodeExemptions).Count -gt 0)
-{
-    [void] $summary.AppendLine("| Exit-code exemptions | $(@($aggregate.ExitCodeExemptions).Count) scenario(s), code $TraceExitCodeExemption under -Trace (see below) |")
-}
+
 [void] $summary.AppendLine()
 [void] $summary.AppendLine('| Scenario | Res | Streams | Mode | Frames | Mean ms | p95 ms | p99 ms | Peak ms | Game ms | Render ms | GPU ms | Peak WS MB | Result |')
 [void] $summary.AppendLine('|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
@@ -453,20 +456,7 @@ foreach ($row in $rows)
 }
 
 [void] $summary.AppendLine()
-if (@($aggregate.ExitCodeExemptions).Count -gt 0)
-{
-    [void] $summary.AppendLine('## Exit-code exemptions applied')
-    [void] $summary.AppendLine()
-    [void] $summary.AppendLine("With ``-Trace`` active, a packaged host that shuts down completely cleanly still reports exit code $TraceExitCodeExemption (``ECrashExitCodes::CrashReporterCrashed``): Unreal's out-of-process crash monitor supplies the code and cannot read the real one once the trace session has torn down. Verified by running the same scenario with and without ``-Trace`` - identical output, exit 0 without it.")
-    [void] $summary.AppendLine()
-    [void] $summary.AppendLine('The exemption applies only to that exact code, only under `-Trace`, and only as a separate decision from every other check: the result file must still exist, still report a pass, and still contain measured frames.')
-    [void] $summary.AppendLine()
-    foreach ($exemption in $aggregate.ExitCodeExemptions)
-    {
-        [void] $summary.AppendLine("- $($exemption.Scenario): exit code $($exemption.ExitCode)")
-    }
-    [void] $summary.AppendLine()
-}
+
 if ($failures.Count -gt 0)
 {
     [void] $summary.AppendLine('## Scenarios that did not produce a baseline')
@@ -476,6 +466,7 @@ if ($failures.Count -gt 0)
 }
 
 $summaryPath = Join-Path $performanceEvidence 'performance-baselines.md'
+Set-Content -LiteralPath (Join-Path $invocation.Directory 'performance-baselines.md') -Value $summary.ToString() -Encoding UTF8
 Set-Content -LiteralPath $summaryPath -Value $summary.ToString() -Encoding UTF8
 
 Write-Host ''

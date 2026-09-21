@@ -14,6 +14,8 @@
  *     debugging.
  */
 #include "SpoutReceiver.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "SpoutLimits.h"
 #include "Materials/MaterialInterface.h"
 #include "SpoutD3DContext.h"
 #include "SpoutD3DUtils.h"
@@ -48,6 +50,18 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	TAtomic<bool> GFailNextCpuReadback{false};
+#endif
+	void CopyReceivedFrame(FRHICommandListImmediate& Cmd, FRHITexture* Source, FRHITexture* Destination)
+	{
+		if (Source == Destination) return;
+		Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+		Cmd.Transition(FRHITransitionInfo(Destination, ERHIAccess::Unknown, ERHIAccess::CopyDest));
+		Cmd.CopyTexture(Source, Destination, FRHICopyTextureInfo());
+		Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+		Cmd.Transition(FRHITransitionInfo(Destination, ERHIAccess::CopyDest, ERHIAccess::SRVMask));
+	}
 	static TAutoConsoleVariable<int32> CVarSpoutGPUReceiver(
 		TEXT("r.Spout.GPUReceiver"),
 		1,
@@ -80,37 +94,75 @@ namespace
 		return SenderNames->GetSenderInfo(Utf8Name, OutWidth, OutHeight, OutHandle, OutFormat);
 	}
 
-	bool UpdateSharedReceiverTexture(FSpoutSharedSender& Receiver, unsigned int Width, unsigned int Height, HANDLE SharedHandle, FSpoutD3DContext& Context)
+	bool UpdateSharedReceiverTexture(FSpoutSharedSender& Receiver, unsigned int Width, unsigned int Height, HANDLE SharedHandle, DXGI_FORMAT Format, FSpoutD3DContext& Context)
 	{
-		// Runs on the game thread while the render thread may concurrently read these same fields
-		// under ResourceMutex (GetSharedForGPUPath / GetOrCreateReceiverWrap). Hold the lock across
-		// the unchanged-check AND the writes so the comparison and the swap are atomic w.r.t. the
-		// render thread; otherwise a torn read can early-out and reuse a stale/freed handle.
+		check(IsInRenderingThread());
 		FScopeLock ReceiverLock(&Receiver.ResourceMutex);
-
-		// Reuse the shared texture while the handle and dimensions are unchanged.
-		if (Receiver.Width == Width && Receiver.Height == Height && Receiver.SharedHandle == SharedHandle && Receiver.SharedTexture)
+		if (!Receiver.CanRetry(Width, Height, Format, SharedHandle)) return false;
+		bool bFrameSyncOpen = Receiver.FrameSync.IsOpen();
+		if (!bFrameSyncOpen)
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReceiverFrameSyncOpen);
+			bFrameSyncOpen = Receiver.FrameSync.Open(Receiver.GetUtf8Name());
+		}
+		if (!bFrameSyncOpen)
+		{
+			Receiver.NativeFailure(E_FAIL);
+			return false;
+		}
+		if (Receiver.Width == Width && Receiver.Height == Height && Receiver.SharedHandle == SharedHandle
+			&& Receiver.SharedFormat == Format && Receiver.SharedTexture)
 		{
 			return true;
 		}
+
+		int64 FrameBytes = 0;
+		if (!SpoutLimits::FrameBytes(Width, Height, SpoutFormatPolicy::ResolveReceiverFormat(Format).PixelFormat, FrameBytes)) return false;
+		// Shared source, staging/readback upload and completed-image overlap.
+		const auto Reservation = FSpoutResourceReservation::TryReserve(FrameBytes * 4);
+		if (!Reservation) return false;
 
 		// Open the shared DX11 texture from the external sender's handle. OpenSharedResource is a
 		// device-level (free-threaded) call; holding ResourceMutex across it is acceptable because
 		// this only happens on connect/resize/handle-change, not per frame.
 		ComPtr<ID3D11Texture2D> NewSharedTexture;
-		HRESULT hr = Context.GetD3D11Device()->OpenSharedResource(
-			SharedHandle,
-			IID_PPV_ARGS(NewSharedTexture.GetAddressOf())
-		);
+		HRESULT hr = E_FAIL;
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_OpenSharedResource);
+			hr = Context.GetD3D11Device()->OpenSharedResource(
+				SharedHandle,
+				IID_PPV_ARGS(NewSharedTexture.GetAddressOf())
+			);
+		}
 
 		if (FAILED(hr) || !NewSharedTexture)
 		{
-			UE_LOG(LogSpoutPlugin, Error,
-				TEXT("Failed to open shared Spout texture for sender '%s' (hr=0x%08x)"),
-				*Receiver.Name.ToString(),
-				hr);
+			Receiver.NativeFailure(FAILED(hr) ? hr : E_FAIL);
+			// A peer may resize or exit between metadata lookup and opening the handle.
+			if (Receiver.OpenLogThrottle.ShouldLog())
+			{
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': shared texture unavailable (hr=0x%08x); receive will retry."), *Receiver.Name.ToString(), hr);
+			}
 			return false;
 		}
+
+		D3D11_TEXTURE2D_DESC NativeDesc = {};
+		NewSharedTexture->GetDesc(&NativeDesc);
+		const auto NativeFormat = SpoutFormatPolicy::ResolveReceiverFormat(NativeDesc.Format);
+		const auto AdvertisedFormat = SpoutFormatPolicy::ResolveReceiverFormat(Format);
+		if (NativeDesc.Width != Width || NativeDesc.Height != Height || NativeDesc.MipLevels != 1
+			|| NativeDesc.ArraySize != 1 || NativeDesc.SampleDesc.Count != 1 || NativeDesc.SampleDesc.Quality != 0
+			|| !NativeFormat.IsUsable() || NativeFormat.PixelFormat != AdvertisedFormat.PixelFormat)
+		{
+			Receiver.NativeFailure(E_INVALIDARG);
+			if (Receiver.FormatLogThrottle.ShouldLog())
+			{
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': opened texture does not match the advertised size/format or single-mip/sample layout; frame rejected."), *Receiver.Name.ToString());
+			}
+			return false;
+		}
+		Receiver.NativeSuccess();
+		Receiver.SharedFormat = Format;
 
 		Receiver.Width = Width;
 		Receiver.Height = Height;
@@ -123,22 +175,10 @@ namespace
 		Receiver.CachedNativeResource = nullptr;
 		Receiver.CachedRTWrappedResource.Reset();
 		Receiver.CachedRTNativeResource = nullptr;
-
-		// Open this sender's access mutex and frame-count semaphore now that its handle
-		// has been opened. Idempotent and keyed to the NAME, so a resize -- which lands here with a
-		// new handle and new dimensions -- leaves the protocol state alone, while a close/reopen
-		// gets a fresh instance whose first frame is correctly reported as new.
-		if (!Receiver.FrameSync.IsOpen() && !Receiver.FrameSync.Open(Receiver.GetUtf8Name()))
-		{
-			// Not fatal: without the mutex the copy is simply unsynchronised, so frames still
-			// flow.
-			if (Receiver.AccessLogThrottle.ShouldLog())
-			{
-				UE_LOG(LogSpoutPlugin, Warning,
-					TEXT("Spout receiver '%s': could not open the shared-texture access mutex; frames are read without cross-process locking."),
-					*Receiver.Name.ToString());
-			}
-		}
+		Receiver.ReceivedFrame.SafeRelease();
+		Receiver.DestinationDeliveries.Empty();
+		Receiver.NativeReservation = Reservation;
+		Receiver.FrameSync.RequestCurrentFrame();
 
 		return true;
 	}
@@ -203,7 +243,8 @@ namespace
 			HRESULT hr = Context.GetD3D11Device()->CreateTexture2D(&Desc, nullptr, NewStaging.GetAddressOf());
 			if (FAILED(hr))
 			{
-				UE_LOG(LogSpoutPlugin, Error, TEXT("Failed to create staging texture (hr=0x%08x)"), hr);
+				Receiver.NativeFailure(hr);
+				if (Receiver.OpenLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Warning, TEXT("Failed to create staging texture (hr=0x%08x)"), hr);
 				return false;
 			}
 
@@ -320,16 +361,16 @@ namespace
 
 		if (DestTextureRHI.IsValid() && DestNative)
 		{
-			RHICmdList.Transition(FRHITransitionInfo(DestTextureRHI, TextureBracket.EntryBefore, TextureBracket.CopyAccess));
+			TransitionSpoutInteropTexture(RHICmdList, DestTextureRHI, TextureBracket.EntryBefore, TextureBracket.CopyAccess);
 		}
 		if (DestRenderTargetRHI.IsValid() && DestRTNative)
 		{
-			RHICmdList.Transition(FRHITransitionInfo(DestRenderTargetRHI, RenderTargetBracket.EntryBefore, RenderTargetBracket.CopyAccess));
+			TransitionSpoutInteropTexture(RHICmdList, DestRenderTargetRHI, RenderTargetBracket.EntryBefore, RenderTargetBracket.CopyAccess);
 		}
 
 		// Flush so D3D12 state transitions are submitted and visible to the D3D11-on-12 device
 		// before Acquire/CopyResource runs. Mirrors the sender path.
-		RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThreadFlushResources);
+		SubmitSpoutInteropTransitions(RHICmdList);
 
 		{
 			// Serialize D3D11 immediate-context access with the sender path.
@@ -379,15 +420,15 @@ namespace
 					}
 					else
 					{
-						// Acquire every destination together. Acquire transitions the wrapped
-						// resources into the state declared at wrap (COPY_DEST); the single
-						// scope-exit Release + Flush covers all copies, so two destinations cost one
-						// GPU submit, not two.
+						// Acquire all destinations in their already-submitted COPY_DEST state.
+						// Wait for the copies while shared access remains held; scope exit then
+						// releases the wrappers and submits their outgoing transitions.
 						FScopedD3D11On12Acquire Acquire(ToAcquire);
-						if (Acquire.IsValid())
+						if (Acquire.IsValid() && Context.PrepareGpuCompletion())
 						{
 							if (Wrapped)
 							{
+								TRACE_CPUPROFILER_EVENT_SCOPE(Spout_RecvCopyResource);
 								ImmediateContext->CopyResource(Wrapped.Get(), SharedTexture.Get());
 							}
 							if (WrappedRT)
@@ -397,7 +438,11 @@ namespace
 
 							// The frame has been read; stop holding it pending. Inside the acquire
 							// scope so a wrap failure leaves it pending instead.
-							Receiver->FrameSync.MarkFrameConsumed();
+							if (SUCCEEDED(Context.WaitForGpuCompletion()))
+							{
+								Receiver->FrameSync.MarkFrameConsumed();
+								++Receiver->ReceivedFrameNumber;
+							}
 						}
 					}
 				}
@@ -409,11 +454,11 @@ namespace
 		// copy access, never Unknown: the transition above is what set it.
 		if (DestTextureRHI.IsValid() && DestNative)
 		{
-			RHICmdList.Transition(FRHITransitionInfo(DestTextureRHI, TextureBracket.CopyAccess, TextureBracket.ExitAfter));
+			TransitionSpoutInteropTexture(RHICmdList, DestTextureRHI, TextureBracket.CopyAccess, TextureBracket.ExitAfter);
 		}
 		if (DestRenderTargetRHI.IsValid() && DestRTNative)
 		{
-			RHICmdList.Transition(FRHITransitionInfo(DestRenderTargetRHI, RenderTargetBracket.CopyAccess, RenderTargetBracket.ExitAfter));
+			TransitionSpoutInteropTexture(RHICmdList, DestRenderTargetRHI, RenderTargetBracket.CopyAccess, RenderTargetBracket.ExitAfter);
 		}
 	}
 
@@ -452,18 +497,14 @@ namespace
 		// D3D11 immediate context use is serialized across sender/receiver paths.
 		FScopeLock Lock(&Context.GetD3D11ContextMutex());
 		ID3D11DeviceContext* ImmediateContext = Context.GetImmediateContext();
-		if (!ImmediateContext || !SharedTexture || !StagingTexture)
+		if (!ImmediateContext || !SharedTexture || !StagingTexture || !Context.PrepareGpuCompletion())
 		{
 			return;
 		}
 
 		{
-			// The access mutex covers the copy out of the shared texture and nothing else.
-			//
-			// Map(D3D11_MAP_READ) on a staging texture blocks until the GPU has finished writing
-			// it, so holding the cross-process mutex across the readback would stall the sender
-			// for the whole of it. The scope therefore ends before the map, exactly as the Spout
-			// SDK's own receiver does.
+			// Hold access until the GPU has finished reading the shared texture into
+			// staging. Mapping and UE upload happen afterwards using only local data.
 			FSpoutTextureAccessScope Access(Receiver->FrameSync, SharedTexture.Get());
 			if (!Access.IsAcquired())
 			{
@@ -476,17 +517,24 @@ namespace
 				return;
 			}
 
-			// Copy into a CPU-readable staging texture, and submit it before giving the shared
-			// texture back to the sender.
+			// A Flush alone submits asynchronously and cannot hand ownership back safely.
 			ImmediateContext->CopyResource(StagingTexture.Get(), SharedTexture.Get());
-			ImmediateContext->Flush();
+			if (FAILED(Context.WaitForGpuCompletion()))
+			{
+				return;
+			}
 		}
 
-		Receiver->FrameSync.MarkFrameConsumed();
-
-		D3D11_MAPPED_SUBRESOURCE Mapped;
-		if (SUCCEEDED(ImmediateContext->Map(StagingTexture.Get(), 0, D3D11_MAP_READ, 0, &Mapped)))
+		D3D11_MAPPED_SUBRESOURCE Mapped = {};
+		HRESULT MapResult;
+#if WITH_DEV_AUTOMATION_TESTS
+		if (GFailNextCpuReadback.Exchange(false)) MapResult = E_FAIL;
+		else
+#endif
+		MapResult = ImmediateContext->Map(StagingTexture.Get(), 0, D3D11_MAP_READ, 0, &Mapped);
+		if (SUCCEEDED(MapResult))
 		{
+			Receiver->LastNativeError.store(0);
 			// FRHIComputeCommandList::UpdateTexture2D copies SourceData synchronously inside
 			// the call, so Mapped.pData only needs to stay valid until both update calls return.
 			const uint8* const SourceData = static_cast<const uint8*>(Mapped.pData);
@@ -517,9 +565,20 @@ namespace
 			}
 
 			ImmediateContext->Unmap(StagingTexture.Get(), 0);
+			Receiver->FrameSync.MarkFrameConsumed();
+			++Receiver->ReceivedFrameNumber;
+		}
+		else
+		{
+			++Receiver->NativeFailures; Receiver->LastNativeError.store(static_cast<int64>(MapResult));
+			if (Receiver->OpenLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': CPU readback failed (hr=0x%08x); the frame remains pending for retry."), *Receiver->Name.ToString(), MapResult);
 		}
 	}
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+void SpoutReceiverInternal::FailNextCpuReadbackForTests() { GFailNextCpuReadback.Store(true); }
+#endif
 
 UMaterialInstanceDynamic* SpoutReceiverInternal::ResolveConsumerMaterial(
 	FSpoutReceiverOwnership& Ownership,
@@ -550,9 +609,12 @@ UMaterialInstanceDynamic* SpoutReceiverInternal::ResolveConsumerMaterial(
 
 bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace)
 {
+	check(IsInGameThread());
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_Receive);
 	// Validate the requested name before touching the interop context. An invalid name can never
 	// resolve to a sender, so there is nothing to initialize for it.
-	const SpoutValidation::EResult NameResult = SpoutValidation::ValidateName(SpoutName);
+	TArray<ANSICHAR> Utf8Name;
+	const SpoutValidation::EResult NameResult = SpoutValidation::ValidateName(SpoutName, &Utf8Name);
 	if (NameResult != SpoutValidation::EResult::Ok)
 	{
 		static FSpoutLogThrottle NameLogThrottle(5.0);
@@ -567,23 +629,10 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	}
 
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+	if (!FSpoutSession::Get().IsRunning()) return false;
 	Context.InitializeIfNeeded();
 
 	if (!Context.GetSenderNames() || !Context.GetD3D11Device())
-	{
-		return false;
-	}
-
-	// Refused while the session is stopping, so a Blueprint tick racing a PIE stop cannot create a
-	// registry entry or a texture that the teardown running alongside it has already walked past.
-	const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Receiver);
-	if (!Token.IsSet())
-	{
-		return false;
-	}
-
-	TSharedPtr<FSpoutSharedSender> Receiver = FSpoutSenderRegistry::Get().FindOrAdd(SpoutName, ESpoutType::Receiver);
-	if (!Receiver || !Receiver->HasValidName())
 	{
 		return false;
 	}
@@ -592,7 +641,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	unsigned int H = 0;
 	HANDLE SharedHandle = nullptr;
 	unsigned long Format = 0;
-	if (!QuerySenderInfo(Receiver->GetUtf8Name(), W, H, SharedHandle, Format))
+	if (!FSpoutSession::Get().IsRunning() || !QuerySenderInfo(Utf8Name.GetData(), W, H, SharedHandle, Format))
 	{
 		return false;
 	}
@@ -608,7 +657,8 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		static_cast<uint32>(Format));
 	if (MetadataResult != SpoutValidation::EResult::Ok)
 	{
-		if (Receiver->FormatLogThrottle.ShouldLog())
+		static FSpoutLogThrottle MetadataLogThrottle;
+		if (MetadataLogThrottle.ShouldLog())
 		{
 			UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("Spout receiver '%s': sender metadata rejected (%s). Reported %ux%u, format %s, handle %s. ")
@@ -625,6 +675,8 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 
 	const SpoutFormatPolicy::FReceiverFormat ReceiverFormat = SpoutFormatPolicy::ResolveReceiverFormat(static_cast<uint32>(Format));
 	const EPixelFormat PixelFormat = ReceiverFormat.PixelFormat;
+	int64 FrameBytes = 0;
+	if (!SpoutLimits::FrameBytes(W, H, PixelFormat, FrameBytes)) return false;
 
 	// One explicit colour-space contract, resolved here and nowhere else. Auto follows the
 	// documented per-format convention; an explicit request is honoured where it is representable
@@ -636,7 +688,8 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		SpoutFormatPolicy::ResolveReceiverColorSpace(ReceiverFormat, ColorSpace, bSRGB);
 	if (ColorSpaceResult != SpoutFormatPolicy::EColorSpaceResult::Ok)
 	{
-		if (Receiver->FormatLogThrottle.ShouldLog())
+		static FSpoutLogThrottle ColorLogThrottle;
+		if (ColorLogThrottle.ShouldLog())
 		{
 			UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("Spout receiver '%s': colour space %s cannot be applied to %s (%s). ")
@@ -650,24 +703,63 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		return false;
 	}
 
-	if (!UpdateSharedReceiverTexture(*Receiver, W, H, SharedHandle, Context))
+	// Discovery failures above retain no stream/native records. Once metadata is valid,
+	// the explicit close/session lifecycle owns this connected name.
+	const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Receiver);
+	if (!Token.IsSet()) return false;
+	const auto QueuedWork = FSpoutSession::Get().TryQueue(Token);
+	if (!QueuedWork) return false;
+	TSharedPtr<FSpoutSharedSender> Receiver;
 	{
-		return false;
+		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReceiveFindOrAddEntry);
+		Receiver = FSpoutSenderRegistry::Get().FindOrAdd(SpoutName, ESpoutType::Receiver);
 	}
+	if (!Receiver || !Receiver->HasValidName()) return false;
 
 	// The destination is whatever this plugin owns for this receiver name, not whatever the caller
 	// happened to pass in. Ownership decides which object the receive path writes into and which
 	// object the close path may release; a caller variable is an output rather than the authority.
 	FSpoutReceiverOwnership& Ownership = FSpoutReceiverOwnership::Get();
 
+	const FName ParamName = TextureParameterName.IsNone() ? FName("SpoutTexture") : TextureParameterName;
+	if ((OutMat || InputMaterial) && !Ownership.HasMaterialBinding(SpoutName, OutMat, ParamName)
+		&& Ownership.NumMaterialBindings(SpoutName) >= SpoutLimits::MaxConsumers()) return false;
+	for (auto It = Receiver->OutputReservations.CreateIterator(); It; ++It)
+		if (!It.Key().IsValid()) It.RemoveCurrent();
+	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> PreviousOutputReservation;
+	if (OptionalOutputRenderTarget && OptionalOutputRenderTarget->GetFormat() == PixelFormat && !OptionalOutputRenderTarget->bAutoGenerateMips)
+	{
+		const TWeakObjectPtr<UObject> Key(OptionalOutputRenderTarget);
+		auto* Existing = Receiver->OutputReservations.Find(Key);
+		if (!Existing && Receiver->OutputReservations.Num() >= SpoutLimits::MaxConsumers()) return false;
+		if (!Existing || (*Existing)->GetBytes() != FrameBytes * 2)
+		{
+			const auto Reservation = FSpoutResourceReservation::TryReserve(FrameBytes * 2);
+			if (!Reservation) return false;
+			if (Existing) PreviousOutputReservation = *Existing;
+			Receiver->OutputReservations.Add(Key, Reservation);
+		}
+	}
 	UTexture2D* ReceivedTexture = Ownership.FindTexture(SpoutName);
-	if (SpoutTextureUtils::EnsureTransientTexture(ReceivedTexture, static_cast<int32>(W), static_cast<int32>(H), PixelFormat, bSRGB))
+	// One shared texture has one interpretation. Do not churn it when consumers disagree.
+	if (ReceivedTexture && ReceivedTexture->GetPixelFormat() == PixelFormat && (ReceivedTexture->SRGB != 0) != bSRGB)
+	{
+		if (Receiver->FormatLogThrottle.ShouldLog())
+			UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': conflicting color space for an open session; use the established color space or close the session first."), *SpoutName.ToString());
+		return false;
+	}
+	bool bReplacedOutput = false;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReceiveEnsureOutput);
+		bReplacedOutput = SpoutTextureUtils::EnsureTransientTexture(ReceivedTexture, static_cast<int32>(W), static_cast<int32>(H), PixelFormat, bSRGB);
+	}
+	if (bReplacedOutput)
 	{
 		if (!ReceivedTexture)
 		{
 			// Creation failed. Report it rather than queueing a copy with no destination; the
 			// documented contract for a true return is that the destination texture exists.
-			UE_LOG(LogSpoutPlugin, Error,
+			if (Receiver->OpenLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("Spout receiver '%s': could not create a %ux%u %s texture for the incoming frame."),
 				*SpoutName.ToString(), W, H, GetPixelFormatString(PixelFormat));
 			return false;
@@ -679,125 +771,115 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		Ownership.AdoptTexture(SpoutName, ReceivedTexture);
 	}
 
-	const FName ParamName = TextureParameterName.IsNone() ? FName("SpoutTexture") : TextureParameterName;
 
 	// The material is per CONSUMER, unlike the texture, which is per session. The rule lives in
 	// ResolveConsumerMaterial.
 	bool bPluginCreatedMaterial = false;
-	UMaterialInstanceDynamic* Material = SpoutReceiverInternal::ResolveConsumerMaterial(
-		Ownership, SpoutName, OutMat, InputMaterial, bPluginCreatedMaterial);
+	UMaterialInstanceDynamic* Material = nullptr;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReceiveResolveMaterial);
+		Material = SpoutReceiverInternal::ResolveConsumerMaterial(
+			Ownership, SpoutName, OutMat, InputMaterial, bPluginCreatedMaterial);
+	}
 
 	if (Material)
 	{
+		UTexture* PreviousTexture = Material->K2_GetTextureParameterValue(ParamName);
 		Material->SetTextureParameterValue(ParamName, ReceivedTexture);
 		// Registered even when the caller created it, so close can detach the parameter this plugin
 		// set. Ownership of a caller's material is not claimed, and registering one never displaces
 		// a plugin-created binding: the session holds a collection, not a single slot. De-duplicated
 		// on (material, parameter), so calling this every tick does not grow it.
-		Ownership.RegisterMaterialBinding(SpoutName, Material, ParamName, bPluginCreatedMaterial);
+		Ownership.RegisterMaterialBinding(SpoutName, Material, ParamName, bPluginCreatedMaterial, PreviousTexture);
 	}
 
 	OutTexture = ReceivedTexture;
 	OutMat = Material;
 
-	TRefCountPtr<FRHITexture> CapturedTextureRHI;
-	if (ReceivedTexture->GetResource())
-	{
-		// GetTexture2DRHI() returns the legacy FRHITexture2D interface which is unified
-		// onto FRHITexture in UE5. GetTextureRHI() returns the current FTextureRHIRef.
-		CapturedTextureRHI = ReceivedTexture->GetResource()->GetTextureRHI();
-	}
-
-	TRefCountPtr<FRHITexture> CapturedRenderTargetRHI;
+	// Capture only resource pointers on the game thread, never their render-owned RHI
+	// fields. UE enqueues resource release/deletion after this command, including an
+	// UpdateResource immediately after Receive; GC also waits for its release fence.
+	FTextureResource* TextureResource = ReceivedTexture->GetResource();
+	FTextureRenderTargetResource* OutputResource = nullptr;
 	if (OptionalOutputRenderTarget)
 	{
-		// A size mismatch is recoverable: resizing a render target to the incoming frame is the
-		// documented behaviour of this node. A format or sample-count mismatch is not — silently
-		// reformatting someone else's asset at runtime would be worse than the symptom.
-		if (OptionalOutputRenderTarget->SizeX != static_cast<int32>(W) || OptionalOutputRenderTarget->SizeY != static_cast<int32>(H))
+		// Refuse an incompatible authored target BEFORE resize can clear its contents.
+		if (OptionalOutputRenderTarget->GetFormat() == PixelFormat && !OptionalOutputRenderTarget->bAutoGenerateMips)
 		{
-			OptionalOutputRenderTarget->ResizeTarget(static_cast<int32>(W), static_cast<int32>(H));
-		}
-
-		// Compare against the resolved RHI resource rather than the UObject's authored properties:
-		// the RHI descriptor is what CopyResource and UpdateTexture2D actually operate on, and it
-		// carries the sample count, which UTextureRenderTarget2D does not expose directly. A resize
-		// requested above may not be reflected until the next frame, in which case this frame is
-		// skipped and the following one matches.
-		TRefCountPtr<FRHITexture> CandidateRHI;
-		if (FTextureRenderTargetResource* RenderTargetResource = OptionalOutputRenderTarget->GameThread_GetRenderTargetResource())
-		{
-			CandidateRHI = RenderTargetResource->GetRenderTargetTexture();
-		}
-
-		if (CandidateRHI.IsValid())
-		{
-			const FRHITextureDesc& OutputDesc = CandidateRHI->GetDesc();
-			const SpoutFormatPolicy::EOutputTargetStatus OutputStatus = SpoutFormatPolicy::CheckOutputTarget(
-				static_cast<int32>(W),
-				static_cast<int32>(H),
-				PixelFormat,
-				OutputDesc.Extent.X,
-				OutputDesc.Extent.Y,
-				OutputDesc.Format,
-				OutputDesc.NumSamples);
-
-			if (OutputStatus == SpoutFormatPolicy::EOutputTargetStatus::Compatible)
+			if (OptionalOutputRenderTarget->SizeX != static_cast<int32>(W) || OptionalOutputRenderTarget->SizeY != static_cast<int32>(H))
 			{
-				CapturedRenderTargetRHI = MoveTemp(CandidateRHI);
-				// Arm the limiter again so a later mismatch is reported immediately rather than
-				// waiting out an interval that started before the target became compatible.
-				Receiver->OutputTargetLogThrottle.Reset();
+				OptionalOutputRenderTarget->ResizeTarget(static_cast<int32>(W), static_cast<int32>(H));
 			}
-			else if (Receiver->LastOutputTargetStatus != OutputStatus || Receiver->OutputTargetLogThrottle.ShouldLog())
-			{
-				// The mismatched target is deliberately NOT captured, so it is excluded from the
-				// copy and left exactly as the caller had it. Capturing it anyway would hand it
-				// to CopyResource (which D3D drops between differing descriptors) or to
-				// UpdateTexture2D (which writes bytes the destination reinterprets), producing a
-				// black or garbled target rather than an untouched one. The plugin-owned received
-				// texture below is unaffected and keeps updating.
-				UE_LOG(LogSpoutPlugin, Warning,
-					TEXT("Spout receiver '%s': optional output render target is incompatible (%s) and was left untouched. ")
-					TEXT("Frame is %dx%d %s single-sampled; target is %dx%d %s with %d sample(s). ")
-					TEXT("The received texture output still updates. Recreate the render target to match the sender; ")
-					TEXT("RTF RGBA8 sRGB matches the most common senders."),
-					*SpoutName.ToString(),
-					SpoutFormatPolicy::ToString(OutputStatus),
-					static_cast<int32>(W),
-					static_cast<int32>(H),
-					GetPixelFormatString(PixelFormat),
-					OutputDesc.Extent.X,
-					OutputDesc.Extent.Y,
-					GetPixelFormatString(OutputDesc.Format),
-					OutputDesc.NumSamples);
-			}
-
-			Receiver->LastOutputTargetStatus = OutputStatus;
+			OutputResource = OptionalOutputRenderTarget->GameThread_GetRenderTargetResource();
+		}
+		else if (Receiver->OutputTargetLogThrottle.ShouldLog())
+		{
+			UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': incompatible output render target left untouched; format must match and Auto Generate Mips must be disabled."), *SpoutName.ToString());
 		}
 	}
-
-	// Read CVar once on the game thread so one frame uses a single coherent path.
 	const bool bUseGPUPath = CVarSpoutGPUReceiver.GetValueOnAnyThread() != 0;
-
+	const TWeakObjectPtr<UObject> OutputIdentity(OptionalOutputRenderTarget);
+	FSpoutSession::Get().MarkQueued(Token);
 	ENQUEUE_RENDER_COMMAND(SpoutRecvCmd)(
-		[Token, Receiver, CapturedTextureRHI, CapturedRenderTargetRHI, bUseGPUPath](FRHICommandListImmediate& RHICmdList)
+		[Token, Receiver, TextureResource, OutputResource, OutputIdentity, W, H, SharedHandle, Format, PixelFormat, bUseGPUPath, QueuedWork, PreviousOutputReservation](FRHICommandListImmediate& RHICmdList)
 		{
-			// A receiver closed, or a session torn down, after this was queued makes the copy a
-			// no-op. The captured RHI references keep the destinations alive either way, so this is
-			// about not writing into a texture the caller has already been told is finished with.
 			if (!FSpoutSession::Get().IsCurrent(Token))
 			{
 				return;
 			}
-
+			// Native source replacement and destination resolution share ONE render
+			// command. Later game-thread receives cannot replace half of this pair.
+			FSpoutD3DContext& RenderContext = FSpoutD3DContext::Get();
+			if (!UpdateSharedReceiverTexture(*Receiver, W, H, SharedHandle, static_cast<DXGI_FORMAT>(Format), RenderContext))
+			{
+				return;
+			}
+			TRefCountPtr<FRHITexture> TextureRHI = TextureResource ? TextureResource->GetTextureRHI() : nullptr;
+			TRefCountPtr<FRHITexture> TargetRHI = OutputResource ? OutputResource->GetRenderTargetTexture() : nullptr;
+			auto IsCompatible = [W, H, PixelFormat](const TRefCountPtr<FRHITexture>& Texture)
+			{
+				if (!Texture) return false;
+				const FRHITextureDesc& Desc = Texture->GetDesc();
+				return Desc.Extent.X == static_cast<int32>(W) && Desc.Extent.Y == static_cast<int32>(H)
+					&& Desc.Format == PixelFormat && Desc.NumMips == 1 && Desc.NumSamples == 1
+					&& Desc.ArraySize == 1 && Desc.Dimension == ETextureDimension::Texture2D;
+			};
+			if (!IsCompatible(TextureRHI)) TextureRHI.SafeRelease();
+			if (!IsCompatible(TargetRHI)) TargetRHI.SafeRelease();
+			if (!TextureRHI) return;
+			// Restore a recreated local resource even if the upstream sender is paused.
+			if (Receiver->ReceivedFrame && Receiver->ReceivedFrame != TextureRHI)
+			{
+				if (IsCompatible(Receiver->ReceivedFrame))
+				{
+					CopyReceivedFrame(RHICmdList, Receiver->ReceivedFrame, TextureRHI);
+					Receiver->ReceivedFrame = TextureRHI;
+				}
+				else Receiver->ReceivedFrame.SafeRelease();
+			}
+			const uint64 PreviousFrame = Receiver->ReceivedFrameNumber;
 			if (bUseGPUPath)
 			{
-				ReceiveOnRenderThread_GPU(Receiver, CapturedTextureRHI, CapturedRenderTargetRHI, RHICmdList);
+				ReceiveOnRenderThread_GPU(Receiver, TextureRHI, nullptr, RHICmdList);
 			}
 			else
 			{
-				ReceiveOnRenderThread_CPU(Receiver, CapturedTextureRHI, CapturedRenderTargetRHI, RHICmdList);
+				ReceiveOnRenderThread_CPU(Receiver, TextureRHI, nullptr, RHICmdList);
+			}
+			if (PreviousFrame != Receiver->ReceivedFrameNumber) Receiver->ReceivedFrame = TextureRHI;
+			for (auto It = Receiver->DestinationDeliveries.CreateIterator(); It; ++It)
+			{
+				if (!It.Key().IsValid(false, true)) It.RemoveCurrent();
+			}
+			if (TargetRHI && Receiver->ReceivedFrame)
+			{
+				auto& Delivery = Receiver->DestinationDeliveries.FindOrAdd(OutputIdentity);
+				if (Delivery.Frame != Receiver->ReceivedFrameNumber || Delivery.Resource != TargetRHI)
+				{
+					CopyReceivedFrame(RHICmdList, Receiver->ReceivedFrame, TargetRHI);
+					Delivery.Resource = TargetRHI;
+					Delivery.Frame = Receiver->ReceivedFrameNumber;
+				}
 			}
 		});
 
@@ -806,6 +888,8 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 
 void FSpoutReceiver::Close(const FName SpoutName)
 {
+	check(IsInGameThread());
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_CloseReceiver);
 	// Cancel before releasing anything, so a receive queued earlier in this frame cannot copy into
 	// the texture after the caller has been told the receiver is closed. Scoped to the Receiver
 	// role: a Sender with the same FName keeps running.

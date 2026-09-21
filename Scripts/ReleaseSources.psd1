@@ -35,6 +35,9 @@
         @{ Path = 'Resources/...';               Category = 'content';    Note = 'Plugin icon, required by the descriptor.' }
         @{ Path = 'LICENSE';                     Category = 'licensing';  Note = 'AUD-011. build.ps1 fails the release when this is absent from the repo or any ZIP.' }
         @{ Path = 'THIRD_PARTY_NOTICES.md';      Category = 'licensing';  Note = 'AUD-011. Consolidated Spout/Spout2 BSD notice and binary provenance.' }
+        @{ Path = 'Docs/BLUEPRINT_API.md'; Category = 'docs'; Note = 'Approved public API shipped inside every archive.' }
+        @{ Path = 'Docs/LIMITATIONS.md'; Category = 'docs'; Note = 'Implemented deployment contract and resource limits.' }
+        @{ Path = 'Docs/RELEASE_READINESS.md'; Category = 'docs'; Note = 'Public qualification status.' }
         @{ Path = 'README.md';                   Category = 'docs';       Note = 'Shipped inside the archive so an unzipped plugin is self-describing.' }
         @{ Path = 'CHANGELOG.md';                Category = 'docs';       Note = 'Technical source of truth for what changed; validated for version agreement.' }
         @{ Path = 'build.ps1';                   Category = 'release';    Note = 'AUD-010. The release script itself is a release input.' }

@@ -25,7 +25,8 @@
  *     leaving every other consumer's material still referencing -- and, since a material parameter
  *     is a strong reference, still keeping alive -- the texture the session had released.
  *   - CloseReceiver(Name) closes that shared session for every consumer of it.
- *   - No reference counting and no public consumer handles.
+	 *   - A material parameter can be released separately through ReleaseReceiverMaterialBinding.
+	 *     Detach restores its saved texture only while the parameter still holds the bound texture.
  *
  * Releasing an entry does not destroy anything: it removes the last plugin-side reference and lets
  * ordinary UObject lifetime and GC take it from there, rather than forcing the issue with
@@ -47,6 +48,7 @@
 
 class UMaterialInstanceDynamic;
 class UTexture2D;
+class UTexture;
 
 class FSpoutReceiverOwnership : public FGCObject
 {
@@ -91,7 +93,10 @@ public:
 	 * still detach it but is never kept alive by having once been bound. Registering a
 	 * consumer-supplied material never displaces a plugin-created one: they are separate bindings.
 	 */
-	void RegisterMaterialBinding(FName ReceiverName, UMaterialInstanceDynamic* Material, FName ParameterName, bool bPluginCreated);
+	void RegisterMaterialBinding(FName ReceiverName, UMaterialInstanceDynamic* Material, FName ParameterName, bool bPluginCreated, UTexture* PreviousTexture = nullptr);
+
+	/** Detach one consumer binding without closing other consumers or the upstream session. */
+	bool ReleaseMaterialBinding(FName ReceiverName, UMaterialInstanceDynamic* Material, FName ParameterName);
 
 	/** True only when Material is a material this plugin created for that session. */
 	bool OwnsMaterial(FName ReceiverName, const UMaterialInstanceDynamic* Material) const;
@@ -139,6 +144,8 @@ private:
 		TObjectPtr<UMaterialInstanceDynamic> OwnedMaterial = nullptr;
 
 		FName TextureParameter;
+		TWeakObjectPtr<UTexture> BoundTexture;
+		TObjectPtr<UTexture> PreviousTexture = nullptr;
 	};
 
 	struct FEntry

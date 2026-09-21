@@ -14,7 +14,7 @@ window.QS_CARDS = [
     steps: [
       { t: "Create a Blueprint Actor (or open the Level Blueprint) and open its Event Graph." },
       { t: "Right-click the canvas, search \"Spout Sender\", and place the node." },
-      { t: "Connect <code>Event Tick</code> to the Spout Sender execution input. Tick calls it every frame, which keeps the stream alive." },
+      { t: "Connect <code>Event Tick</code> to the Spout Sender execution input. Tick calls it every frame, which requests continuous frame updates; registration persists until close." },
       { t: "Set <code>Spout Name</code> to a unique, stable name, for example <code>UnrealViewport</code>. The receiver must use this exact name." },
       { t: "Set <code>Send Texture From</code> to <code>GameViewport</code>." },
       { t: "Leave <code>Texture Render Target 2D</code> empty - it is ignored in this mode." },
@@ -34,7 +34,7 @@ window.QS_CARDS = [
       { t: "Create a <code>TextureRenderTarget2D</code> asset. <code>RGBA8 sRGB</code> is recommended. You can also create one at runtime with the Create Texture Render Target 2D node." },
       { t: "Add a <code>SceneCapture2D</code> actor to the level and aim it at what you want to send." },
       { t: "In the SceneCapture2D Details, set <code>Texture Target</code> to the render target from step 1." },
-      { t: "Set <code>Capture Source</code> to <b>Final Color (HDR) in Linear Working Color Space</b>. Do not use SceneColor (HDR) - it sends black." },
+      { t: "Set <code>Capture Source</code> to <b>Final Color (HDR) in Linear Working Color Space</b>. Qualify other capture sources with known pixels and matching receiver color space." },
       { t: "On Event Tick or a timer, call <code>Spout Sender</code>." },
       { t: "Set <code>Send Texture From</code> to <code>TextureRenderTarget2D</code>." },
       { t: "Set <code>Texture Render Target 2D</code> to the same render target asset." },

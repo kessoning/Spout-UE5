@@ -42,7 +42,9 @@ param(
     [string[]] $ExpectedConfigurations = @('Development', 'Shipping'),
 
     # "RowKey=reason" pairs, recorded verbatim in the aggregate.
-    [string[]] $RetriedRow = @()
+    [string[]] $RetriedRow = @(),
+    # Explicit selection is required when an evidence tree contains retries of the same row.
+    [string[]] $RowManifestPaths = @()
 )
 
 Set-StrictMode -Version Latest
@@ -56,6 +58,7 @@ $EvidenceRoot = (Resolve-Path -LiteralPath $EvidenceRoot).Path
 
 $ExpectedEngines = Expand-TrackDList $ExpectedEngines
 $ExpectedConfigurations = Expand-TrackDList $ExpectedConfigurations
+$RowManifestPaths = Expand-TrackDList $RowManifestPaths
 if ($ExpectedEngines.Count -eq 0) { $ExpectedEngines = Get-TrackDDeclaredEngineVersions }
 
 $manifestDir = Join-Path $EvidenceRoot 'manifests'
@@ -65,9 +68,48 @@ if (-not (Test-Path -LiteralPath $manifestDir -PathType Container))
 }
 
 $rows = New-Object System.Collections.ArrayList
-foreach ($file in (Get-ChildItem -LiteralPath $manifestDir -Filter 'packaged-host-UE*.json' -File | Sort-Object Name))
+$inputs = @()
+$producerInputs = $null
+function Get-RowProducerInputs($Row) {
+    if ($Row.PSObject.Properties.Name -notcontains 'ArchiveCandidate' -or -not $Row.ArchiveCandidate) { return $Row.SourceIdentity }
+    $candidate = $Row.ArchiveCandidate
+    if ($candidate.InstalledSourceIdentity.Digest -ne $Row.SourceIdentity.Digest -or
+        $candidate.SHA256 -ne $candidate.BuildIdentity.SHA256 -or
+        $candidate.BuildIdentity.Engine.BuildId -ne $Row.EngineBuildId -or
+        $candidate.BuildIdentity.Engine.Version -ne $Row.EngineVersion) { throw 'Inconsistent archive installation provenance' }
+    $expected = @{}
+    $packagingInputs = @('SpoutPlugin.uplugin','Config/FilterPlugin.ini')
+    foreach ($item in $candidate.BuildIdentity.SourceIdentity.Files) { if ($item.Path -notin $packagingInputs) { $expected[$item.Path]=$item.SHA256 } }
+    foreach ($item in $Row.SourceIdentity.Files) {
+        if ($item.Path -in $packagingInputs) { continue }
+        if (-not $expected.ContainsKey($item.Path) -or $expected[$item.Path] -ne $item.SHA256) { throw 'Archive contains different plugin sources' }
+        $expected.Remove($item.Path)
+    }
+    if ($expected.Count) { throw 'Archive omits plugin build sources' }
+    return $candidate.BuildIdentity.SourceIdentity
+}
+$selected = if ($RowManifestPaths.Count) { @($RowManifestPaths | ForEach-Object { Get-Item -LiteralPath $_ }) } else { @(Get-ChildItem -LiteralPath $manifestDir -Filter 'packaged-host-UE*.json' -File | Sort-Object Name) }
+foreach ($file in $selected)
 {
     $row = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+    if (@($rows | Where-Object { $_.RowKey -eq $row.RowKey }).Count) { throw "Duplicate row $($row.RowKey). Select one immutable attempt with -RowManifestPaths." }
+    if (-not $row.SourceIdentity.Digest -or -not $row.BuildIdentity.BuildId -or
+        $row.BuildIdentity.SourceIdentity.Digest -ne $row.SourceIdentity.Digest -or
+        $row.BuildIdentity.SHA256 -ne $row.ExecutableSha256 -or
+        $row.BuildIdentity.Engine.Version -ne $row.EngineVersion -or
+        $row.BuildIdentity.Engine.BuildId -ne $row.EngineBuildId -or
+        $row.BuildIdentity.Configuration -ne $row.Configuration) { throw "Missing or inconsistent build provenance: $($file.FullName)" }
+    $rowProducer = Get-RowProducerInputs $row
+    if ($producerInputs -and $producerInputs.Digest -ne $rowProducer.Digest) { throw 'Cannot merge rows built from different plugin sources' }
+    $producerInputs = $rowProducer
+    if ($rows.Count -gt 0 -and $rows[0].BuildIdentity.HostSourceIdentity.Digest -ne $row.BuildIdentity.HostSourceIdentity.Digest) { throw 'Cannot merge different host harness builds' }
+    if (@($row.Launches).Count -eq 0) { throw "No launch evidence in $($row.RowKey)" }
+    foreach ($launch in @($row.Launches)) {
+        if (-not $launch.Identity.Passed -or $launch.Identity.Expected.SourceId -ne $row.SourceIdentity.Digest -or
+            $launch.Identity.Expected.HostSourceId -ne $row.BuildIdentity.HostSourceIdentity.Digest -or
+            $launch.Identity.Expected.ExecutableSHA256 -ne $row.BuildIdentity.SHA256) { throw "Invalid process identity in $($row.RowKey)" }
+    }
+    $inputs += [ordered]@{ Path=$file.FullName; SHA256=(Get-TrackDSha256 $file.FullName) }
     [void] $rows.Add($row)
 }
 
@@ -94,6 +136,7 @@ foreach ($engine in $ExpectedEngines)
 }
 
 $presentRowKeys = @($rows | ForEach-Object { $_.RowKey })
+foreach ($key in $presentRowKeys) { if ($expectedRowKeys -notcontains $key) { throw "Unexpected row: $key" } }
 $missingRowKeys = @($expectedRowKeys | Where-Object { $presentRowKeys -notcontains $_ })
 $failedRows = @($rows | Where-Object { $_.Status -ne 'Passed' })
 
@@ -113,8 +156,10 @@ $aggregate = [ordered] @{
     ConsolidatedFrom = 'per-row manifests'
     RepoRoot       = $RepoRoot
     PluginName     = Get-TrackDPluginName
-    PluginVersion  = Get-TrackDPluginVersion $RepoRoot
-    Git            = Get-TrackDGitInfo $RepoRoot
+    SourceIdentity = $producerInputs
+    SourceIdentityScope = 'Producer inputs; each row separately identifies its installed inputs and any archive packaging transformations'
+    InputManifests = $inputs
+    ValidationInvocationGit = Get-TrackDGitInfo $RepoRoot
     Host           = Get-TrackDHostSummary
     ExpectedEngines = $ExpectedEngines
     ExpectedConfigurations = $ExpectedConfigurations
@@ -129,6 +174,7 @@ $aggregate = [ordered] @{
 
 $aggregatePath = Join-Path $manifestDir 'packaged-host-matrix.json'
 Write-TrackDJson -InputObject $aggregate -Path $aggregatePath
+Write-TrackDJson -InputObject $aggregate -Path (Join-Path $manifestDir ("packaged-host-merge-{0}.json" -f [Guid]::NewGuid().ToString('N')))
 
 # The DLL-staging matrix and the lifecycle results are projections of the same rows, written to
 # their own files because they are tracked as separate required outcomes. A single-row re-run

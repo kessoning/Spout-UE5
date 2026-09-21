@@ -12,6 +12,7 @@
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include "Windows/WindowsHWrapper.h"
 #include <d3d11.h>
+#include <wrl/client.h>
 #include "SpoutDX/SpoutSenderNames.h"
 #include "SpoutDX/SpoutDirectX.h"
 #include "SpoutDX/SpoutFrameCount.h"
@@ -37,6 +38,10 @@ namespace SpoutHostTest
 		ID3D11Device* Device = nullptr;
 		ID3D11DeviceContext* Context = nullptr;
 		ID3D11Texture2D* SharedTexture = nullptr;
+		Microsoft::WRL::ComPtr<ID3D11Texture2D> PixelStaging;
+		Microsoft::WRL::ComPtr<ID3D11Query> PixelDone;
+		FString AccessName;
+		HANDLE PixelShareHandle = nullptr;
 
 		bool bFrameObservationOpen = false;
 
@@ -247,6 +252,47 @@ namespace SpoutHostTest
 		return Impl->FrameCount.GetNewFrame();
 	}
 
+	bool FViewportSenderProbe::ReadFirstPixel(const FString& SenderName, FColor& Pixel)
+	{
+		if (!Impl) return false;
+		char Name[256]; FImpl::CopyName(SenderName, Name);
+		unsigned int W=0,H=0; HANDLE Handle=nullptr; DWORD Format=0;
+		if (!Impl->SenderNames.GetSenderInfo(Name,W,H,Handle,Format) || !Handle || Format!=DXGI_FORMAT_B8G8R8A8_UNORM) return false;
+		if (!Impl->SharedTexture || Handle!=Impl->PixelShareHandle)
+		{
+			uint32 TW=0,TH=0,TF=0; FString Error;
+			if (!OpenSharedTexture(SenderName,TW,TH,TF,Error) || TW!=W || TH!=H || TF!=Format) return false;
+			Impl->PixelShareHandle=Handle;
+		}
+		if (Impl->AccessName!=SenderName)
+		{
+			Impl->FrameCount.CloseAccessMutex();
+			if (!Impl->FrameCount.CreateAccessMutex(Name)) return false;
+			Impl->AccessName=SenderName;
+		}
+		if (!Impl->PixelStaging)
+		{
+			D3D11_TEXTURE2D_DESC Desc={}; Desc.Width=Desc.Height=Desc.MipLevels=Desc.ArraySize=Desc.SampleDesc.Count=1;
+			Desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM; Desc.Usage=D3D11_USAGE_STAGING; Desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+			if (FAILED(Impl->Device->CreateTexture2D(&Desc,nullptr,&Impl->PixelStaging))) return false;
+			D3D11_QUERY_DESC Query={D3D11_QUERY_EVENT,0};
+			if (FAILED(Impl->Device->CreateQuery(&Query,&Impl->PixelDone))) { Impl->PixelStaging.Reset(); return false; }
+		}
+		if (!Impl->FrameCount.CheckTextureAccess(Impl->SharedTexture)) return false;
+		D3D11_BOX Box={0,0,0,1,1,1};
+		Impl->Context->CopySubresourceRegion(Impl->PixelStaging.Get(),0,0,0,0,Impl->SharedTexture,0,&Box);
+		Impl->Context->End(Impl->PixelDone.Get()); Impl->Context->Flush();
+		HRESULT Done=S_FALSE;
+		while ((Done=Impl->Context->GetData(Impl->PixelDone.Get(),nullptr,0,0))==S_FALSE) SwitchToThread();
+		Impl->FrameCount.AllowTextureAccess(Impl->SharedTexture);
+		if (FAILED(Done)) return false;
+		D3D11_MAPPED_SUBRESOURCE Map={};
+		if (FAILED(Impl->Context->Map(Impl->PixelStaging.Get(),0,D3D11_MAP_READ,0,&Map))) return false;
+		FMemory::Memcpy(&Pixel,Map.pData,sizeof(Pixel));
+		Impl->Context->Unmap(Impl->PixelStaging.Get(),0);
+		return true;
+	}
+
 	long FViewportSenderProbe::GetSenderFrameCount() const
 	{
 		if (!Impl.IsValid() || !Impl->bFrameObservationOpen)
@@ -292,6 +338,7 @@ namespace SpoutHostTest
 	void FViewportSenderProbe::ReleaseSharedTexture() {}
 	void FViewportSenderProbe::BeginFrameObservation(const FString&) {}
 	bool FViewportSenderProbe::PollNewFrame() { return false; }
+	bool FViewportSenderProbe::ReadFirstPixel(const FString&, FColor&) { return false; }
 	long FViewportSenderProbe::GetSenderFrameCount() const { return 0; }
 	void FViewportSenderProbe::EndFrameObservation() {}
 

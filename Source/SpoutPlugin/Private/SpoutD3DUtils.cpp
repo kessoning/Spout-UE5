@@ -7,9 +7,52 @@
  * sender path to copy from UE D3D12 textures into shared DX11 resources.
  */
 #include "SpoutD3DUtils.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "SpoutD3DContext.h"
+#include "SpoutModule.h"
+#include "ID3D12DynamicRHI.h"
+#include "RHICommandList.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 using Microsoft::WRL::ComPtr;
+
+void TransitionSpoutInteropTexture(FRHICommandListImmediate& RHICmdList, FRHITexture* Texture, ERHIAccess Before, ERHIAccess After)
+{
+	RHICmdList.Transition(FRHITransitionInfo(Texture, Before, After));
+#if ENGINE_MINOR_VERSION < 6
+	// 5.3-5.5 HandleResourceTransitions ignores ordinary graphics-only transitions:
+	// native barriers are normally inferred by the next RHI draw/copy. Here the next
+	// copy is external, so use its public D3D12 interface to force that barrier.
+	D3D12_RESOURCE_STATES NativeState;
+	if (After == ERHIAccess::CopySrc) NativeState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+	else if (After == ERHIAccess::CopyDest) NativeState = D3D12_RESOURCE_STATE_COPY_DEST;
+	else
+	{
+		check(After == ERHIAccess::SRVGraphics || After == ERHIAccess::SRVMask);
+		NativeState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	}
+	TRefCountPtr<FRHITexture> KeepAlive(Texture);
+	RHICmdList.EnqueueLambda([KeepAlive, NativeState](FRHICommandListImmediate& Cmd)
+	{
+		GetID3D12DynamicRHI()->RHITransitionResource(Cmd, KeepAlive, NativeState, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
+	});
+#endif
+}
+
+void SubmitSpoutInteropTransitions(FRHICommandListImmediate& RHICmdList)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SubmitInteropTransitions);
+	RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThreadFlushResources);
+#if ENGINE_MINOR_VERSION >= 4
+	// FlushRHIThread only drains translation. The D3D12 submission thread may
+	// still hold those payloads while a raw D3D11On12 Flush overtakes them.
+	GetID3D12DynamicRHI()->RHIRunOnQueue(ED3D12RHIRunOnQueueType::Graphics, [](ID3D12CommandQueue*) {}, true);
+#else
+	// 5.3 exposes no public submission-only fence. Its idle wait also drains
+	// the submission queue; correctness costs a GPU synchronization here.
+	RHICmdList.BlockUntilGPUIdle();
+#endif
+}
 
 namespace
 {
@@ -36,6 +79,7 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, SpoutRHIStat
 		return nullptr;
 	}
 
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_WrapD3D12Resource);
 	D3D12_RESOURCE_DESC Desc = Resource->GetDesc();
 
 	D3D11_RESOURCE_FLAGS Flags = {};
@@ -47,9 +91,9 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, SpoutRHIStat
 
 	// Wrap the resource so the D3D11 immediate context can copy into/out of it.
 	//
-	// InState and OutState are deliberately the same value. AcquireWrappedResources transitions the
-	// resource INTO InState and requires it to already be there; ReleaseWrappedResources transitions
-	// it back to OutState. The caller brackets the wrap with a UE transition into the matching
+	// InState and OutState are deliberately the same value. The caller submits the
+	// transition into InState before AcquireWrappedResources; ReleaseWrappedResources
+	// leaves it in OutState. The caller brackets the wrap with a UE transition into the matching
 	// ERHIAccess and back out of it again, so making the two states identical is what lets UE's own
 	// state tracking stay true across the acquire/release pair. Both come from
 	// SpoutRHIState::GetCopyBracket, so they cannot disagree.
@@ -65,6 +109,11 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, SpoutRHIStat
 
 	if (FAILED(hr))
 	{
+		static FSpoutLogThrottle FailureThrottle;
+		if (FailureThrottle.ShouldLog())
+		{
+			UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout could not wrap a %llux%u texture for interop (hr=0x%08x); copy deferred."), Desc.Width, Desc.Height, hr);
+		}
 		return nullptr;
 	}
 
@@ -148,6 +197,7 @@ void FScopedD3D11On12Acquire::AcquireResources(TConstArrayView<ID3D11Texture2D*>
 	if (D3D11On12)
 	{
 		// Acquire ensures correct resource state for D3D11 use on the D3D12 device.
+		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AcquireWrappedResources);
 		D3D11On12->AcquireWrappedResources(RawResources.GetData(), RawResources.Num());
 	}
 	else
@@ -164,6 +214,7 @@ FScopedD3D11On12Acquire::~FScopedD3D11On12Acquire()
 		return;
 	}
 
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReleaseWrappedResourcesFlush);
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
 
 	ID3D11On12Device* D3D11On12 = Context.GetD3D11On12Device();

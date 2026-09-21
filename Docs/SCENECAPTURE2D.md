@@ -18,24 +18,16 @@ Set Capture Source to:
 
 - **Final Color (HDR) in Linear Working Color Space**
 
-Do not use:
-
-- **SceneColor (HDR) in RGB** - this produces a black image on the receiving application.
-
-This is the single most common cause of a black Spout output when sending from a SceneCapture2D.
-
-## Why black happens
-
-`SceneColor (HDR)` is not in a state the shared-texture copy path reproduces correctly, so the
-external application receives black. Final Color (HDR) in Linear Working Color Space gives a
-resolved image that copies through Spout correctly. This is a known limitation rather than a
-configuration you can work around with other Capture Source values.
+Other capture sources, including SceneColor HDR, require qualification of the capture pipeline,
+exposure, post-processing, alpha and target format. The plugin copies the source bytes and does not
+select a capture mode, tone-map HDR, or convert its color space. A black output is not enough to
+attribute a failure to the capture mode alone.
 
 ## Black-output checklist
 
 If your sent render target is black, check in this order:
 
-1. Capture Source is Final Color (HDR) in Linear Working Color Space, not SceneColor (HDR).
+1. Check the source render target inside Unreal before sharing it; use a known visible scene and exposure.
 2. The render target is actually assigned to the SceneCapture2D Texture Target.
 3. The SceneCapture2D is capturing (it is enabled and pointed at visible geometry).
 4. You are sending the same render target asset you assigned to the capture.

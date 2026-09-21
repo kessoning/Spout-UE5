@@ -7,6 +7,7 @@
 #include "SpoutHostTestPerf.h"
 #include "SpoutHostTestReport.h"
 #include "SpoutHostTestSmoke.h"
+#include "SpoutHostTestIdentity.h"
 
 #include "Misc/CommandLine.h"
 
@@ -16,6 +17,11 @@ DEFINE_LOG_CATEGORY(LogSpoutHostTest);
 
 void FSpoutHostTestModule::StartupModule()
 {
+	if (!SpoutHostTest::WriteRunIdentity())
+	{
+		FPlatformMisc::RequestExitWithStatus(true, 21);
+		return;
+	}
 	// Only arm the evidence channel when a harness was actually requested, so an editor session
 	// opening this project for the automation suite does not scatter marker files around.
 	if (SpoutHostTest::FSmokeRunner::IsRequested() || SpoutHostTest::FPerfHarness::IsRequested())

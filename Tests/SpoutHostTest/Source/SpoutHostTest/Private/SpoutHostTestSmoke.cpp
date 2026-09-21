@@ -8,6 +8,10 @@
 #include "SpoutHostTestModule.h"
 #include "SpoutHostTestReport.h"
 #include "SpoutHostTestViewportProbe.h"
+#include "SpoutHostTestPixels.h"
+#include "RHICommandList.h"
+#include "RenderingThread.h"
+#include "TextureResource.h"
 
 #include "SpoutBPFunctionLibrary.h"
 
@@ -247,11 +251,14 @@ namespace SpoutHostTest
 		{
 			Report->Fail(Reason);
 			Report->SetField(TEXT("failedAtStep"), FString::FromInt(static_cast<int32>(Step)));
+			Report->WriteResultJson(TEXT("smoke"), false);
 		}
 		Advance(EStep::Finished);
 
-		// Non-zero exit status so a caller that only has the process result still sees a failure.
-		FPlatformMisc::RequestExitWithStatus(/*Force*/ false, /*ReturnCode*/ 3);
+		// Older engine launch loops can turn a graceful requested error into process exit zero.
+		// Preserve the failure evidence and close plugin streams before forcing the error status.
+		USpoutBPFunctionLibrary::CloseAllStreams();
+		FPlatformMisc::RequestExitWithStatus(/*Force*/ true, /*ReturnCode*/ 3);
 	}
 
 	bool FSmokeRunner::Tick(float /*DeltaSeconds*/)
@@ -618,6 +625,10 @@ namespace SpoutHostTest
 
 	bool FSmokeRunner::StepReceiverCycles()
 	{
+		auto* PixelResource=SourceRenderTarget->GameThread_GetRenderTargetResource();
+		const FColor ExpectedPixel(17,83,149,211);
+		ENQUEUE_RENDER_COMMAND(SpoutSmokeCyclePixel)([PixelResource,ExpectedPixel](FRHICommandListImmediate& Cmd)
+		{ Cmd.UpdateTexture2D(PixelResource->GetTextureRHI(),0,FUpdateTextureRegion2D(0,0,0,0,1,1),4,reinterpret_cast<const uint8*>(&ExpectedPixel)); });
 		// Keep the sender publishing; the receiver below consumes it. Sender and receiver in one
 		// process is a common real-world setup and is covered explicitly here.
 		USpoutBPFunctionLibrary::SpoutSender(
@@ -665,6 +676,13 @@ namespace SpoutHostTest
 			return false;
 		}
 
+		const auto ActualPixels = ReadPixels(OutTexture->GetResource(), OutTexture->GetSizeX(), OutTexture->GetSizeY());
+		const auto SourcePixels = ReadPixels(SourceRenderTarget->GetResource(), SourceRenderTarget->SizeX, SourceRenderTarget->SizeY);
+		if (ActualPixels.IsEmpty() || ActualPixels != SourcePixels || ActualPixels[0]!=ExpectedPixel)
+		{
+			FailAndFinish(TEXT("receiver cycle: completed pixels differ from source before close"));
+			return false;
+		}
 		// Close by name. The pointers are handed back exactly as documented, so both are expected to
 		// be cleared - a receiver that leaves them set would mean the close did not own them.
 		USpoutBPFunctionLibrary::CloseReceiver(LifecycleSenderName, OutTexture, OutMaterial);
@@ -1287,6 +1305,14 @@ namespace SpoutHostTest
 
 	bool FSmokeRunner::StepShutdownWithActivity()
 	{
+		if (StepFrames == 1)
+		{
+			FString Error;
+			if (!QualifyExternalPixels(Error)) { FailAndFinish(Error); return false; }
+			FReport::Get()->Mark(TEXT("SPOUT_EXTERNAL_PIXELS_PASS"));
+			if (!QualifyShippedExamples(GetGameWorld(),Error)) { FailAndFinish(Error); return false; }
+			FReport::Get()->Mark(TEXT("SPOUT_SHIPPED_EXAMPLES_PASS"));
+		}
 		// Deliberately leave a sender publishing across process exit. This is the packaged-host
 		// equivalent of quitting the editor with an active viewport sender: if teardown ordering
 		// is wrong, this is where it crashes.

@@ -39,6 +39,9 @@
 param(
     [string] $RepoRoot = '',
 
+    # Install every byte of an exact release ZIP, including its shipped binaries/manifests.
+    [string] $PluginArchive = '',
+
     [Parameter(Mandatory = $true)]
     [string[]] $EngineVersions,
 
@@ -96,6 +99,20 @@ Import-Module (Join-Path $PSScriptRoot 'TrackD.psm1') -Force
 
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+
+$invocation = New-TrackDEvidenceRun -Parent $EvidenceRoot -Label 'packaged'
+$archiveCandidate = $null
+$pluginSourceRoot = $RepoRoot
+if ($PluginArchive) {
+    $versions = @(Expand-TrackDList $EngineVersions)
+    if ($versions.Count -ne 1) { throw 'An archive qualification must name exactly one engine version' }
+    $archiveCandidate = Expand-TrackDArchiveCandidate -ArchivePath $PluginArchive -DestinationParent $WorkRoot -EvidenceRoot $invocation.Directory
+    if ($archiveCandidate.BuildIdentity.Engine.Version -ne $versions[0]) { throw 'Candidate archive belongs to a different engine' }
+    $pluginSourceRoot = $archiveCandidate.PluginRoot
+    if ((Get-TrackDSha256 (Join-Path $pluginSourceRoot 'ThirdParty/Spout/lib/amd64/Spout.dll')) -ne (Get-TrackDSha256 (Join-Path $RepoRoot 'ThirdParty/Spout/lib/amd64/Spout.dll'))) { throw 'Native peer SDK differs from the candidate SDK' }
+}
+$runInputs = Get-TrackDSourceIdentity -Root $pluginSourceRoot
+$nativeTools = Build-TrackDNativeTools -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory
 
 $EngineVersions = Expand-TrackDList $EngineVersions
 $Configurations = Expand-TrackDList $Configurations
@@ -178,6 +195,8 @@ $RequiredSmokeMarkers = @(
     'SPOUT_SENDER_CREATE_PASS',
     'SPOUT_SAME_NAME_RESTART_PASS',
     'SPOUT_RECEIVER_CREATE_PASS',
+    'SPOUT_EXTERNAL_PIXELS_PASS',
+    'SPOUT_SHIPPED_EXAMPLES_PASS',
     'SPOUT_LEVEL_TRAVEL_PASS',
     'SPOUT_NO_STALE_SESSION_PASS',
     'SPOUT_VIEWPORT_BEGIN',
@@ -249,10 +268,14 @@ foreach ($version in $EngineVersions)
         $stagingDir = Join-Path $WorkRoot ("p{0}{1}\P" -f $shortVersion, $shortConfig)
         $archiveDir = Join-Path $WorkRoot ("p{0}{1}\A" -f $shortVersion, $shortConfig)
 
-        $rowEvidence = Join-Path $packagedHostsEvidence $rowKey
+        $rowEvidence = Join-Path $invocation.Directory $rowKey
         New-Item -ItemType Directory -Path $rowEvidence -Force | Out-Null
 
         $row = [ordered] @{
+            RunId               = $invocation.RunId
+            ArchiveCandidate    = $archiveCandidate
+            SourceIdentity      = $runInputs
+            NativeTools         = $nativeTools
             Schema              = 'spoutplugin-trackd-packaged-host-row/1'
             RowKey              = $rowKey
             EngineVersion       = $version
@@ -296,7 +319,7 @@ foreach ($version in $EngineVersions)
         # failed still leaves a manifest saying how far it got and why. A failed row that leaves no
         # evidence is the precise gap this pipeline exists to close, and it is just as easy to
         # introduce in the validation tooling as in the thing being validated.
-        $rowManifestPath = Join-Path $manifestEvidence "packaged-host-$rowKey.json"
+        $rowManifestPath = Join-Path $manifestEvidence "packaged-host-$rowKey-$($invocation.RunId).json"
         function Complete-Row
         {
             param($Row, $Problems, $Label, $ManifestPath)
@@ -318,7 +341,8 @@ foreach ($version in $EngineVersions)
 
         # --- Stage ------------------------------------------------------------------------------
         Write-TrackDStep "Staging project : $stagingDir"
-        $staging = New-TrackDHostStaging -RepoRoot $RepoRoot -StagingProjectDir $stagingDir -Force
+        $staging = New-TrackDHostStaging -RepoRoot $RepoRoot -StagingProjectDir $stagingDir -PluginSourceRoot $pluginSourceRoot -PreservePluginBuildOutput:([bool]$PluginArchive) -Force
+        $row['HostSourceIdentity'] = Get-TrackDSourceIdentity -Root $staging.ProjectDir -Kind Host
         if ($staging.MissingItems.Count -gt 0)
         {
             [void] $problems.Add("plugin staging is missing: $($staging.MissingItems -join ', ')")
@@ -452,6 +476,8 @@ foreach ($version in $EngineVersions)
         else
         {
             $row.ExecutableSha256 = Get-TrackDSha256 $executablePath
+            if ((Get-TrackDSourceIdentity -Root $staging.PluginDir).Digest -ne $runInputs.Digest) { throw 'Staged source identity changed during packaging' }
+            $row['BuildIdentity'] = New-TrackDArtifactIdentity -Artifact $executablePath -SourceIdentity $runInputs -Engine $engine -Configuration $configuration -Git (Get-TrackDGitInfo $RepoRoot) -HostSourceIdentity $row.HostSourceIdentity -CompanionRoot $archiveDir
             Write-TrackDGood "executable: $executablePath"
         }
 
@@ -580,7 +606,7 @@ foreach ($version in $EngineVersions)
 
             for ($attempt = 1; $attempt -le $LaunchRepeats; $attempt++)
             {
-                $launchEvidence = Join-Path $smokeEvidence ("{0}\launch{1}" -f $rowKey, $attempt)
+                $launchEvidence = Join-Path $rowEvidence ("launch{0}" -f $attempt)
                 New-Item -ItemType Directory -Path $launchEvidence -Force | Out-Null
 
                 $hostLog = Join-Path $launchEvidence 'host-stdout.log'
@@ -607,6 +633,9 @@ foreach ($version in $EngineVersions)
                 )
 
                 Write-TrackDStep "Launch $attempt/$LaunchRepeats"
+                $identity = New-TrackDLaunchIdentity -Directory $launchEvidence -ArtifactIdentity $row.BuildIdentity -Executable $executablePath
+                $launchArgs += Get-TrackDIdentityArguments $identity
+                $launchArgs += "-SpoutNativePeer=$($nativeTools.Executable)"
                 $launchResult = Invoke-TrackDProcess -FilePath $executablePath -ArgumentList $launchArgs `
                     -StdOutPath $hostLog -TimeoutSeconds $LaunchTimeoutSeconds `
                     -WorkingDirectory (Split-Path -Parent $executablePath)
@@ -631,6 +660,8 @@ foreach ($version in $EngineVersions)
                 }
 
                 $launchProblems = @($verdict.Problems)
+                $identityCheck = Test-TrackDLaunchIdentity $identity $launchResult
+                $launchProblems += $identityCheck.Problems
                 if (-not $reportedDllPath)
                 {
                     $launchProblems += 'the host did not report which Spout.dll it loaded'
@@ -646,6 +677,7 @@ foreach ($version in $EngineVersions)
                 $launchProblems += @($viewportCheck.Problems)
 
                 $launchRecord = [ordered] @{
+                    Identity         = $identityCheck
                     Attempt          = $attempt
                     EvidenceDir      = $launchEvidence
                     CommandLine      = $launchResult.CommandLine

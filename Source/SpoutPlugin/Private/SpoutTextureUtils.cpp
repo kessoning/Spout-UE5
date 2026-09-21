@@ -7,9 +7,11 @@
  * creation used by Blueprint-facing Spout APIs.
  */
 #include "SpoutTextureUtils.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "SpoutModule.h"
 #include "SpoutValidation.h"
+#include "SpoutReceivedTexture.h"
 
 #include "TextureResource.h"
 #include "RenderResource.h"
@@ -18,6 +20,8 @@ namespace SpoutTextureUtils
 {
 	bool EnsureTransientTexture(UTexture2D*& Texture, int32 Width, int32 Height, EPixelFormat Format, bool bSRGB)
 	{
+		int64 FrameBytes = 0;
+		if (!SpoutLimits::FrameBytes(Width, Height, Format, FrameBytes)) { Texture = nullptr; return true; }
 		// Identity is (size, pixel format, sRGB). A format- or sRGB-only change at the same
 		// resolution must still recreate the texture, otherwise a stale-format destination is
 		// reused and the per-frame CopyResource/RHIUpdateTexture2D copies into the wrong layout.
@@ -27,6 +31,7 @@ namespace SpoutTextureUtils
 			&& Texture->GetPixelFormat() == Format
 			&& (Texture->SRGB != 0) == bSRGB)
 		{
+			EnsureSpoutReceivedTextureResource(*Texture);
 			return false;
 		}
 
@@ -34,13 +39,24 @@ namespace SpoutTextureUtils
 		// managed reference, and UTexture's own destruction path releases the render resource on the
 		// render thread at the right time. A hand-rolled release cannot do that safely: it could run
 		// while render commands are still holding the resource.
-		Texture = nullptr;
-
-		// Transient textures are created on the game thread and updated on the render thread.
-		Texture = UTexture2D::CreateTransient(Width, Height, Format);
+		// Keep the CPU mip for UTexture2D::UpdateResource compatibility on installed
+		// engines. Reserve it plus GPU resource recreation overlap before allocating.
+		const auto Reservation = FSpoutResourceReservation::TryReserve(FrameBytes * 3);
+		if (!Reservation) { Texture = nullptr; return true; }
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_CreateReceivedTexture);
+			Texture = UTexture2D::CreateTransient(Width, Height, Format);
+		}
 		if (Texture)
 		{
-			// Set the sRGB flag explicitly before UpdateResource so the SRV is built with the
+			USpoutTextureReservation* Data = NewObject<USpoutTextureReservation>(Texture);
+			Data->Reservation = Reservation;
+			Texture->AddAssetUserData(Data);
+		}
+
+		if (Texture)
+		{
+			// Set the sRGB flag explicitly before creating the resource so the SRV uses the
 			// matching (sRGB vs linear) view. CreateTransient leaves UTexture's default (SRGB=true),
 			// which is correct for 8-bit color but wrong to rely on for linear/data formats.
 			//
@@ -48,7 +64,7 @@ namespace SpoutTextureUtils
 			// can enumerate and release it; a root cannot be enumerated, so it outlives every code
 			// path meant to remove it.
 			Texture->SRGB = bSRGB ? 1 : 0;
-			Texture->UpdateResource();
+			EnsureSpoutReceivedTextureResource(*Texture);
 		}
 
 		return true;
@@ -85,6 +101,8 @@ namespace SpoutTextureUtils
 			return nullptr;
 		}
 
+		int64 FrameBytes = 0;
+		if (!SpoutLimits::FrameBytes(Width, Height, Format, FrameBytes)) return nullptr;
 		UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>();
 		// Do NOT AddToRoot here: the Blueprint caller receives and stores the return value, whose
 		// reference keeps it alive (mirrors UKismetRenderingLibrary::CreateRenderTarget2D). Rooting

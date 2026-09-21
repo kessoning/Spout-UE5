@@ -48,17 +48,14 @@ This plugin is intended to be built as part of a **project**, not as an engine p
 
 ## Supported Unreal Engine versions
 
-**UE 5.3, 5.4, 5.5, 5.6, 5.7 and 5.8 — all supported, all validated.**
+**Supported engine range: UE 5.3, 5.4, 5.5, 5.6, 5.7 and 5.8.**
 
-Every release is built for all six with `RunUAT BuildPlugin -Rocket` (Editor Development,
-UnrealGame Development and UnrealGame Shipping), and every generated archive is reopened and
-content-checked before it is published.
-
-Beyond compiling, each supported version is validated by packaging a real host project, launching
-it unattended, and requiring it to prove that the plugin module loaded, that `Spout.dll` was
-resolved from the packaged path, and that a full sender/receiver/level-travel lifecycle ran and
-shut down cleanly. Both Development and Shipping hosts are checked. The evidence is retained under
-`Artifacts/TrackD/`.
+This release includes lifecycle, consumer and operational-limit changes. See
+[release readiness](Docs/RELEASE_READINESS.md) for how it was tested and
+[limitations](Docs/LIMITATIONS.md) for the deployment contract. Test results from earlier builds
+do not carry over to changed source. Release gates require `RunUAT BuildPlugin -Rocket`, archive
+checks, automation, and Development/Shipping consumer hosts for the declared engine matrix before
+publication.
 
 An earlier version of this README said support started at UE 5.5 because 5.3 and 5.4 failed to
 build against an installed engine. That is no longer the case and has not been since 0.0.8.
@@ -164,9 +161,9 @@ In this case, the `SceneCapture2D` **Capture Source** must be set to:
 - **~~`FinalColor (LDR)`~~**
 - **Final Color (HDR) in Linear Working Color Space**
 
-and **not** to `SceneColor (HDR) in RGB`.
+as a starting point for qualification.
 
-If `SceneColor (HDR)` is used, the texture sent through Spout may appear **black** on the receiving application.
+Other capture modes, including SceneColor HDR, require matching exposure, alpha, target format and receiver interpretation. Inspect the source target inside Unreal before attributing a black image to sharing.
 
 At the moment, this limitation is still under investigation. A proper fix or improvement will be added in a future update if possible.  
 If you have suggestions or insights on how to handle this correctly, contributions and advice are very welcome.
@@ -196,7 +193,7 @@ naming it, rather than being published as something it is not.
 
 **Notes**
 - Only one sender can own a given Spout Name at a time.
-- The sender must be called continuously to keep the stream alive.
+- The sender must be called continuously to request continuous frame updates.
 - The sender takes Spout's cross-process texture lock around every publish and announces each frame
   through Spout's frame counter, so receivers see whole frames and can tell a new frame from a
   repeated one. If a receiver holds the texture longer than the sender's frame time, that frame is
@@ -208,7 +205,11 @@ naming it, rather than being published as something it is not.
 
 ### Receiver
 
-- Call `USpoutBPFunctionLibrary::SpoutReceiver` every frame (Tick) or on a timer.
+- In Blueprint, create a Dynamic Material Instance once, store it in a variable, and pass it to
+  **Spout Receiver With Material** (`SpoutReceiverWithMaterial`) on Tick or a timer. This explicit
+  input reuses your material without allocating a new one on each call. Pass null for texture-only use.
+- The original `SpoutReceiver` signature remains available for existing graphs and C++ callers.
+  Its material reference is an output pin in Blueprint; prefer the new node for repeated material use.
 - The **Spout Name** must exactly match the name used by the sender.
 - The function outputs:
   - `OutTexture` – a transient `UTexture2D` updated from the Spout stream.
@@ -222,13 +223,16 @@ There is **one receiver session per Spout sender name**.
 
 - `OutTexture` belongs to the plugin, which keeps it alive while the receiver is open. Every graph
   receiving the same sender name shares that one texture, because the session is per name.
-- **Each graph gets its own material instance**, created from its own `InputMaterial`. Two graphs
-  receiving the same name with different input materials each keep their own; a graph is never
-  handed another graph's material because the sender names matched.
+- **Each consumer supplies and retains its own material instance** through the new node. Materials
+  are not shared merely because sender names match. Rebinding a parameter to another sender transfers
+  that binding, so closing the old sender's receiver cannot overwrite it.
+- `ReleaseReceiverMaterialBinding(Name, MID, Parameter)` releases just that parameter. It restores
+  the texture present before binding, or the engine default when none was set. Later manual changes
+  are preserved. Other consumers and the per-name receiver remain open.
 - Call `CloseReceiver` when a receiver is no longer needed, passing back the `OutTexture` and
   `OutMat` you were given. It closes the shared session for **every** graph receiving that name,
-  detaches the Spout texture from **every** material the plugin bound it into, releases the plugin's
-  texture, and clears both variables.
+  restores every material parameter still owned by that session, releases the plugin's texture,
+  and clears plugin-owned output variables. A caller-created MID remains yours.
 - Graphs still receiving that name recover on their next `SpoutReceiver` call, with a **new** texture
   object. References you handed the old texture to (a UMG image, another material) keep the old one
   and stop updating, so re-read `OutTexture` after a close.
@@ -247,9 +251,13 @@ There is **one receiver session per Spout sender name**.
 | **Linear** | No decoding. Use it when the sender publishes linear or data values in an 8-bit format — including this plugin's own sender when the source render target was created with `Force Linear Gamma`. |
 | **sRGB** | Force decoding. Only valid for 8-bit frames; asking for it on a 10-bit or HDR float frame fails the call and logs, rather than being quietly ignored. |
 
-If a received stream looks washed out or too dark, this is the setting to change. Switching it
-rebuilds the received texture, so the change takes effect on the next frame and nothing is
-reinterpreted in place.
+Consumers sharing a sender name must agree on the resolved color interpretation. A conflicting
+request fails without changing the existing output. Close the shared receiver before changing
+interpretation; a source pixel-format change also establishes a new interpretation.
+
+Optional targets receive the last completed frame independently. Attaching another target or
+recreating its resource works even while the sender is paused. The plugin skips repeat copies
+when both the target resource and frame are unchanged.
 
 A frame whose format this plugin cannot share — anything outside BGRA8, RGBA8, RGB10A2 and RGBA16F,
 including compressed and planar formats — is refused with a log line naming it. It is never
@@ -280,7 +288,7 @@ If you do not wish to use a material, this step can be safely skipped and the ra
 - The assigned material must be compatible with Spout input.
 - Avoid heavy logic on Tick; use a timer if possible.
 - The receiver only copies when the sender has actually published a new frame, so calling it every
-  tick against a slower sender costs nothing on the frames in between. It also takes Spout's
+  tick against a slower sender avoids another upstream copy, while discovery and bookkeeping still have a cost. It also takes Spout's
   cross-process texture lock around the copy, so a frame is never read while the sender is midway
   through writing it. If the lock is busy the frame is not lost: it stays pending and is picked up
   on a following call.
@@ -308,9 +316,25 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
 
 - The Spout Receiver uses a **GPU-direct path by default** (`r.Spout.GPUReceiver=1`): the shared texture is copied straight into the Unreal texture on the GPU. Setting the CVar to `0` falls back to the legacy **CPU readback** path, which is expensive at large resolutions or high update rates.
 
-- The Sender and Receiver must be called **continuously** (Tick or timer) to keep the Spout stream alive and updated.
+- Shared-texture access is held until the GPU copy completes. This prevents handing a texture
+  to another process while it is still being read or written, but can stall Unreal's render
+  thread. UE 5.3 additionally waits for GPU idle at the Unreal-to-interop boundary; UE 5.4+
+  uses a submission-order barrier. Measure frame time in your target workload.
+
+- Disable **Auto Generate Mips** on send sources and optional receive render targets.
+  Transfers require one mip, one array slice and one sample. An optional target with an
+  incompatible format or mip policy is rejected before resizing it.
+
+- Call the Blueprint/C++ send, receive and close APIs on the **game thread**. A `true` send
+  or receive result means the request was accepted, not that a frame completed. Native handle
+  opening and descriptor checks run later; failures are reported in the log. A newly created
+  received texture stays transparent until a frame can be copied.
+
+- The Sender and Receiver must be called **continuously** (Tick or timer) to request continuous frame updates; registration persists until close.
 
 - Only **one sender per Spout Name** can be active at a time. Multiple senders using the same name will conflict.
+  Registration now refuses a name already advertised by another sender, preserving that sender.
+  Missing synchronization prevents publication or copying until a later retry succeeds.
 
 - This plugin is **not guaranteed to be production-ready** for shipping products without thorough testing.  
   Stability and performance may vary depending on hardware, drivers, texture sizes, and usage patterns.
@@ -373,6 +397,10 @@ This almost always means the compiled module binary doesn't match your engine, o
 
 ## Building a release, and validating one
 
+The developer workflows below require the full repository, **PowerShell 7.2 or newer**, CMake,
+and the Windows C++ toolchain for the selected Unreal engine. `build.bat` requires `pwsh`;
+Windows PowerShell 5.1 is rejected before any release action.
+
 Everything below runs from the repository root and returns a non-zero exit code on any failure, so
 a partial or failed run can never be mistaken for a successful one.
 
@@ -405,7 +433,7 @@ build.bat -TrackD -BoundaryOnly
 :: The complete matrix: all six engines, Development and Shipping packaged hosts.
 build.bat -TrackD -FullMatrix
 
-:: Performance baselines (1080p60, 4K60, multi-stream, CPU fallback, idle, resize churn).
+:: Performance baselines (1080p60, 4K60, multi-stream, CPU fallback, idle, resize and restart churn).
 build.bat -TrackD -Performance
 
 :: Prove the release needs nothing beyond its declared inputs.
@@ -425,6 +453,33 @@ Individual stages can also be run directly:
 Evidence — build logs, staging manifests, smoke-test markers, performance JSON, hashes and
 Unreal Insights traces — is retained under `Artifacts/TrackD/<run-id>/`, which is git-ignored and
 never included in a release archive.
+
+The release gates create fresh invocation directories and require the launched process to report
+its run ID and embedded plugin/host source hashes. Packaged smoke tests compare actual pixels before
+receiver close and run a separate native peer in both directions, including color metadata, alpha
+and resizing.
+The scripts build that peer automatically; CMake and a Windows C++ toolchain are required.
+
+Performance runs publish at a target of 60 Hz (1 Hz in the idle-receiver case), observe pixel sequences
+during measurement, and fail below 90% delivery or on corruption. Their timing includes a serialized
+pixel observer and queue drain; observer time and delivery latency are reported separately. Compare
+against `baseline` (Spout loaded without stream work) and `noplugin` (a separately built host with
+Spout disabled and no Spout module/SDK dependency). The control uses the same host configuration,
+window and pacing, and attests its own compiled host identity plus Spout's absence. These measurements
+are not a claim about unobserved asynchronous throughput.
+`observerSeconds` includes waiting for queued plugin work as well as reading pixels; it cannot
+be subtracted to derive an isolated plugin cost. The observer keeps at most one frame per stream
+in flight and reports observed loss, rather than estimating transfers from accepted API calls.
+The release gates cover ordinary transfer, resize churn and a paced close/reopen workload (one 1080p
+stream closed and reopened every two seconds). The twice-per-second close/reopen stress case
+(`startupshutdown`) is kept as a record: at the default retention budget its new receiver outputs
+are refused between garbage collections, so it fails its delivery gate by contract. See
+[release readiness](Docs/RELEASE_READINESS.md) for what qualification covers.
+
+Build artifacts carry immutable `.identity.json` sidecars. Keep those with the artifacts:
+`-ValidateOnly` and `-ExistingExecutable` reject missing or mismatched provenance and preserve the
+original build identity. Legacy artifacts require rebuilding. Manifest merging rejects duplicate
+rows and mixed source builds; use `-RowManifestPaths` to select the exact attempts after retries.
 
 ---
 

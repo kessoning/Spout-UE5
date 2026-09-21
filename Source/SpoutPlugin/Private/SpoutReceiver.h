@@ -17,6 +17,10 @@ class UMaterialInterface;
 
 namespace SpoutReceiverInternal
 {
+#if WITH_DEV_AUTOMATION_TESTS
+	/** One-shot failure at the real CPU readback boundary, for retry regression tests. */
+	void FailNextCpuReadbackForTests();
+#endif
 	/**
 	 * Chooses the material instance one consumer uses this frame.
 	 *

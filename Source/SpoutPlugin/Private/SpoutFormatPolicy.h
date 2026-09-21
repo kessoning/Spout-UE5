@@ -111,6 +111,9 @@ namespace SpoutFormatPolicy
 	 */
 	FSenderFormat ResolveSenderFormat(DXGI_FORMAT NativeFormat);
 
+	/** Resolve typed sharing metadata from the source's effective UE view intent. */
+	FSenderFormat ResolveSenderFormat(DXGI_FORMAT NativeFormat, bool bSourceSRGB);
+
 	/**
 	 * Classifies the DXGI format an external sender advertises.
 	 * Takes uint32 because Spout reports the format as a DWORD through shared memory, and the

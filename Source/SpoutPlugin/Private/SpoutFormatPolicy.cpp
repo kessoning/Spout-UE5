@@ -110,6 +110,18 @@ namespace SpoutFormatPolicy
 		}
 	}
 
+	FSenderFormat ResolveSenderFormat(DXGI_FORMAT NativeFormat, bool bSourceSRGB)
+	{
+		FSenderFormat Result = ResolveSenderFormat(NativeFormat);
+		if (Result.SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM || Result.SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+			Result.SharedFormat = bSourceSRGB ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
+		else if (Result.SharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM || Result.SharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+			Result.SharedFormat = bSourceSRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+		Result.DeclaredColorSpace = Result.SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || Result.SharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+			? ESpoutColorSpace::SRGB : ESpoutColorSpace::Linear;
+		return Result;
+	}
+
 	FSenderFormat ResolveSenderFormat(DXGI_FORMAT NativeFormat)
 	{
 		FSenderFormat Result;

@@ -41,7 +41,7 @@ window.RENDER_A = function () {
     ${C.secHead("01", "Overview", "What SpoutPlugin Is",
       "Spout is a Windows technology for sharing GPU textures between real-time applications with no disk or network transfer. One application publishes a texture - a <strong>sender</strong> - and another reads it live - a <strong>receiver</strong>. It is widely used to move video between tools such as TouchDesigner, Resolume, Notch, and OBS.")}
     <div class="reveal">
-      <p class="sec-intro" style="margin-bottom:22px">SpoutPlugin brings Spout into Unreal Engine 5. It sends Unreal's rendered output, or any render target, to other Spout applications, and receives Spout streams back into Unreal as textures and materials. <strong>Everything stays on the GPU.</strong></p>
+      <p class="sec-intro" style="margin-bottom:22px">SpoutPlugin brings Spout into Unreal Engine 5. It sends Unreal's rendered output, or any render target, to other Spout applications, and receives Spout streams back into Unreal as textures and materials. <strong>The default transfer path stays on the GPU; CPU receiver fallback uses system memory.</strong></p>
     </div>
 
     <div class="reveal" style="margin:24px 0">
@@ -88,7 +88,7 @@ window.RENDER_A = function () {
     ["Spout.dll", "Bundled under ThirdParty/Spout/lib/amd64/ and staged to Binaries/Win64/ at build time.", "must"],
     ["Same GPU on both ends", "Spout's shared-texture model does not span GPUs.", "must"],
     ["Visual Studio 2022", "With the C++ toolchain and a matching Windows SDK - for source builds only.", "maybe"],
-    ["Project-local install", "Install into your project's Plugins/ folder, not the engine plugins folder.", "must"]
+    ["Project-local install", "Install into your project's Plugins/ folder, the qualified consumer layout. Qualify engine-wide installations separately.", "must"]
   ];
   out.push(C.section("requirements", `
     ${C.secHead("02", "Setup", "Requirements",
@@ -196,7 +196,7 @@ window.RENDER_A = function () {
     ])}</div>
 
     <h3 class="block-title reveal">Lifetime</h3>
-    <div class="reveal"><p>Call the sender <strong>continuously</strong> (Tick or timer). Nothing keeps the stream alive between calls. The shared texture is created and resized automatically when the source size or format changes. Call <code>Close Sender</code> to stop a stream; it affects only the sender entry, leaving any receiver with the same name running.</p>
+    <div class="reveal"><p>Call the sender <strong>continuously</strong> (Tick or timer). Registration and the last image persist between calls until close. The shared texture is created and resized automatically when the source size or format changes. Call <code>Close Sender</code> to stop a stream; it affects only the sender entry, leaving any receiver with the same name running.</p>
     <div class="stream-status" id="stream-status">
       <span class="ss-dot"></span><span class="ss-text mono">stream alive</span>
       <span class="ss-note">pulses only while Tick / Timer is calling the sender</span>
@@ -257,12 +257,12 @@ window.RENDER_A = function () {
       <div class="sc-good">
         <div class="sc-tag good">${ICON.check(14)} Use this</div>
         <div class="sc-val">Final Color (HDR) in Linear Working Color Space</div>
-        <div class="sc-note">The tested, correct Capture Source for sending.</div>
+        <div class="sc-note">A starting point to qualify with your rendering pipeline.</div>
       </div>
       <div class="sc-bad">
-        <div class="sc-tag bad">${ICON.warn(14)} Never this</div>
+        <div class="sc-tag bad">${ICON.warn(14)} Qualify separately</div>
         <div class="sc-val">SceneColor (HDR) in RGB</div>
-        <div class="sc-note">Produces a black image on the receiver. A known limitation - not tunable through other Capture Source values.</div>
+        <div class="sc-note">Output depends on capture settings, exposure and format. The plugin does not tone-map or convert pixels.</div>
       </div>
     </div>
     <div class="reveal"><p>Recommended render target format: <code>RGBA8 sRGB</code> (start here). <code>RGB10A2</code> is also tested and useful to reduce banding. The plugin shares the texture as-is and does not color-correct on send, so color correctness depends on the Capture Source and render target format. The tested combination is Final Color (HDR) in Linear Working Color Space with an RGBA8 sRGB render target.</p></div>

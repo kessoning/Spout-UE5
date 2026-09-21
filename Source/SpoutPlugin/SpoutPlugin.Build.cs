@@ -5,6 +5,8 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Text;
 using UnrealBuildTool;
 
 public class SpoutPlugin : ModuleRules
@@ -22,6 +24,30 @@ public class SpoutPlugin : ModuleRules
     public SpoutPlugin(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+        // Every compiled binary carries the digest of its actual staged inputs. Register each
+        // file with UBT so a cached rules/makefile cannot retain an older digest after an edit.
+        var identityFiles = new[] { "Source", "ThirdParty", "Content", "Config", "Shaders", "Resources" }
+            .SelectMany(dir => Directory.Exists(Path.Combine(ModulePath, dir))
+                ? Directory.GetFiles(Path.Combine(ModulePath, dir), "*", SearchOption.AllDirectories) : new string[0])
+            .Concat(new[] { Path.Combine(ModulePath, "SpoutPlugin.uplugin") })
+            .OrderBy(file => Path.GetRelativePath(ModulePath, file).Replace('\\', '/'), StringComparer.Ordinal).ToArray();
+        // UE 5.3 omits Cryptography.Primitives from rules references. Resolve the platform SHA256
+        // static method at runtime, without changing engine assemblies or implementing cryptography.
+
+        {
+            var hashMethod = System.Type.GetType("System.Security.Cryptography.SHA256, System.Security.Cryptography.Algorithms", true)
+                .GetMethod("HashData", new[] { typeof(byte[]) });
+            Func<byte[], byte[]> hash = data => (byte[])hashMethod.Invoke(null, new object[] { data });
+            var canonical = new StringBuilder();
+            foreach (var file in identityFiles)
+            {
+                ExternalDependencies.Add(file);
+                canonical.Append(Path.GetRelativePath(ModulePath, file).Replace('\\', '/')).Append('\t')
+                    .Append(BitConverter.ToString(hash(File.ReadAllBytes(file))).Replace("-", "").ToLowerInvariant()).Append('\n');
+            }
+            string digest = BitConverter.ToString(hash(Encoding.UTF8.GetBytes(canonical.ToString()))).Replace("-", "").ToLowerInvariant();
+            PrivateDefinitions.Add("SPOUT_BUILD_SOURCE_ID=\"" + digest + "\"");
+        }
 
         // Public include paths are consumed by downstream modules; keep Spout headers
         // private so they do not pull <d3d11.h>/<Windows.h> into every consumer.
@@ -47,6 +73,11 @@ public class SpoutPlugin : ModuleRules
             // "Projects" provides IPluginManager, used for startup Spout.dll diagnostics.
             "ApplicationCore", "Slate", "SlateCore", "Projects"
         });
+        if (Target.bBuildEditor)
+        {
+            // Compile and execute the public Blueprint node in editor automation.
+            PrivateDependencyModuleNames.AddRange(new[] { "UnrealEd", "BlueprintGraph", "KismetCompiler" });
+        }
 
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {

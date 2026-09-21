@@ -7,6 +7,10 @@
 #include "SpoutHostTestDiagnostics.h"
 #include "SpoutHostTestModule.h"
 #include "SpoutHostTestReport.h"
+#include "SpoutHostTestPixels.h"
+#include "RenderingThread.h"
+#include "RHICommandList.h"
+#include "TextureResource.h"
 
 #include "SpoutBPFunctionLibrary.h"
 
@@ -105,6 +109,7 @@ namespace SpoutHostTest
 		}
 
 		Name = Name.ToLower();
+		if (Name == TEXT("baseline")) return EPerfScenario::Baseline;
 		if (Name == TEXT("sender1080p"))     return EPerfScenario::Sender1080p;
 		if (Name == TEXT("receiver1080p"))   return EPerfScenario::Receiver1080p;
 		if (Name == TEXT("sender4k"))        return EPerfScenario::Sender4K;
@@ -114,6 +119,7 @@ namespace SpoutHostTest
 		if (Name == TEXT("idlereceiver"))    return EPerfScenario::IdleReceiver;
 		if (Name == TEXT("resizechurn"))     return EPerfScenario::ResizeChurn;
 		if (Name == TEXT("startupshutdown")) return EPerfScenario::StartupShutdown;
+		if (Name == TEXT("restartpaced"))    return EPerfScenario::RestartPaced;
 
 		// Deliberately not None: an unrecognised name must fail the run rather than quietly turn
 		// into "no performance test requested" and let the matrix report a pass.
@@ -179,6 +185,7 @@ namespace SpoutHostTest
 		Instance->SourceRenderTargets.Empty();
 		Instance->ReceivedTextures.Empty();
 		Instance->ReceivedMaterials.Empty();
+		Instance->PixelProbes.Empty();
 	}
 
 	UTextureRenderTarget2D* FPerfHarness::MakeRenderTarget(int32 InWidth, int32 InHeight) const
@@ -200,13 +207,18 @@ namespace SpoutHostTest
 		}
 
 		WriteResults();
-		FPlatformMisc::RequestExitWithStatus(false, 5);
+		// Older Windows launchers can return zero after a non-forced exit request.
+		// Preserve the failure report, drain/release the plugin streams, then guarantee the status.
+		USpoutBPFunctionLibrary::CloseAllStreams();
+		FPlatformMisc::RequestExitWithStatus(true, 5);
 	}
 
 	bool FPerfHarness::SetUpScenario()
 	{
 		switch (Scenario)
 		{
+		case EPerfScenario::Baseline:
+			Width=Height=StreamCount=0; return true;
 		case EPerfScenario::Sender1080p:
 			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true;  bUsesReceiver = false; break;
 		case EPerfScenario::Receiver1080p:
@@ -225,6 +237,7 @@ namespace SpoutHostTest
 		case EPerfScenario::ResizeChurn:
 			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;  break;
 		case EPerfScenario::StartupShutdown:
+		case EPerfScenario::RestartPaced:
 			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;  break;
 		default:
 			return false;
@@ -260,6 +273,15 @@ namespace SpoutHostTest
 			SenderNames.Add(FName(*FString::Printf(TEXT("SpoutPerf_%u_%d"), ProcessId, Index)));
 			ReceivedTextures.Emplace();
 			ReceivedMaterials.Emplace();
+			PublishedSequences.Add(0); ObservedSequences.Add(0);
+			PreviousReceiverSubmissions.Add(0);
+			LastProgressTimes.Add(FPlatformTime::Seconds());
+			if (!bUsesReceiver)
+			{
+				auto Probe=MakeUnique<FViewportSenderProbe>(); FString Error;
+				if (!Probe->Initialize(Error)) { FailAndFinish(Error); return false; }
+				PixelProbes.Add(MoveTemp(Probe));
+			}
 		}
 
 		return true;
@@ -283,17 +305,28 @@ namespace SpoutHostTest
 			}
 		}
 
-		// Startup/shutdown churn: close and reopen every stream every 30 frames.
-		if (Scenario == EPerfScenario::StartupShutdown && (InFrameIndex % 30) == 0 && InFrameIndex > 0)
+		// Startup/shutdown churn: close and reopen every stream every 30 frames. That rate is a stress
+		// case: closed outputs stay reserved until garbage collection, so it exhausts the default
+		// retention budget by contract. The paced variant is the same close/reopen sequence every
+		// 120 frames (2 s at the 60 Hz work rate), the qualified close/reopen workload.
+		const int32 RestartIntervalFrames =
+			Scenario == EPerfScenario::StartupShutdown ? 30 : (Scenario == EPerfScenario::RestartPaced ? 120 : 0);
+		if (RestartIntervalFrames > 0 && (InFrameIndex % RestartIntervalFrames) == 0 && InFrameIndex > 0)
 		{
 			for (int32 Index = 0; Index < StreamCount; ++Index)
 			{
 				UTexture2D* Texture = ReceivedTextures[Index].Get();
 				UMaterialInstanceDynamic* Material = ReceivedMaterials[Index].Get();
+				const double CloseReceiverStart = FPlatformTime::Seconds();
 				USpoutBPFunctionLibrary::CloseReceiver(SenderNames[Index], Texture, Material);
+				if (bMeasuring) { const double Elapsed = FPlatformTime::Seconds()-CloseReceiverStart; CloseReceiverSeconds += Elapsed; PeakCloseReceiverMs=FMath::Max(PeakCloseReceiverMs,Elapsed*1000.0); }
+
 				ReceivedTextures[Index].Reset();
 				ReceivedMaterials[Index].Reset();
+				const double CloseSenderStart = FPlatformTime::Seconds();
 				USpoutBPFunctionLibrary::CloseSender(SenderNames[Index]);
+				if (bMeasuring) { const double Elapsed=FPlatformTime::Seconds()-CloseSenderStart; CloseSenderSeconds+=Elapsed; PeakCloseSenderMs=FMath::Max(PeakCloseSenderMs,Elapsed*1000.0); }
+
 			}
 			++StreamRestartEvents;
 		}
@@ -307,15 +340,28 @@ namespace SpoutHostTest
 
 			if (bPublishThisFrame)
 			{
+				if (bMeasuring) ExpectedDeliveries += StreamCount;
+				const bool Suppress=bMeasuring && FParse::Param(FCommandLine::Get(),TEXT("SpoutPerfSuppressTransfers"));
+				if (!Suppress) PublishTimes.Add(InFrameIndex,FPlatformTime::Seconds());
+				// Bound diagnostic history even during arbitrarily long runs.
+				for (auto It=PublishTimes.CreateIterator(); It; ++It) if (It.Key()<InFrameIndex-600) It.RemoveCurrent();
 				for (int32 Index = 0; Index < StreamCount; ++Index)
 				{
+					if (Suppress) continue;
 					if (!SourceRenderTargets[Index].IsValid())
 					{
 						continue;
 					}
+					PublishedSequences[Index]=InFrameIndex;
+					const FColor Pixel(InFrameIndex&255,(InFrameIndex>>8)&255,(InFrameIndex>>16)&255,0xa7);
+					auto* Resource=SourceRenderTargets[Index]->GameThread_GetRenderTargetResource();
+					ENQUEUE_RENDER_COMMAND(SpoutPerfSequence)([Resource,Pixel](FRHICommandListImmediate& Cmd)
+					{ Cmd.UpdateTexture2D(Resource->GetTextureRHI(),0,FUpdateTextureRegion2D(0,0,0,0,1,1),4,reinterpret_cast<const uint8*>(&Pixel)); });
+					const double SendCallStart=FPlatformTime::Seconds();
 					const bool bAccepted = USpoutBPFunctionLibrary::SpoutSender(
 						SenderNames[Index], ESpoutSendTextureFrom::TextureRenderTarget2D,
 						SourceRenderTargets[Index].Get());
+					if(bMeasuring) PeakSendCallMs=FMath::Max(PeakSendCallMs,(FPlatformTime::Seconds()-SendCallStart)*1000.0);
 					bAccepted ? ++AcceptedSends : ++RejectedSends;
 				}
 			}
@@ -329,10 +375,12 @@ namespace SpoutHostTest
 				UMaterialInstanceDynamic* Material = ReceivedMaterials[Index].Get();
 				UTexture2D* Texture = ReceivedTextures[Index].Get();
 
+				const double ReceiveCallStart=FPlatformTime::Seconds();
 				const bool bAccepted = USpoutBPFunctionLibrary::SpoutReceiver(
 					SenderNames[Index], ParentMaterial, FName(TEXT("SpoutTexture")),
 					Material, Texture, nullptr, ESpoutColorSpace::Auto);
 
+				if(bMeasuring) PeakReceiveCallMs=FMath::Max(PeakReceiveCallMs,(FPlatformTime::Seconds()-ReceiveCallStart)*1000.0);
 				if (bAccepted)
 				{
 					++AcceptedReceives;
@@ -345,6 +393,43 @@ namespace SpoutHostTest
 				}
 			}
 		}
+	}
+
+	void FPerfHarness::ObserveDelivery()
+	{
+		if (Scenario==EPerfScenario::Baseline) return;
+		const double Start=FPlatformTime::Seconds();
+		// This deliberately drains the queue: timings include a serialized pixel observer.
+		// It is a delivery-qualified baseline, not a claim about unobserved asynchronous throughput.
+		FlushRenderingCommands();
+		for (int32 Index=0; Index<StreamCount; ++Index)
+		{
+			FColor Pixel(0,0,0,0); bool Have=false;
+			if (bUsesReceiver && ReceivedTextures[Index].IsValid())
+			{
+				// Status is cumulative for the session, including outputs replaced on resize.
+				// Validate only an actual new submission; a cleared replacement awaiting its
+				// first copy is a missing opportunity and still counts against the delivery gate.
+				const int64 Submitted = USpoutBPFunctionLibrary::GetSpoutStreamStatus(SenderNames[Index], ESpoutType::Receiver).FramesSubmitted;
+				if (Submitted <= PreviousReceiverSubmissions[Index]) continue;
+				const auto Pixels=ReadPixels(ReceivedTextures[Index]->GetResource(),1,1);
+				if (Pixels.Num()==1) { Pixel=Pixels[0]; Have=true; }
+			}
+			else if (!bUsesReceiver) Have=PixelProbes[Index]->ReadFirstPixel(SenderNames[Index].ToString(),Pixel);
+			if (!Have) continue;
+			const int32 Sequence=Pixel.R | (Pixel.G<<8) | (Pixel.B<<16);
+			if (Pixel.A!=0xa7 || Sequence>PublishedSequences[Index]) { if(bMeasuring) ++PixelMismatches; continue; }
+			if (Sequence<=ObservedSequences[Index]) { if(bMeasuring) ++StaleObservations; continue; }
+			ObservedSequences[Index]=Sequence;
+			LastProgressTimes[Index]=FPlatformTime::Seconds();
+			if (bMeasuring)
+			{
+				const double* Published=PublishTimes.Find(Sequence);
+				if (Published && *Published>=MeasureStartTimeSeconds)
+				{ ++ObservedDeliveries; DeliveryLatenciesMs.Add((FPlatformTime::Seconds()-*Published)*1000.0); }
+			}
+		}
+		if(bMeasuring) { const double Elapsed=FPlatformTime::Seconds()-Start; ValidationSeconds+=Elapsed; PeakObserverMs=FMath::Max(PeakObserverMs,Elapsed*1000.0); }
 	}
 
 	void FPerfHarness::RecordSample(float DeltaSeconds)
@@ -392,10 +477,24 @@ namespace SpoutHostTest
 			{
 				return true;
 			}
+			if (Scenario!=EPerfScenario::Baseline)
+			{
+				FString Error;
+				if (!QualifyExternalPixels(Error)) { FailAndFinish(Error); return true; }
+			}
+			StartTimeSeconds=FPlatformTime::Seconds();
 		}
 
+		const double WorkNow=FPlatformTime::Seconds();
+		if (WorkNow<NextWorkSeconds) return true;
+		const float WorkDelta=LastWorkSeconds>0.0 ? static_cast<float>(WorkNow-LastWorkSeconds) : DeltaSeconds;
+		LastWorkSeconds=WorkNow;
+		NextWorkSeconds=FMath::Max(NextWorkSeconds+1.0/60.0,WorkNow);
 		++FrameIndex;
+		for (int32 Index = 0; bUsesReceiver && Index < StreamCount; ++Index)
+			PreviousReceiverSubmissions[Index] = USpoutBPFunctionLibrary::GetSpoutStreamStatus(SenderNames[Index], ESpoutType::Receiver).FramesSubmitted;
 		DriveScenario(FrameIndex);
+		ObserveDelivery();
 
 		const double Now = FPlatformTime::Seconds();
 		const double Elapsed = Now - StartTimeSeconds;
@@ -437,10 +536,22 @@ namespace SpoutHostTest
 			return true;
 		}
 
-		RecordSample(DeltaSeconds);
+		RecordSample(WorkDelta);
 
 		if ((Now - MeasureStartTimeSeconds) >= MeasureSeconds)
 		{
+			const double TargetDeliveries=MeasureSeconds*(Scenario==EPerfScenario::IdleReceiver?1.0:60.0)*StreamCount;
+			const double MaxSilence=Scenario==EPerfScenario::IdleReceiver ? 1.5 : 0.5;
+			for (double LastProgress : LastProgressTimes)
+			{
+				if (Now-LastProgress>MaxSilence) { FailAndFinish(TEXT("measured stream stopped making pixel progress before the run ended")); return true; }
+			}
+			if (Scenario!=EPerfScenario::Baseline && (ExpectedDeliveries<=0 || ObservedDeliveries<ExpectedDeliveries*0.9 ||
+				ObservedDeliveries<TargetDeliveries*0.9 || PixelMismatches>0))
+			{
+				FailAndFinish(FString::Printf(TEXT("measured delivery gate failed: %d observed / %d published opportunities, target %.0f, %d corrupt observations"),ObservedDeliveries,ExpectedDeliveries,TargetDeliveries,PixelMismatches));
+				return true;
+			}
 			bFinished = true;
 			bPassed = true;
 			WriteResults();
@@ -503,6 +614,12 @@ namespace SpoutHostTest
 
 		FString Json;
 		Json += TEXT("{\n");
+		TArray<double> SortedLatency=DeliveryLatenciesMs; SortedLatency.Sort();
+		double MaxNoProgressSeconds=0.0;
+		for(double LastProgress : LastProgressTimes) MaxNoProgressSeconds=FMath::Max(MaxNoProgressSeconds,FPlatformTime::Seconds()-LastProgress);
+		Json += FString::Printf(TEXT("  \"maxNoProgressSeconds\":%.6f,\n"),MaxNoProgressSeconds);
+		Json += FString::Printf(TEXT("  \"delivery\": {\"targetHz\":60,\"expected\":%d,\"observed\":%d,\"ratio\":%.6f,\"drops\":%d,\"corrupt\":%d,\"staleObservations\":%d,\"maxObserverQueueDepth\":1,\"observerSeconds\":%.6f,\"latencyMeanMs\":%s,\"latencyP95Ms\":%s,\"timingScope\":\"host including serialized pixel observer; baseline has no streams\"},\n"),
+			ExpectedDeliveries,ObservedDeliveries,ExpectedDeliveries?double(ObservedDeliveries)/ExpectedDeliveries:1.0,FMath::Max(0,ExpectedDeliveries-ObservedDeliveries),PixelMismatches,StaleObservations,ValidationSeconds,*JsonNumber(Mean(DeliveryLatenciesMs)),*JsonNumber(Percentile(SortedLatency,0.95)));
 		Json += TEXT("  \"schema\": \"spouthosttest-performance/1\",\n");
 		Json += FString::Printf(TEXT("  \"scenario\": \"%s\",\n"), *EscapeJson(ScenarioName));
 		Json += FString::Printf(TEXT("  \"passed\": %s,\n"), bPassed ? TEXT("true") : TEXT("false"));
@@ -524,13 +641,16 @@ namespace SpoutHostTest
 		Json += FString::Printf(TEXT("    \"receiverMode\": \"%s\",\n"),
 			bGpuReceiverPath ? TEXT("gpu-direct") : TEXT("cpu-fallback"));
 		Json += TEXT("    \"cvars\": {\n");
-		Json += FString::Printf(TEXT("      \"r.Spout.GPUReceiver\": %d\n"), bGpuReceiverPath ? 1 : 0);
+		Json += FString::Printf(TEXT("      \"r.Spout.GPUReceiver\": %d,\n"), bGpuReceiverPath ? 1 : 0);
+		Json += FString::Printf(TEXT("      \"r.Spout.MaxRetainedMiB\": %d\n"), IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.MaxRetainedMiB"))->GetInt());
 		Json += TEXT("    },\n");
 		Json += FString::Printf(TEXT("    \"warmupSeconds\": %.1f,\n"), WarmupSeconds);
 		Json += FString::Printf(TEXT("    \"requestedMeasureSeconds\": %.1f\n"), MeasureSeconds);
 		Json += TEXT("  },\n");
 
 		Json += TEXT("  \"results\": {\n");
+		const auto RuntimeStatus = USpoutBPFunctionLibrary::GetSpoutRuntimeStatus();
+		Json += FString::Printf(TEXT("    \"peakEstimatedRetainedBytes\": %lld, \"rejectedAllocations\": %lld, \"peakPendingCommands\": %d, \"queueRejections\": %lld,\n"), RuntimeStatus.PeakEstimatedRetainedBytes, RuntimeStatus.RejectedAllocations, RuntimeStatus.PeakPendingCommands, RuntimeStatus.RejectedRequests);
 		Json += FString::Printf(TEXT("    \"frameCount\": %d,\n"), MeasuredFrames);
 		Json += FString::Printf(TEXT("    \"measuredSeconds\": %.3f,\n"), MeasuredSeconds);
 		Json += FString::Printf(TEXT("    \"averageFps\": %s,\n"),
@@ -551,6 +671,8 @@ namespace SpoutHostTest
 		Json += FString::Printf(TEXT("    \"acceptedReceives\": %d,\n"), AcceptedReceives);
 		Json += FString::Printf(TEXT("    \"rejectedReceives\": %d,\n"), RejectedReceives);
 		Json += FString::Printf(TEXT("    \"resizeEvents\": %d,\n"), ResizeEvents);
+		Json += FString::Printf(TEXT("    \"peakCloseReceiverMs\": %.6f, \"peakCloseSenderMs\": %.6f, \"peakSendCallMs\": %.6f, \"peakReceiveCallMs\": %.6f, \"peakObserverMs\": %.6f,\n"),PeakCloseReceiverMs,PeakCloseSenderMs,PeakSendCallMs,PeakReceiveCallMs,PeakObserverMs);
+		Json += FString::Printf(TEXT("    \"closeReceiverSeconds\": %.6f, \"closeSenderSeconds\": %.6f,\n"),CloseReceiverSeconds,CloseSenderSeconds);
 		Json += FString::Printf(TEXT("    \"streamRestartEvents\": %d\n"), StreamRestartEvents);
 		Json += TEXT("  },\n");
 

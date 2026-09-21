@@ -182,7 +182,7 @@ if (-not $NoBuild)
         '-EngineRoot', $EngineRoot,
         '-PluginRoot', $cleanCopyRoot
     )
-    foreach ($pair in $EnginePaths) { $releaseArgs += @('-EnginePaths', $pair) }
+    if ($EnginePaths.Count) { $releaseArgs += @('-EnginePaths', ($EnginePaths -join ',')) }
 
     Write-TrackDStep "Running the release from the clean copy"
     $releaseResult = Invoke-TrackDProcess -FilePath 'pwsh' -ArgumentList $releaseArgs `

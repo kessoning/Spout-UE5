@@ -4,6 +4,79 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ---
 
+## SEPTEMBER 2026 UPDATES
+
+I'm wrapping up the last checks before my own final hands-on test of the release.
+The 1.0.0 version I prepared back in August never actually went out, so everything from this month
+is going into 1.0.0 too. I also added a calmer restart test to the release checks: it closes and
+reopens a stream every two seconds and has to keep the picture flowing the whole time without
+running out of memory budget. The tougher test that restarts twice a second is still in there and
+still runs out of budget, because a closed picture keeps its memory booked until Unreal's cleanup
+comes around. I'm keeping that result visible rather than hiding it, and the docs now say plainly
+that there isn't one safe restart speed that fits every project.
+
+I finally tracked down the restart slowdown. Every time a stream was closed and reopened, the
+plugin was setting up a small helper object from the Spout library twice over, and on my machine
+each setup quietly took about fifteen milliseconds. That is most of a frame, and rapid restarts
+paid it twice. The plugin now keeps those helpers around and reuses them, so a restart costs
+about as much as a normal frame. I also left permanent timing markers in the send and receive
+paths, so the next time something feels slow I can see exactly which step it is.
+
+One thing this does not change: when you close a receiver, the picture it gave you stays valid
+until Unreal cleans it up, and that cleanup runs about once a minute in a packaged game. If you
+close and reopen receivers many times a second for a long time, the memory budget still fills up
+until that cleanup happens. Keeping the receiver open while a sender restarts avoids it entirely.
+
+I've cleaned up another part of the release checks. They now keep a clearer record of the exact
+Unreal build used and double-check the performance measurements before accepting a pass. A short
+test or a result with inconsistent numbers can no longer slip through just by saying it succeeded.
+If an engine folder points to a different Unreal version than requested, the build now stops early
+with a clear explanation instead of producing a package under the wrong version label.
+This improves how I verify releases; the remaining restart slowdown still needs its own work.
+
+I've been working through more of the fixes from the big review of the plugin. Streams now have
+limits on queued work and retained pictures, and the new status nodes make skipped requests and
+busy connections easier to see. Looking for a missing sender no longer leaves unused records behind.
+
+I've also tightened the release checks: they install the actual download archive into a fresh
+project, check its documentation links and exercise the included examples. Build tools now stop
+cleanly when a process times out, even if it refuses to exit. These changes are still unreleased.
+
+Those checks found two missing connections in the examples. I've connected the sender's picture
+source and fixed how the receiver creates its material. Both examples now close their stream when
+they leave play, and I've checked their pictures against a separate Spout process.
+
+I've also kept working through the fixes from that review. Several screens can now receive the
+same picture reliably, even when a sender is paused or a screen is recreated. Closing an old
+receiver also leaves newer material changes alone.
+
+I've added a receiver node that takes a material you create once and reuse. The release checks now
+look for changing pictures during performance runs and keep each run's results separate, with a
+record of exactly which build produced them. These changes are still unreleased.
+I've also added a comparison run with Spout disabled. The new checks caught a slowdown when
+streams are repeatedly closed and reopened, so I'm keeping that failed result visible for the
+next performance pass instead of treating it as release-ready.
+The failure checks also caught an older Unreal version returning a successful process exit after
+a failed test. I've fixed that reporting path so build tools can see the failure too.
+
+A fresh, careful review of the whole plugin, checking whether it's ready for real productions,
+turned up a list of things to fix, and I've started working through them. These changes are still
+unreleased.
+
+The plugin now refuses to take over another sender's name, recovers more cleanly when another
+program crashes while sharing a picture, and handles opening or resizing streams more carefully.
+Closing a stream also has a stronger guarantee that queued setup cannot bring it back.
+
+I found two more problems by checking real pictures with the graphics tools enabled. Those fixes
+make Unreal wait until the picture is ready before sharing it. That extra waiting can affect frame
+time, especially on Unreal 5.3, so performance still needs checking in the scene you plan to ship.
+The graphics checks also caught a problem in how older Unreal versions prepare a picture for
+sharing. I've added the missing step for Unreal 5.3 through 5.5.
+
+There are now tests that compare every pixel against a known picture, including pictures sent by
+a separate program. The rest of the review's list is still to do; this first batch does not mean
+the whole release is ready.
+
 ## AUGUST 2026 UPDATES
 
 **Version 1.0.0 is here.** After a long stretch of testing, fixing and proving things, the plugin is

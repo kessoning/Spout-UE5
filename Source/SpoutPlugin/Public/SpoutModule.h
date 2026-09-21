@@ -16,6 +16,8 @@ DECLARE_LOG_CATEGORY_EXTERN(LogSpoutPlugin, Log, All);
 class FSpoutModule : public IModuleInterface
 {
 public:
+	/** Digest of the actual plugin inputs compiled into this module. */
+	static SPOUTPLUGIN_API FString GetBuildSourceIdentity();
 	// Startup/shutdown are called on the game thread by the module manager.
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;

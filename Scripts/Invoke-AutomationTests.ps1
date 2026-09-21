@@ -27,6 +27,9 @@
 param(
     [string] $RepoRoot = '',
 
+    # Install every byte of an exact release ZIP, including its shipped binaries/manifests.
+    [string] $PluginArchive = '',
+
     [Parameter(Mandatory = $true)]
     [string[]] $EngineVersions,
 
@@ -44,6 +47,8 @@ param(
 
     # Automation filter passed to "Automation RunTests".
     [string] $TestFilter = 'SpoutPlugin',
+
+    [string[]] $TestArguments = @(),
 
     [int] $BuildTimeoutSeconds = 3600,
     [int] $TestTimeoutSeconds = 1800,
@@ -70,6 +75,20 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot))
     $RepoRoot = Split-Path -Parent $PSScriptRoot
 }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
+
+$invocation = New-TrackDEvidenceRun -Parent $EvidenceRoot -Label 'automation'
+$archiveCandidate = $null
+$pluginSourceRoot = $RepoRoot
+if ($PluginArchive) {
+    $versions = @(Expand-TrackDList $EngineVersions)
+    if ($versions.Count -ne 1) { throw 'An archive qualification must name exactly one engine version' }
+    $archiveCandidate = Expand-TrackDArchiveCandidate -ArchivePath $PluginArchive -DestinationParent $WorkRoot -EvidenceRoot $invocation.Directory
+    if ($archiveCandidate.BuildIdentity.Engine.Version -ne $versions[0]) { throw 'Candidate archive belongs to a different engine' }
+    $pluginSourceRoot = $archiveCandidate.PluginRoot
+    if ((Get-TrackDSha256 (Join-Path $pluginSourceRoot 'ThirdParty/Spout/lib/amd64/Spout.dll')) -ne (Get-TrackDSha256 (Join-Path $RepoRoot 'ThirdParty/Spout/lib/amd64/Spout.dll'))) { throw 'Native peer SDK differs from the candidate SDK' }
+}
+$runInputs = Get-TrackDSourceIdentity -Root $pluginSourceRoot
+$nativeTools = Build-TrackDNativeTools -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory
 
 $EngineVersions = Expand-TrackDList $EngineVersions
 $EnginePaths = Expand-TrackDList $EnginePaths
@@ -248,14 +267,14 @@ foreach ($version in $EngineVersions)
     $row.StagingDir = $stagingDir
 
     Write-TrackDStep "Staging   : $stagingDir"
-    $staging = New-TrackDHostStaging -RepoRoot $RepoRoot -StagingProjectDir $stagingDir -Force
+    $staging = New-TrackDHostStaging -RepoRoot $RepoRoot -StagingProjectDir $stagingDir -PluginSourceRoot $pluginSourceRoot -PreservePluginBuildOutput:([bool]$PluginArchive) -Force
 
     if ($staging.MissingItems.Count -gt 0)
     {
         [void] $problems.Add("plugin staging is missing: $($staging.MissingItems -join ', ')")
     }
 
-    $engineEvidence = Join-Path $EvidenceRoot "UE$version"
+    $engineEvidence = Join-Path $invocation.Directory "UE$version"
     New-Item -ItemType Directory -Path $engineEvidence -Force | Out-Null
 
     # --- Build the editor target ---------------------------------------------------------------
@@ -342,11 +361,19 @@ foreach ($version in $EngineVersions)
         "-abslog=$absLog"
     )
 
+    $identity = New-TrackDLaunchIdentity -Directory $engineEvidence -PluginRoot $staging.PluginDir -HostRoot $staging.ProjectDir -Executable $engine.EditorCmd
+    if ($identity.SourceId -ne $runInputs.Digest) { throw 'Staged plugin differs from invocation inputs' }
+    $testArgs += $TestArguments
+    $testArgs += Get-TrackDIdentityArguments $identity
+    $testArgs += @('-rhivalidation',"-SpoutNativePeer=$($nativeTools.Executable)",'-ini:Engine:[/Script/Engine.AutomationTestSettings]:DefaultInteractiveFramerate=1,DefaultInteractiveFramerateDuration=0.1,DefaultInteractiveFramerateWaitTime=5')
     Write-TrackDStep "Running automation suite"
     $testResult = Invoke-TrackDProcess -FilePath $engine.EditorCmd -ArgumentList $testArgs `
         -StdOutPath $testLog -TimeoutSeconds $TestTimeoutSeconds -WorkingDirectory $WorkRoot
 
     $row.TestExitCode = $testResult.ExitCode
+    $identityCheck = Test-TrackDLaunchIdentity $identity $testResult
+    $row['Identity'] = $identityCheck
+    foreach ($problem in $identityCheck.Problems) { [void]$problems.Add($problem) }
 
     if ($testResult.TimedOut)
     {
@@ -408,6 +435,10 @@ foreach ($version in $EngineVersions)
 }
 
 $manifest = [ordered] @{
+    RunId        = $invocation.RunId
+    ArchiveCandidate = $archiveCandidate
+    SourceIdentity = $runInputs
+    NativeTools = $nativeTools
     Schema       = 'spoutplugin-trackd-automation/1'
     GeneratedUtc = (Get-Date).ToUniversalTime().ToString('o')
     RepoRoot     = $RepoRoot

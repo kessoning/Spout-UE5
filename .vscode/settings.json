@@ -3,5 +3,6 @@
         "iostream": "cpp",
         "iomanip": "cpp",
         "xstring": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "${workspaceFolder}/Tests/Native"
 }

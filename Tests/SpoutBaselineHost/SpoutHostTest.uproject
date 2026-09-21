@@ -1,0 +1,11 @@
+{
+    "FileVersion": 3,
+    "EngineAssociation": "",
+    "Description": "No-Spout performance control. Staging supplies the same Config as SpoutHostTest.",
+    "Modules": [{"Name":"SpoutBaselineHost","Type":"Runtime","LoadingPhase":"Default"}],
+    "Plugins": [
+        {"Name":"SpoutPlugin","Enabled":false},
+        {"Name":"AndroidFileServer","Enabled":false}
+    ],
+    "TargetPlatforms": ["Windows"]
+}

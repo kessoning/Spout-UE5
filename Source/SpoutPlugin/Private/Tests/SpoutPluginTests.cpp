@@ -2500,6 +2500,33 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	"SpoutPlugin.FrameSync.SuccessfulLockIsTakenAndGivenBackExactlyOnce",
 	SPOUT_TEST_FLAGS)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutFrameSyncOpenFailureTest,
+	"SpoutPlugin.P0.MutexCreationFailureClosesAccessAndCanRetry", SPOUT_TEST_FLAGS)
+bool FSpoutFrameSyncOpenFailureTest::RunTest(const FString& Parameters)
+{
+	using namespace SpoutPluginTests;
+	TUniquePtr<FFakeFrameSyncBackend> Owned = MakeUnique<FFakeFrameSyncBackend>();
+	FFakeFrameSyncBackend* Fake = Owned.Get();
+	Fake->bFailCreateMutex = true;
+	FSpoutFrameSync Sync(MoveTemp(Owned));
+	TestFalse(TEXT("failed mutex creation refuses open"), Sync.Open("SpoutP0_CreateFailure"));
+	TestFalse(TEXT("failed open does not become ready"), Sync.IsOpen());
+	{
+		FSpoutTextureAccessScope Access(Sync, FakeSharedTexture);
+		TestFalse(TEXT("failed open cannot allow an unsynchronized copy"), Access.IsAcquired());
+	}
+	TestEqual(TEXT("closed access does not consult permissive backend"), Fake->CheckCalls, 0);
+	TestEqual(TEXT("frame counting not enabled after failed mutex creation"), Fake->EnableCountCalls, 0);
+	Fake->bFailCreateMutex = false;
+	TestTrue(TEXT("later open retries successfully"), Sync.Open("SpoutP0_CreateFailure"));
+	{
+		FSpoutTextureAccessScope Access(Sync, FakeSharedTexture);
+		TestTrue(TEXT("successful retry permits access"), Access.IsAcquired());
+	}
+	TestEqual(TEXT("only acquired access is released"), Fake->AllowCalls, 1);
+	return true;
+}
+
 bool FSpoutFrameSyncSuccessfulLockTest::RunTest(const FString& Parameters)
 {
 	using namespace SpoutPluginTests;
@@ -2770,7 +2797,7 @@ bool FSpoutFrameSyncResizeTest::RunTest(const FString& Parameters)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FSpoutFrameSyncNoBackendTest,
-	"SpoutPlugin.FrameSync.WithoutABackendCopiesAreStillPermitted",
+	"SpoutPlugin.FrameSync.WithoutABackendCopiesAreRefused",
 	SPOUT_TEST_FLAGS)
 
 bool FSpoutFrameSyncNoBackendTest::RunTest(const FString& Parameters)
@@ -2778,28 +2805,28 @@ bool FSpoutFrameSyncNoBackendTest::RunTest(const FString& Parameters)
 	using namespace SpoutPluginTests;
 
 	// This is the Spout-unavailable case: MakeSpoutSdkFrameSyncBackend returns null when the DLL
-	// never loaded. Frames must keep flowing unsynchronised rather than stopping.
+	// never loaded. A missing synchronization mechanism must not allow unsafe copies.
 	FSpoutFrameSync Sync(nullptr);
 
 	const TArray<ANSICHAR> Name = SyncName(TEXT("LockNoBackend"));
 	TestFalse(TEXT("opening reports no access mutex"), Sync.Open(Name.GetData()));
 	TestFalse(TEXT("and the protocol is not open"), Sync.IsOpen());
 
-	TestTrue(TEXT("every frame is treated as new"), Sync.ConsumeNewFrame());
-	TestTrue(TEXT("and still is on the next call"), Sync.ConsumeNewFrame());
+	TestFalse(TEXT("closed protocol offers no frame"), Sync.ConsumeNewFrame());
+	TestFalse(TEXT("and remains closed on the next call"), Sync.ConsumeNewFrame());
 
 	{
 		FSpoutTextureAccessScope Access(Sync, FakeSharedTexture);
-		TestTrue(TEXT("access is permitted"), Access.IsAcquired());
+		TestFalse(TEXT("access is refused"), Access.IsAcquired());
 	}
 
 	TestEqual(TEXT("and the counters stay balanced"), Sync.GetAcquireCount(), Sync.GetReleaseCount());
-	TestEqual(TEXT("with one acquire recorded"), Sync.GetAcquireCount(), 1);
+	TestEqual(TEXT("with no acquire recorded"), Sync.GetAcquireCount(), 0);
 	TestFalse(TEXT("nothing is left held"), Sync.IsAccessHeld());
 
-	// Publishing is a no-op but must still be safe and counted.
+	// Nothing can be published through a closed protocol.
 	Sync.PublishFrame();
-	TestEqual(TEXT("publication is recorded even with no backend"), Sync.GetPublishedFrameCount(), 1);
+	TestEqual(TEXT("no publication recorded without a backend"), Sync.GetPublishedFrameCount(), 0);
 
 	return true;
 }

@@ -7,9 +7,32 @@
  * UE's D3D12 RHI, providing a shared context for sender and receiver paths.
  */
 #include "SpoutD3DContext.h"
+#include "SpoutFrameSync.h"
 #include "SpoutModule.h"
 
 #include "RHI.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+
+bool FSpoutD3DContext::PrepareGpuCompletion()
+{
+	const bool bReady = GpuCompletion.Prepare(ImmediateContext.Get());
+	if (!bReady && GpuFailureLogThrottle.ShouldLog())
+	{
+		UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout GPU completion query unavailable (hr=0x%08x); copy deferred."), GpuCompletion.GetLastResult());
+	}
+	return bReady;
+}
+
+HRESULT FSpoutD3DContext::WaitForGpuCompletion()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_WaitForGPUCompletion);
+	const HRESULT Result = GpuCompletion.Wait(ImmediateContext.Get());
+	if (FAILED(Result) && GpuFailureLogThrottle.ShouldLog())
+	{
+		UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout GPU copy did not complete (hr=0x%08x); frame not acknowledged."), Result);
+	}
+	return Result;
+}
 
 FSpoutD3DContext& FSpoutD3DContext::Get()
 {
@@ -22,10 +45,11 @@ void FSpoutD3DContext::InitializeIfNeeded()
 #if PLATFORM_WINDOWS
 	FScopeLock Lock(&InitMutex);
 	// Initialization is idempotent and guarded by InitMutex.
-	if (D3D11Device)
+	if (D3D11Device || bUnsupportedRHI || FPlatformTime::Seconds() < NextInitializeAttempt)
 	{
 		return;
 	}
+	NextInitializeAttempt = FPlatformTime::Seconds() + 1.0;
 	Initialize();
 #endif
 }
@@ -34,9 +58,11 @@ void FSpoutD3DContext::Initialize()
 {
 #if PLATFORM_WINDOWS
 	// Spout uses D3D11 interop; in UE5 the plugin bridges via D3D11-on-12.
-	if (!GDynamicRHI || GDynamicRHI->GetInterfaceType() != ERHIInterfaceType::D3D12)
+	if (!GDynamicRHI) return;
+	if (GDynamicRHI->GetInterfaceType() != ERHIInterfaceType::D3D12)
 	{
-		UE_LOG(LogSpoutPlugin, Error, TEXT("SpoutPlugin requires DX12 RHI."));
+		bUnsupportedRHI = true;
+		UE_LOG(LogSpoutPlugin, Warning, TEXT("SpoutPlugin requires DX12 RHI; interop disabled for this session."));
 		return;
 	}
 
@@ -73,7 +99,7 @@ void FSpoutD3DContext::Initialize()
 
 	if (FAILED(hr))
 	{
-		UE_LOG(LogSpoutPlugin, Error, TEXT("Failed to create D3D11On12 device (hr=0x%08x)"), hr);
+		if (InitializationLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Error, TEXT("Failed to create D3D11On12 device (hr=0x%08x, device reason=0x%08x)"), hr, D3D12Dev->GetDeviceRemovedReason());
 		return;
 	}
 
@@ -81,7 +107,7 @@ void FSpoutD3DContext::Initialize()
 	hr = LocalD3D11.As(&LocalOn12);
 	if (FAILED(hr))
 	{
-		UE_LOG(LogSpoutPlugin, Error, TEXT("Failed to query ID3D11On12Device (hr=0x%08x)"), hr);
+		if (InitializationLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Error, TEXT("Failed to query ID3D11On12Device (hr=0x%08x)"), hr);
 		return;
 	}
 
@@ -101,7 +127,7 @@ void FSpoutD3DContext::Initialize()
 	}
 
 	// Spout helpers manage shared textures and the global sender registry.
-	SpoutSenderNames = MakeUnique<spoutSenderNames>();
+	SpoutSenderNames = MakeUnique<FSpoutSafeSenderNames>();
 	SpoutDirectX = MakeUnique<spoutDirectX>();
 
 	UE_LOG(LogSpoutPlugin, Log, TEXT("SpoutDX11on12 Initialized."));
@@ -115,14 +141,20 @@ void FSpoutD3DContext::Shutdown()
 	// guard Shutdown(); taking it here makes that contract real and prevents an init racing teardown.
 	FScopeLock Lock(&InitMutex);
 
+	// Pooled frame-count backends are SDK objects; destroy them while Spout.dll is still loaded.
+	DrainSpoutSdkFrameSyncBackendPool();
+
 	// Release in reverse creation order; shared resources should already be idle.
 	SpoutSenderNames.Reset();
 	SpoutDirectX.Reset();
+	GpuCompletion.Reset();
 
 	ImmediateContext.Reset();
 	D3D11On12Device.Reset();
 	D3D11Device.Reset();
 	D3D12CommandQueue.Reset();
+	bUnsupportedRHI = false;
+	NextInitializeAttempt = 0;
 #endif
 }
 
@@ -183,7 +215,7 @@ ID3D12CommandQueue* FSpoutD3DContext::GetD3D12CommandQueue() const
 #endif
 }
 
-spoutSenderNames* FSpoutD3DContext::GetSenderNames() const
+FSpoutSafeSenderNames* FSpoutD3DContext::GetSenderNames() const
 {
 #if PLATFORM_WINDOWS
 	return SpoutSenderNames.Get();

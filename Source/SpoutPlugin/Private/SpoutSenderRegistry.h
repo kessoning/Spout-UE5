@@ -14,6 +14,10 @@
 #include "SpoutFrameSync.h"
 #include "SpoutLogThrottle.h"
 #include "SpoutSenderRegistration.h"
+#include "SpoutLimits.h"
+#include <atomic>
+#include "RHI.h"
+#include "UObject/WeakObjectPtr.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -64,7 +68,7 @@ public:
 
 	uint32 Width = 0;
 	uint32 Height = 0;
-	// DXGI format of the shared texture (sender role). Part of the recreate identity together
+	// DXGI format of the shared texture. Part of the recreate identity together
 	// with Width/Height: a source format change at the same resolution must recreate the shared
 	// texture, otherwise CopyResource is fed mismatched formats and silently drops frames.
 	DXGI_FORMAT SharedFormat = DXGI_FORMAT_UNKNOWN;
@@ -83,9 +87,8 @@ public:
 	 * This stream's half of the Spout access-mutex and frame-count protocol.
 	 *
 	 * One per entry, not one per process: the access mutex, the frame semaphore and the receiver's
-	 * last-seen frame count are all per sender NAME. Opened lazily -- senders open it once the name
-	 * is registered and the shared texture exists, receivers once the sender's shared handle has
-	 * been opened -- and closed by ReleaseResources.
+	 * last-seen frame count are all per sender NAME. Opened before sender publication or
+	 * receiver installation, and closed by ReleaseResources.
 	 *
 	 * Self-synchronising, so it is deliberately NOT guarded by ResourceMutex; see the lock order in
 	 * SpoutFrameSync.h.
@@ -108,6 +111,18 @@ public:
 	// CPU-readable staging texture for receiver readback.
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> StagingTexture;
 
+	// Render-thread-owned completed image and per-destination delivery generations.
+	// Weak UObject keys do not keep optional targets alive; the last resource is
+	// retained only until that live target is refreshed, pruned, or the session closes.
+	struct FDestinationDelivery
+	{
+		FTextureRHIRef Resource;
+		uint64 Frame = 0;
+	};
+	FTextureRHIRef ReceivedFrame;
+	uint64 ReceivedFrameNumber = 0;
+	TMap<TWeakObjectPtr<UObject>, FDestinationDelivery> DestinationDeliveries;
+
 	/**
 	 * Receiver role only: the last reported compatibility status of the optional output render
 	 * target, so a persistent mismatch is logged when the situation changes rather than every
@@ -119,6 +134,7 @@ public:
 	FSpoutLogThrottle OutputTargetLogThrottle;
 	FSpoutLogThrottle RegistrationLogThrottle;
 	FSpoutLogThrottle FormatLogThrottle;
+	FSpoutLogThrottle OpenLogThrottle;
 
 	// Cached D3D11 wrapper for a D3D12 resource.
 	// - Sender role: wraps the source UE RHI texture (state = COPY_SOURCE).
@@ -133,6 +149,33 @@ public:
 
 	// Protects SharedTexture/handle updates across game and render threads.
 	FCriticalSection ResourceMutex;
+	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> NativeReservation;
+	// Game-thread admission records; render delivery records are separately owned above.
+	TMap<TWeakObjectPtr<UObject>, TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe>> OutputReservations;
+	std::atomic<int64> NativeFailures{0};
+	std::atomic<int64> LastNativeError{0};
+	// Render-thread retry state. A new native identity resets the backoff.
+	double NextNativeRetry = 0;
+	double RetryDelay = 0.01;
+	uint32 RetryWidth = 0, RetryHeight = 0;
+	DXGI_FORMAT RetryFormat = DXGI_FORMAT_UNKNOWN;
+	HANDLE RetryHandle = nullptr;
+	bool CanRetry(uint32 W, uint32 H, DXGI_FORMAT Format, HANDLE Handle = nullptr)
+	{
+		if (RetryWidth != W || RetryHeight != H || RetryFormat != Format || RetryHandle != Handle)
+		{
+			RetryWidth = W; RetryHeight = H; RetryFormat = Format; RetryHandle = Handle;
+			NextNativeRetry = 0; RetryDelay = 0.01;
+		}
+		return FPlatformTime::Seconds() >= NextNativeRetry;
+	}
+	void NativeFailure(HRESULT Error)
+	{
+		++NativeFailures; LastNativeError.store(static_cast<int64>(Error));
+		NextNativeRetry = FPlatformTime::Seconds() + RetryDelay;
+		RetryDelay = FMath::Min(1.0, RetryDelay * 2.0);
+	}
+	void NativeSuccess() { LastNativeError.store(0); NextNativeRetry = 0; RetryDelay = 0.01; }
 };
 
 class FSpoutSenderRegistry

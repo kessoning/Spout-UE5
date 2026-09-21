@@ -10,7 +10,7 @@ where it helps explain a requirement, limitation, or troubleshooting step.
 - Engine target: Unreal Engine 5.3 - 5.8 (Win64)
 - Module: SpoutPlugin (Runtime)
 - Platform: Windows 64-bit, DirectX 12 RHI
-- Documentation date: 2026-08-03
+- Documentation date: 2026-09-12
 
 ---
 
@@ -23,7 +23,7 @@ Resolume, Notch, and OBS.
 
 SpoutPlugin brings Spout into Unreal Engine 5. It lets you send Unreal's rendered output, or any
 render target, to other Spout applications, and receive Spout streams back into Unreal as
-textures and materials. Everything stays on the GPU.
+textures and materials. The default transfer path stays on the GPU; CPU receiver fallback uses system memory for readback and upload.
 
 The technical challenge it solves: Spout shares DirectX 11 textures, but modern UE5 runs on the
 DirectX 12 RHI. The plugin stands up a D3D11-on-D3D12 interop device and bridges UE's D3D12
@@ -58,8 +58,7 @@ do not need to write C++ to use the plugin.
 - `Spout.dll`, bundled with the plugin under `ThirdParty/Spout/lib/amd64/` and staged to the
   plugin's `Binaries/Win64/` at build time.
 - For source builds: Visual Studio 2022 with the C++ toolchain and a matching Windows SDK.
-- The plugin is project-local. Install it into your project's `Plugins/` folder, not the engine
-  plugins folder.
+- Install into your project's `Plugins/` folder, the qualified consumer layout. Qualify engine-wide installations separately.
 
 Both applications sharing a stream must run on the same GPU. Spout's shared-texture model does
 not span GPUs.
@@ -130,8 +129,8 @@ rendering and not minimized.
    Target 2D at runtime.
 2. Add a `SceneCapture2D` to the level.
 3. Assign the render target to the SceneCapture2D Texture Target.
-4. Set Capture Source to Final Color (HDR) in Linear Working Color Space. Do not use SceneColor
-   (HDR) - it produces black output.
+4. Start with Final Color (HDR) in Linear Working Color Space. Qualify capture source, exposure
+   and format together.
 5. On Tick or a timer, call Spout Sender with Send Texture From = `TextureRenderTarget2D` and the
    render target assigned.
 6. View the stream externally.
@@ -145,15 +144,15 @@ Most common black-output cause: the Capture Source in step 4.
 
 ## 6. Quick Start: Receiving a Spout Stream
 
-1. On Tick or a timer, call Spout Receiver.
-2. Spout Name: exactly match the sender.
-3. Optionally set Input Material and Texture Parameter Name.
-4. Use the outputs: Out Texture (transient `UTexture2D`), Out Mat (dynamic material instance), and
-   optionally Optional Output Render Target (the frame is copied into it).
-5. Validate Out Mat and Out Texture before applying them.
-6. Apply Out Mat to a mesh, or sample Out Texture directly.
+1. Create a dynamic material instance once, store it in a variable, and apply it to the mesh.
+2. On Tick or a timer, call Spout Receiver With Material with that stored MID as Consumer Material.
+3. Set Spout Name to match the sender and Texture Parameter Name to match the material parameter.
+4. Optionally supply Optional Output Render Target for a second copy of the received image.
+5. Check the return bool and validate Out Texture before use. True means accepted and queued;
+   it does not prove the pixels have finished copying.
+6. Keep using the stored MID, or sample the transient Out Texture directly.
 
-(Figure placeholder SP-009 - Spout Receiver node and outputs.)
+(Figure placeholder SP-009 - Spout Receiver With Material, stored MID input and outputs.)
 
 ---
 
@@ -170,7 +169,7 @@ Stream name rules: the name must match the receiver exactly; only one sender own
 time; the registry is keyed by name and type so a sender and a receiver can share a name without
 conflict.
 
-Lifetime: call the sender continuously; the stream is not kept alive between calls. The shared
+Lifetime: call the sender continuously; registration and the last image persist between calls until close. The shared
 texture is created and resized automatically. Call Close Sender to stop a stream; it affects only
 the sender entry.
 
@@ -222,8 +221,8 @@ Texture is reused while the stream size is stable.
 
 Recommended Capture Source: Final Color (HDR) in Linear Working Color Space.
 
-Do not use: SceneColor (HDR) in RGB - it produces a black image on the receiver. This is a known
-limitation, not something tunable through other Capture Source values.
+Other capture modes, including SceneColor HDR, require qualification of exposure, alpha, target
+format and receiver interpretation. The plugin does not tone-map pixels.
 
 Recommended render target format: RGBA8 sRGB (start here). RGB10A2 is also tested and useful to
 reduce banding.
@@ -278,6 +277,15 @@ Removes the named sender and releases its handle. Scoped to senders only.
 
 ### Spout Receiver
 
+For repeated Blueprint use, prefer **Spout Receiver With Material**. Create a Dynamic Material
+Instance once, store it in a variable, and pass it to the Consumer Material input each tick.
+This node creates no material and returns the shared Out Texture. Passing null supports texture-only
+use. The original signature below remains available; its Out Mat pin is an output in Blueprint.
+
+**Release Receiver Material Binding** removes just one MID/parameter binding while keeping the
+shared receiver open. It restores the previous texture or engine default only if that parameter
+still points to the receiver's image. A later manual change or another sender's binding survives.
+
 `bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr, ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto)`
 
 Receives a stream. `OptionalOutputRenderTarget` and `ColorSpace` are advanced-display pins.
@@ -291,9 +299,26 @@ publishes linear or data values in an 8-bit format, such as a render target crea
 Linear Gamma. sRGB forces decoding and is only valid for 8-bit frames; requesting it for a 10-bit
 or float frame fails the call with a logged diagnostic rather than being silently ignored.
 
+All consumers of a sender name share one color interpretation. A conflicting request is refused;
+close the shared receiver before changing it. A source pixel-format change can establish a new
+interpretation. Optional targets catch up separately from the completed image, even if attached
+or recreated while the sender is paused.
+
 The Optional Output Render Target must match the incoming frame's pixel format exactly and be
 single-sampled. A mismatched target is left untouched and the mismatch is logged; the call still
 succeeds and Out Texture still updates. Size differences are resolved by resizing the target.
+
+### Operational status
+
+`FSpoutStreamStatus GetSpoutStreamStatus(FName SpoutName, ESpoutType Type)` returns a game-thread
+snapshot of the current role's activity, queue admissions/rejections, submitted frames, access
+misses and native failures. Activity can mean awaiting a first frame. Submission does not
+acknowledge display by another application. Viewport coalescing is outside non-viewport queue
+counters; closing a role retires its counters.
+
+`FSpoutRuntimeStatus GetSpoutRuntimeStatus()` reports initialized interop availability, active
+roles, pending/peak commands, role/queue-cap refusals and estimated image reservations. Allocation
+refusals have a separate counter. The query does not initialize the device.
 
 ### Spout Info
 
@@ -313,7 +338,7 @@ Looks up one sender by name; fills Name, Width, Height, bIsAlive. Returns true i
 `int32 SetMaxSenders(int32 Max)`
 
 Sets the maximum sender count in Spout's registry and returns the limit actually in effect.
-Returns 0 when nothing changed, either because the requested value was outside the accepted range
+Returns 0 when the request could not be applied, either because the requested value was outside the accepted range
 (1-1024) or because Spout is unavailable. It does not echo the requested value back.
 
 ### Close Receiver
@@ -432,14 +457,13 @@ rebuild.
 - Windows 64-bit only.
 - DirectX 12 RHI required; the plugin refuses to initialize otherwise.
 - Both ends must be on the same GPU.
-- Tested render target formats are limited to RGBA8 sRGB and RGB10A2.
+- Supported formats are BGRA8, RGBA8, RGB10A2 and RGBA16F; color interpretation must match the source.
 - No colour conversion on send; the advertised colour space follows the render target's gamma setting.
-- SceneCapture2D must use Final Color (HDR) in Linear Working Color Space; SceneColor (HDR) is
-  black.
+- Qualify Capture Source, exposure and output format together; the plugin does not tone-map pixels.
 - One sender per name.
 - Senders and receivers must be called continuously.
 - Spout Info and Get Sender Info populate only Name, Width, Height, bIsAlive.
-- Marked beta; not guaranteed production-ready without testing. Error handling favors visible,
+- The descriptor sets IsBetaVersion to false; this does not certify production readiness. Error handling favors visible,
   logged failures over silent recovery.
 
 ---
@@ -470,7 +494,7 @@ RGB10A2. On the receiving side, set the Spout Receiver node's Color Space pin: A
 senders, Linear when the sender publishes linear 8-bit data (for example a Force Linear Gamma
 render target sent from another Unreal instance).
 
-Stream name mismatch: names are case-sensitive; use Spout Info to read exact names.
+Stream name mismatch: use the exact external spelling from Spout Info. Local FName keys do not distinguish case.
 
 Multiple senders conflict: unique, stable names per stream.
 
@@ -494,7 +518,7 @@ regenerate, rebuild.
 - Use a timer when full frame rate is not required.
 - Always validate Out Mat and Out Texture before applying them.
 - Keep the render target format simple: RGBA8 sRGB first.
-- For SceneCapture2D sends, always use Final Color (HDR) in Linear Working Color Space.
+- For SceneCapture2D sends, start with Final Color (HDR) in Linear Working Color Space and qualify the chosen capture pipeline.
 - Test in a minimal project before integrating into production.
 - Record the engine version and the plugin binary version together, since binaries are
   version-specific.
@@ -547,3 +571,24 @@ goes against the spirit of the project.
 - D3D12: DirectX 12, the graphics API Unreal uses; required by this plugin.
 - D3D11-on-D3D12: an interop layer that exposes D3D12 resources to D3D11 code (here, Spout).
 - Shared texture: a GPU texture exposed via a shared handle so another process can read it.
+
+## Operational limits and status
+
+Every public API requires the game thread. Failed discovery retains no stream record. Open streams
+and their last images persist until close; Tick/timers request transfers rather than keeping a
+registration alive. Editor world cleanup closes all plugin streams across PIE worlds. Packaged
+callers must close at their own level/EndPlay boundary. Device removal requires an application restart.
+
+GetSpoutStreamStatus reports scheduling, submitted-frame, contention and native-failure counters.
+GetSpoutRuntimeStatus reports active roles, pending work, rejection counts and estimated retained
+resource reservations. These snapshots are not acknowledgments from another application.
+
+Default operational limits are 32 active roles, 128 pending commands, 4 pending commands per stream,
+32 material bindings/optional targets per receiver, 8192 pixels per dimension, 128 MiB per frame and
+1024 MiB aggregate image reservations. Console variables under r.Spout.Max control these limits.
+Cancelled commands remain counted until released. Old received textures held by callers remain
+charged until GC/resource release. Caller-owned resources and driver/engine allocations are additional.
+Named and keyed texture access are nonblocking; GPU completion can still stall rendering.
+
+Release scripts require PowerShell 7.2 or newer. Release testing installs the exact release ZIP
+into fresh host projects and runs the shipped examples, in addition to native API tests.

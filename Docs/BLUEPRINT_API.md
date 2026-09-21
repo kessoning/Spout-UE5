@@ -37,7 +37,7 @@ game thread.
   `TextureRenderTarget2D` (required for the render-target source, ignored for GameViewport).
 - Returns: `true` if the send was accepted or queued, `false` on invalid input (for example a
   null render target, no game viewport, or Spout unavailable).
-- Call it: every frame on Tick or on a timer, continuously, to keep the stream alive.
+- Call it: every frame on Tick or on a timer, continuously, to request continuous frame updates.
 - Common mistakes: leaving the render target empty while using the TextureRenderTarget2D source;
   calling it once instead of continuously; using a name that does not match the receiver.
 
@@ -52,7 +52,34 @@ only, so a receiver using the same name is unaffected.
 
 - Call it: when you want to stop publishing a stream.
 
-## Spout Receiver
+## Spout Receiver With Material (recommended for Blueprint)
+
+```cpp
+static bool SpoutReceiverWithMaterial(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial,
+    FName TextureParameterName, UTexture2D*& OutTexture,
+    UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,
+    ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto);
+static bool ReleaseReceiverMaterialBinding(FName SpoutName,
+    UMaterialInstanceDynamic* ConsumerMaterial, FName TextureParameterName);
+```
+
+Create a MID once with Unreal's Create Dynamic Material Instance node, retain it in a variable,
+and pass that variable to `ConsumerMaterial` on each receive. This is a real input pin and the
+receiver allocates no material. Null supports texture-only use. Return true means the request was
+accepted; native opening and copying still happen later on the render thread.
+
+One texture is shared per sender name. Optional targets catch up independently from the last
+completed image, including late attachment and resource recreation while the sender is paused.
+Unchanged targets skip repeat copies. Same-name consumers must agree on resolved color space;
+conflicting calls return false without changing the existing output. Close the receiver before
+changing interpretation, or let a source pixel-format change establish a new interpretation.
+
+`ReleaseReceiverMaterialBinding` removes one MID/parameter binding and keeps the receiver open.
+It restores the previous texture (or the engine default) only while the parameter still points
+to that receiver's image. Later manual edits and bindings to other sender names are preserved.
+Keep the caller-created MID alive yourself. Close the shared receiver when no consumers need it.
+
+## Spout Receiver (existing signature)
 
 ```cpp
 static bool SpoutReceiver(const FName SpoutName,
@@ -80,15 +107,16 @@ advanced-display pins (hidden until expanded).
   set); `OutTexture` (transient texture updated from the stream).
 - Ownership: `OutMat` and `OutTexture` are **outputs, not ownership**. The received texture
   belongs to the plugin, which keeps it alive for as long as the receiver is open. Keep the
-  values this node returns, pass them back on later calls, and hand them to Close Receiver.
+  values this node returns and hand them to Close Receiver. C++ callers can reuse `OutMat` by
+  reference; Blueprint has an output pin, so use the explicit material-input node above on Tick.
   They are only assigned on success and are deliberately left untouched on failure, so a
   temporary sender dropout does not orphan anything.
 - Sessions: there is one receiver session per sender name. Every graph receiving the same name
   shares that one texture, but each gets its own material instance created from its own
   `InputMaterial`.
 - Returns: `true` if the named sender was found and a receive was enqueued, `false` otherwise.
-- Call it: every frame on Tick or on a timer, continuously. The frame is only copied when the
-  sender has actually published a new one, so a slow sender costs nothing on the frames between.
+- Call it: on Tick or a timer. Upstream frames are consumed once; each optional target catches
+  up independently. The same color-space and material-binding rules as the new node apply.
 - Common mistakes: not validating `OutMat`/`OutTexture` before use; a texture parameter name
   that does not exist in the material; a name mismatch with the sender.
 
@@ -103,8 +131,8 @@ static void CloseReceiver(FName SpoutName,
 ```
 
 Tears down a receiver started with Spout Receiver: cancels any receive still queued for that
-name, drops the registry entry, clears the Spout texture parameter from every material the
-plugin bound it into, and releases the plugin's ownership of the received texture so the engine
+name, drops the registry entry, restores parameters still owned by this receiver,
+and releases the plugin's ownership of the received texture so the engine
 collects it normally.
 
 - Inputs: `SpoutName` (the receiver to close); `ReceivedTexture` and `ReceivedMaterial`, passed
@@ -115,6 +143,10 @@ collects it normally.
   a wrong pointer can no longer take out another receiver's texture.
 - Sessions: there is one receiver session per sender name, so this closes it for **every** graph
   receiving that name. Those graphs get a fresh texture on their next Spout Receiver call.
+- Memory: the released texture keeps its share of `r.Spout.MaxRetainedMiB` until Unreal
+  garbage-collects it, even when nothing references it any more. Closing and reopening receivers
+  rapidly can exhaust the budget between collections, after which new outputs are refused; see
+  [limitations](LIMITATIONS.md).
 - Call it: when a receiver is no longer needed, to avoid per-name resource growth.
 
 ## Spout Info
@@ -230,3 +262,20 @@ Lightweight Blueprint data type. Heavy D3D resources are never stored in it.
 
 Rely only on `Name`, `Width`, `Height`, and `bIsAlive` from the Info nodes. The remaining
 fields are available for your own Blueprint use but are not driven by the plugin.
+
+## Operational status
+
+All public functions require the game thread. `GetSpoutStreamStatus(Name, Type)` returns the current
+role's active flag, pending commands, accepted queued requests, queue rejections, submitted frames,
+access misses, native-failure count and last native error. An active role can be awaiting its first
+successful transfer; `bHasFrame` means a submitted frame has been recorded, not that a foreign peer
+has displayed it. CPU receive uploads may still be queued when submission is recorded.
+
+`GetSpoutRuntimeStatus()` returns interop availability, active roles, pending/peak commands,
+rejected admissions and current/peak/rejected resource reservations. Queries do not initialize the
+interop device. Viewport requests coalesce and are not included in non-viewport queue counters.
+Closing a role retires its per-stream counters; aggregate counters last for the module lifetime.
+
+Send/receive return false when the operational queue, stream, consumer or memory budget refuses
+the request. See [limits and lifetime](LIMITATIONS.md) for the defaults, accounting boundaries,
+editor multi-world cleanup behavior and device-loss contract.

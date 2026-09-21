@@ -11,6 +11,7 @@
  * teardown while a peer holds the mutex -- can be driven through that interface alone.
  */
 #include "SpoutFrameSync.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "SpoutModule.h"
 
@@ -19,6 +20,7 @@
 #include "Windows/WindowsHWrapper.h"
 #include <d3d11.h>
 #include "SpoutDX/SpoutFrameCount.h"
+#include "SpoutSdkSafety.h"
 #include "Windows/HideWindowsPlatformTypes.h"
 #ifdef GetNextSibling
 #undef GetNextSibling
@@ -61,7 +63,7 @@ namespace
 
 		virtual bool CheckTextureAccess(void* SharedTexture) override
 		{
-			return FrameCount.CheckTextureAccess(static_cast<ID3D11Texture2D*>(SharedTexture));
+			return FrameCount.CheckTextureAccessSafe(static_cast<ID3D11Texture2D*>(SharedTexture));
 		}
 
 		virtual bool AllowTextureAccess(void* SharedTexture) override
@@ -79,9 +81,18 @@ namespace
 			return FrameCount.GetNewFrame();
 		}
 
+		virtual bool IsRecyclable() const override { return true; }
+
 	private:
-		spoutFrameCount FrameCount;
+		FSpoutSafeFrameCount FrameCount;
 	};
+
+	// Closed SDK backends waiting for the next stream. Bounded so a burst of distinct names cannot
+	// grow it without limit; each pooled object is a few hundred bytes and no kernel handles.
+	// Streams are created and destroyed on both the game and render threads, hence the lock.
+	FCriticalSection GFrameSyncBackendPoolMutex;
+	TArray<TUniquePtr<ISpoutFrameSyncBackend>> GFrameSyncBackendPool;
+	constexpr int32 GFrameSyncBackendPoolCapacity = 64;
 #endif
 }
 
@@ -90,17 +101,75 @@ TUniquePtr<ISpoutFrameSyncBackend> MakeSpoutSdkFrameSyncBackend()
 #if PLATFORM_WINDOWS
 	// Constructing spoutFrameCount is the first touch of a Spout symbol on this path, which is what
 	// triggers the delay-load bind of Spout.dll. Binding a DLL that never loaded terminates the
-	// process with 0xC06D007E, so the same guard the D3D context uses applies here. Returning null
-	// leaves FSpoutFrameSync in its permissive mode, which keeps copies working unsynchronised
-	// rather than stopping them.
+	// process with 0xC06D007E. A null backend refuses access as well as Open.
 	if (!FSpoutModule::IsSpoutDllLoaded())
 	{
 		return nullptr;
 	}
 
+	{
+		FScopeLock Lock(&GFrameSyncBackendPoolMutex);
+		if (GFrameSyncBackendPool.Num() > 0)
+		{
+			TUniquePtr<ISpoutFrameSyncBackend> Recycled = MoveTemp(GFrameSyncBackendPool.Last());
+			GFrameSyncBackendPool.RemoveAt(GFrameSyncBackendPool.Num() - 1);
+			return Recycled;
+		}
+	}
+
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ConstructSdkFrameCount);
 	return MakeUnique<FSpoutSdkFrameSyncBackend>();
 #else
 	return nullptr;
+#endif
+}
+
+void RecycleSpoutSdkFrameSyncBackend(TUniquePtr<ISpoutFrameSyncBackend> Backend)
+{
+#if PLATFORM_WINDOWS
+	if (!Backend || !Backend->IsRecyclable())
+	{
+		return;
+	}
+	FScopeLock Lock(&GFrameSyncBackendPoolMutex);
+	if (GFrameSyncBackendPool.Num() < GFrameSyncBackendPoolCapacity)
+	{
+		GFrameSyncBackendPool.Add(MoveTemp(Backend));
+	}
+#endif
+	// Anything not pooled is destroyed here, as the unique pointer goes out of scope.
+}
+
+void DrainSpoutSdkFrameSyncBackendPool()
+{
+#if PLATFORM_WINDOWS
+	TArray<TUniquePtr<ISpoutFrameSyncBackend>> Doomed;
+	{
+		FScopeLock Lock(&GFrameSyncBackendPoolMutex);
+		Doomed = MoveTemp(GFrameSyncBackendPool);
+		GFrameSyncBackendPool.Reset();
+	}
+	// Destroyed outside the lock: the SDK destructor is not something to hold a mutex across.
+	Doomed.Reset();
+#endif
+}
+
+int32 NumPooledSpoutSdkFrameSyncBackends()
+{
+#if PLATFORM_WINDOWS
+	FScopeLock Lock(&GFrameSyncBackendPoolMutex);
+	return GFrameSyncBackendPool.Num();
+#else
+	return 0;
+#endif
+}
+
+int32 MaxPooledSpoutSdkFrameSyncBackends()
+{
+#if PLATFORM_WINDOWS
+	return GFrameSyncBackendPoolCapacity;
+#else
+	return 0;
 #endif
 }
 
@@ -111,7 +180,10 @@ FSpoutFrameSync::FSpoutFrameSync(TUniquePtr<ISpoutFrameSyncBackend> InBackend)
 
 FSpoutFrameSync::~FSpoutFrameSync()
 {
+	// Close first: a pooled backend must hold no mutex, semaphore or pending frame. Close also
+	// resets the plugin-side state, and Open reinitialises the SDK side for the next name.
 	Close();
+	RecycleSpoutSdkFrameSyncBackend(MoveTemp(Backend));
 }
 
 bool FSpoutFrameSync::Open(const ANSICHAR* Utf8Name)
@@ -155,6 +227,11 @@ bool FSpoutFrameSync::Open(const ANSICHAR* Utf8Name)
 	}
 
 	const bool bMutexCreated = Backend->CreateAccessMutex(Utf8Name);
+	if (!bMutexCreated)
+	{
+		Backend->CloseAccessMutex();
+		return false;
+	}
 
 	// Frame counting is a machine-wide setting a user can turn off in SpoutSettings, so its absence
 	// is not an error. When it is off the peer publishes no count, GetNewFrame() answers "new" for
@@ -221,6 +298,7 @@ bool FSpoutFrameSync::IsOpen() const
 void FSpoutFrameSync::PublishFrame()
 {
 	FScopeLock Lock(&Mutex);
+	if (!Backend || !bOpen) return;
 
 	++PublishedFrameCount;
 
@@ -234,10 +312,9 @@ bool FSpoutFrameSync::ConsumeNewFrame()
 {
 	FScopeLock Lock(&Mutex);
 
-	if (!Backend)
+	if (!Backend || !bOpen)
 	{
-		// Nothing to ask. Copy every frame.
-		return true;
+		return false;
 	}
 
 	// Asking is destructive -- GetNewFrame() decrements the frame semaphore -- so the answer is
@@ -252,9 +329,16 @@ bool FSpoutFrameSync::ConsumeNewFrame()
 	return bFramePending;
 }
 
+void FSpoutFrameSync::RequestCurrentFrame()
+{
+	FScopeLock Lock(&Mutex);
+	if (bOpen) bFramePending = true;
+}
+
 void FSpoutFrameSync::MarkFrameConsumed()
 {
 	FScopeLock Lock(&Mutex);
+	if (bFramePending) ++ConsumedFrameCount;
 	bFramePending = false;
 }
 
@@ -273,25 +357,32 @@ bool FSpoutFrameSync::IsAccessHeld() const
 int32 FSpoutFrameSync::GetAcquireCount() const
 {
 	FScopeLock Lock(&Mutex);
-	return AcquireCount;
+	return static_cast<int32>(FMath::Min<int64>(AcquireCount, MAX_int32));
 }
 
 int32 FSpoutFrameSync::GetReleaseCount() const
 {
 	FScopeLock Lock(&Mutex);
-	return ReleaseCount;
+	return static_cast<int32>(FMath::Min<int64>(ReleaseCount, MAX_int32));
 }
 
 int32 FSpoutFrameSync::GetFailedAcquireCount() const
 {
 	FScopeLock Lock(&Mutex);
-	return FailedAcquireCount;
+	return static_cast<int32>(FMath::Min<int64>(FailedAcquireCount, MAX_int32));
 }
 
 int32 FSpoutFrameSync::GetPublishedFrameCount() const
 {
 	FScopeLock Lock(&Mutex);
-	return PublishedFrameCount;
+	return static_cast<int32>(FMath::Min<int64>(PublishedFrameCount, MAX_int32));
+}
+
+void FSpoutFrameSync::GetStatus(int64& OutFrames, int64& OutAccessMisses) const
+{
+	FScopeLock Lock(&Mutex);
+	OutFrames = PublishedFrameCount + ConsumedFrameCount;
+	OutAccessMisses = FailedAcquireCount;
 }
 
 bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
@@ -309,16 +400,7 @@ bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
 		return false;
 	}
 
-	if (!Backend)
-	{
-		// No protocol available. Permit the copy and count it, so acquires and releases stay
-		// balanced in this mode too.
-		bAccessHeld = true;
-		++AcquireCount;
-		return true;
-	}
-
-	if (!Backend->CheckTextureAccess(SharedTexture))
+	if (!Backend || !bOpen || !Backend->CheckTextureAccess(SharedTexture))
 	{
 		// The wait timed out or failed: this process owns nothing. Not calling AllowTextureAccess
 		// here is the point -- the SDK's own AllowAccess() releases whenever a handle exists, so

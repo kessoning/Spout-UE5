@@ -68,7 +68,8 @@ void FSpoutReceiverOwnership::DetachBinding(const FMaterialBinding& Binding, UTe
 	// Resolved through the weak pointer, so a consumer-supplied material that has already been
 	// collected is simply skipped rather than dereferenced.
 	UMaterialInstanceDynamic* Material = Binding.Material.Get();
-	if (!Material || Binding.TextureParameter.IsNone())
+	if (!Material || Binding.TextureParameter.IsNone() || !Binding.BoundTexture.IsValid()
+		|| Material->K2_GetTextureParameterValue(Binding.TextureParameter) != Binding.BoundTexture.Get())
 	{
 		return;
 	}
@@ -81,9 +82,9 @@ void FSpoutReceiverOwnership::DetachBinding(const FMaterialBinding& Binding, UTe
 	// Rebound to a real texture rather than to null. UMaterialInstance's texture setter ignores a
 	// null value outright -- it only assigns inside `if (Value && ensureMsgf(...))` -- so passing
 	// null leaves the received texture bound and referenced.
-	if (FallbackTexture)
+	if (Binding.PreviousTexture || FallbackTexture)
 	{
-		Material->SetTextureParameterValue(Binding.TextureParameter, FallbackTexture);
+		Material->SetTextureParameterValue(Binding.TextureParameter, Binding.PreviousTexture ? Binding.PreviousTexture.Get() : FallbackTexture);
 		return;
 	}
 
@@ -146,6 +147,16 @@ void FSpoutReceiverOwnership::AdoptTexture(FName ReceiverName, UTexture2D* Textu
 	// reference and nothing else here touches it. No unrooting, no BeginReleaseResource, no
 	// MarkAsGarbage -- the engine's own UTexture teardown does that correctly once it is collected,
 	// and it is the only thing that knows when the render thread has finished with it.
+	for (FMaterialBinding& Binding : Entry.MaterialBindings)
+	{
+		UMaterialInstanceDynamic* Material = Binding.Material.Get();
+		if (Material && Binding.BoundTexture.IsValid()
+			&& Material->K2_GetTextureParameterValue(Binding.TextureParameter) == Binding.BoundTexture.Get())
+		{
+			Material->SetTextureParameterValue(Binding.TextureParameter, Texture);
+			Binding.BoundTexture = Texture;
+		}
+	}
 	Entry.Texture = Texture;
 }
 
@@ -168,7 +179,7 @@ bool FSpoutReceiverOwnership::OwnsTexture(FName ReceiverName, const UTexture2D* 
 	return Entry != nullptr && Entry->Texture == Texture;
 }
 
-void FSpoutReceiverOwnership::RegisterMaterialBinding(FName ReceiverName, UMaterialInstanceDynamic* Material, FName ParameterName, bool bPluginCreated)
+void FSpoutReceiverOwnership::RegisterMaterialBinding(FName ReceiverName, UMaterialInstanceDynamic* Material, FName ParameterName, bool bPluginCreated, UTexture* PreviousTexture)
 {
 	if (!Material || ParameterName.IsNone())
 	{
@@ -179,6 +190,19 @@ void FSpoutReceiverOwnership::RegisterMaterialBinding(FName ReceiverName, UMater
 
 	FEntry& Entry = Entries.FindOrAdd(ReceiverName);
 	PruneDeadBindings(Entry);
+	// A MID/parameter has one current owner across all names. Transfer its original
+	// restore value only when this rebind replaced that owner's image, not a user edit.
+	for (auto& Pair : Entries)
+	{
+		if (Pair.Key == ReceiverName) continue;
+		Pair.Value.MaterialBindings.RemoveAll([&](const FMaterialBinding& Binding)
+		{
+			if (Binding.Material.Get() != Material || Binding.TextureParameter != ParameterName) return false;
+			if (PreviousTexture == Binding.BoundTexture.Get()) PreviousTexture = Binding.PreviousTexture;
+			bPluginCreated |= Binding.OwnedMaterial != nullptr;
+			return true;
+		});
+	}
 
 	// De-duplicated on (material, parameter), so this can be called every tick by every consumer
 	// without the collection growing. The same material through a different parameter name is a
@@ -187,6 +211,9 @@ void FSpoutReceiverOwnership::RegisterMaterialBinding(FName ReceiverName, UMater
 	{
 		if (Existing.Material.Get() == Material && Existing.TextureParameter == ParameterName)
 		{
+			// A manual edit supersedes the old restore value when the consumer binds again.
+			if (PreviousTexture && PreviousTexture != Existing.BoundTexture.Get()) Existing.PreviousTexture = PreviousTexture;
+			Existing.BoundTexture = Entry.Texture.Get();
 			if (bPluginCreated)
 			{
 				// Idempotent: re-asserting plugin ownership is fine. The reverse is deliberately not
@@ -201,10 +228,26 @@ void FSpoutReceiverOwnership::RegisterMaterialBinding(FName ReceiverName, UMater
 	FMaterialBinding Binding;
 	Binding.Material = Material;
 	Binding.TextureParameter = ParameterName;
+	Binding.BoundTexture = Entry.Texture.Get();
+	Binding.PreviousTexture = PreviousTexture;
 	// Weak always; strong only when the plugin created it. A consumer-supplied material is tracked
 	// so close can detach the parameter this plugin set, never so that this plugin keeps it alive.
 	Binding.OwnedMaterial = bPluginCreated ? Material : nullptr;
 	Entry.MaterialBindings.Add(MoveTemp(Binding));
+}
+
+bool FSpoutReceiverOwnership::ReleaseMaterialBinding(FName ReceiverName, UMaterialInstanceDynamic* Material, FName ParameterName)
+{
+	check(IsInGameThread());
+	FScopeLock Lock(&Mutex);
+	FEntry* Entry = Entries.Find(ReceiverName);
+	if (!Entry) return false;
+	return Entry->MaterialBindings.RemoveAll([&](const FMaterialBinding& Binding)
+	{
+		if (Binding.Material.Get() != Material || Binding.TextureParameter != ParameterName) return false;
+		DetachBinding(Binding, ResolveDetachFallbackTexture());
+		return true;
+	}) != 0;
 }
 
 bool FSpoutReceiverOwnership::OwnsMaterial(FName ReceiverName, const UMaterialInstanceDynamic* Material) const
@@ -357,6 +400,7 @@ void FSpoutReceiverOwnership::AddReferencedObjects(FReferenceCollector& Collecto
 
 		for (FMaterialBinding& Binding : Pair.Value.MaterialBindings)
 		{
+			Collector.AddReferencedObject(Binding.PreviousTexture);
 			// Only the materials this plugin created. A consumer's material is held weakly and is
 			// theirs to keep alive.
 			if (Binding.OwnedMaterial)

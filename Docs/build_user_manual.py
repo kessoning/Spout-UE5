@@ -7,11 +7,12 @@
 
 Screenshots: drop PNG/JPG files named exactly as listed in FIGURES into
 Docs/manual_screenshots/ and re-run this script. Any figure whose file exists is
-embedded automatically; any missing figure renders an instruction placeholder.
+embedded automatically; missing optional illustrations are omitted from the reader guide.
 """
 import json
 import os
 import re
+from xml.sax.saxutils import escape
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib import colors
@@ -86,9 +87,9 @@ def S(name, **kw):
 body=S("Body",fontName="Helvetica",fontSize=10,leading=15,spaceAfter=7,textColor=INK)
 bullet=S("Bullet",parent=body,leftIndent=14,bulletIndent=2,spaceAfter=3)
 step=S("Step",parent=body,leftIndent=16,bulletIndent=2,spaceAfter=4)
-h1=S("H1",fontName="Helvetica-Bold",fontSize=18,leading=22,spaceBefore=8,spaceAfter=10,textColor=ACCENT)
-h2=S("H2",fontName="Helvetica-Bold",fontSize=13,leading=17,spaceBefore=12,spaceAfter=6,textColor=INK)
-h3=S("H3",fontName="Helvetica-Bold",fontSize=11,leading=14,spaceBefore=8,spaceAfter=4,textColor=ACCENT2)
+h1=S("H1",fontName="Helvetica-Bold",fontSize=18,leading=22,spaceBefore=8,spaceAfter=10,textColor=ACCENT,keepWithNext=True)
+h2=S("H2",fontName="Helvetica-Bold",fontSize=13,leading=17,spaceBefore=12,spaceAfter=6,textColor=INK,keepWithNext=True)
+h3=S("H3",fontName="Helvetica-Bold",fontSize=11,leading=14,spaceBefore=8,spaceAfter=4,textColor=ACCENT2,keepWithNext=True)
 code=S("Code",fontName="Courier",fontSize=8.5,leading=11.5,textColor=INK,backColor=LIGHT,borderPadding=6,spaceBefore=4,spaceAfter=8)
 note=S("Note",parent=body,fontSize=9.5,leading=14,backColor=colors.HexColor("#fbf6e9"),borderPadding=7,spaceBefore=4,spaceAfter=9)
 figcap=S("FigCap",parent=body,fontSize=9,leading=12,textColor=MUTE,alignment=TA_CENTER,spaceBefore=3,spaceAfter=10)
@@ -139,10 +140,11 @@ FIGURES = {
     ["Double-click the render target asset to open it, or select it and view Details.",
      "Capture the Render Target Format (RGBA8 sRGB recommended) and Size X / Size Y fields."]),
 "SP-009": ("SP-009_receiver-graph.png","Blueprint: receiving a stream and using the outputs.",
-    ["Build the graph: Event Tick (or timer) -&gt; Spout Receiver.",
+    ["Create and store one MID on Begin Play; apply that stored MID to the mesh.",
+     "On Tick (or a timer), call Spout Receiver With Material with the stored MID as Consumer Material.",
      "Set Spout Name to match the sender exactly.",
      "Expand the advanced pins so Optional Output Render Target is visible.",
-     "Show Out Mat, Out Texture, and the return-value pins wired to something (for example a Branch on the return bool, and Out Mat into a Set Material node).",
+     "Show Out Texture and the return bool wired to validation; keep the reusable MID visible as an input.",
      "Capture the whole node with pin names legible."]),
 "SP-010": ("SP-010_material-texture-parameter.png","Material with a Texture Parameter for receiver output.",
     ["Open M_SpoutMaterial (or your own material).",
@@ -181,20 +183,7 @@ def figure(fid):
     if os.path.exists(path):
         img=scaled_image(path,CONTENT_W); img.hAlign="CENTER"
         return [KeepTogether([img, Paragraph("<b>Figure %s.</b> %s"%(fid,cap), figcap)])]
-    header=Paragraph("SCREENSHOT PLACEHOLDER &nbsp; &bull; &nbsp; FIGURE %s"%fid, ph_head)
-    empty=Paragraph("provide file: <font face='Courier' color='#42557d'>Docs/manual_screenshots/%s</font><br/>"
-                    "<font size='8'><i>image not added yet - drop this file in and rebuild</i></font>"%fn, ph_empty)
-    cuetxt="<b>What this figure must show:</b> %s<br/>"%cap + "<br/>".join("&bull;&nbsp; "+s for s in instr)
-    cue=Paragraph(cuetxt, ph_body)
-    inner=Table([[header],[empty],[cue]], colWidths=[CONTENT_W], rowHeights=[0.6*cm, 2.0*cm, None])
-    inner.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(0,0),PHHEAD),("BACKGROUND",(0,1),(0,1),colors.white),("BACKGROUND",(0,2),(0,2),PHBG),
-        ("BOX",(0,0),(-1,-1),0.8,PHEDGE),("LINEBELOW",(0,0),(0,0),0.8,PHEDGE),("LINEBELOW",(0,1),(0,1),0.8,PHEDGE),
-        ("VALIGN",(0,0),(0,0),"MIDDLE"),("VALIGN",(0,1),(0,1),"MIDDLE"),("VALIGN",(0,2),(0,2),"TOP"),
-        ("LEFTPADDING",(0,0),(-1,-1),9),("RIGHTPADDING",(0,0),(-1,-1),9),
-        ("TOPPADDING",(0,0),(0,0),3),("BOTTOMPADDING",(0,0),(0,0),3),
-        ("TOPPADDING",(0,2),(0,2),7),("BOTTOMPADDING",(0,2),(0,2),8)]))
-    return [KeepTogether([inner, Spacer(1,10)])]
+    return []
 
 class ManualDoc(BaseDocTemplate):
     def afterFlowable(self, f):
@@ -227,7 +216,15 @@ def NOTE(t): story.append(Paragraph(t,note))
 def FIG(fid):
     for f in figure(fid): story.append(f)
 def table(data,cw,header=True):
-    t=Table(data,colWidths=cw,repeatRows=1 if header else 0)
+    # Paragraph cells wrap long API names and descriptions inside the declared column widths.
+    wrapped=[]
+    for row_index,row in enumerate(data):
+        is_header=header and row_index==0
+        cell_style=ParagraphStyle('TableHeader' if is_header else 'TableBody',
+            fontName='Helvetica-Bold' if is_header else 'Helvetica',fontSize=8,leading=10,
+            textColor=colors.white if is_header else colors.HexColor('#243044'))
+        wrapped.append([Paragraph(escape(str(cell)),cell_style) for cell in row])
+    t=Table(wrapped,colWidths=cw,repeatRows=1 if header else 0)
     cmds=[("FONT",(0,0),(-1,-1),"Helvetica",8.5),("TEXTCOLOR",(0,0),(-1,-1),INK),("VALIGN",(0,0),(-1,-1),"TOP"),
         ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
         ("LEFTPADDING",(0,0),(-1,-1),7),("RIGHTPADDING",(0,0),(-1,-1),7),
@@ -244,7 +241,7 @@ story.append(Paragraph("Unreal Engine 5 Spout Sender / Receiver Plugin",S("Sub",
 story.append(Spacer(1,4))
 story.append(Paragraph("User Manual",S("Sub2",fontName="Helvetica-Oblique",fontSize=12,textColor=MUTE,alignment=TA_CENTER)))
 story.append(Spacer(1,1.8*cm))
-meta=[["Plugin version",VERSION+"  (beta)"],["Engine target","Unreal Engine 5.3 - 5.8"],
+meta=[["Plugin version",VERSION],["Engine target","Unreal Engine 5.3 - 5.8"],
       ["Module","SpoutPlugin (Runtime)"],["Platform","Windows 64-bit, DirectX 12 RHI"],["Documentation date",DOC_DATE]]
 mt=Table(meta,colWidths=[5*cm,8*cm],hAlign="CENTER")
 mt.setStyle(TableStyle([("FONT",(0,0),(0,-1),"Helvetica-Bold",10),("FONT",(1,0),(1,-1),"Helvetica",10),
@@ -263,15 +260,11 @@ story.append(toc); story.append(PageBreak())
 
 H1("About This Manual")
 P("This manual explains how to use SpoutPlugin in Unreal Engine 5, mainly through Blueprints. It is written for Unreal users and technical artists. You do not need to write C++ to use the plugin. Short function signatures appear only in the Blueprint API reference, as the source of truth for each node's inputs and outputs.")
-H3("About the screenshots")
-P("Because the plugin is driven almost entirely from Blueprint, this manual relies on screenshots of the node graphs and editor settings. Where a screenshot has not been added yet, you will see a labelled placeholder box that names the exact file to provide and describes what the image must show.")
-P("To add the images: capture each screenshot, name it exactly as the placeholder states, and place it in the folder below. Then rebuild the PDF and each placeholder is replaced automatically by the embedded image with a numbered caption.")
-CODE("Docs/manual_screenshots/   (PNG or JPG, named per the placeholder, for example SP-005_sender-viewport-graph.png)")
-NOTE("Figure IDs (SP-001, SP-002, ...) are stable. A full list with capture notes is in Docs/SCREENSHOT_CHECKLIST.md. Optional figures are marked in their capture notes.")
+P("Follow the text steps in this guide. Optional editor illustrations are included when available; maintainer capture instructions are kept separately in Docs/SCREENSHOT_CHECKLIST.md.")
 
 H1("1. What SpoutPlugin Is")
 P("Spout is a Windows technology for sharing GPU textures between real-time applications with no disk or network transfer. One application publishes a texture (a <b>sender</b>) and another reads it live (a <b>receiver</b>). It is widely used to move video between tools such as TouchDesigner, Resolume, Notch, and OBS.")
-P("SpoutPlugin brings Spout into Unreal Engine 5. It sends Unreal's rendered output, or any render target, to other Spout applications, and receives Spout streams back into Unreal as textures and materials. Everything stays on the GPU.")
+P("SpoutPlugin brings Spout into Unreal Engine 5. It sends Unreal's rendered output, or any render target, to other Spout applications, and receives Spout streams back into Unreal as textures and materials. The default transfer path stays on the GPU; CPU receiver fallback uses system memory for readback and upload.")
 P("The technical problem it solves: Spout shares DirectX 11 textures, but modern UE5 runs on the DirectX 12 RHI. The plugin stands up a D3D11-on-D3D12 interop device and bridges UE's D3D12 textures to Spout's D3D11 shared textures. You do not interact with any of this directly - it is why DirectX 12 is required and why the plugin is Windows-only.")
 H3("Typical use cases")
 B("Send an Unreal scene or camera into TouchDesigner for compositing, projection mapping, or LED output.")
@@ -287,7 +280,7 @@ B("Unreal Engine 5 (5.3 through 5.8).")
 B("DirectX 12 RHI enabled. The plugin creates a D3D11-on-D3D12 device and will not initialize on any other RHI; it logs <font face='Courier'>SpoutPlugin requires DX12 RHI.</font> and stops.")
 B("<font face='Courier'>Spout.dll</font>, bundled under <font face='Courier'>ThirdParty/Spout/lib/amd64/</font> and staged to the plugin's <font face='Courier'>Binaries/Win64/</font> at build time.")
 B("For source builds: Visual Studio 2022 with the C++ toolchain and a matching Windows SDK.")
-B("The plugin is project-local. Install it into your project's <font face='Courier'>Plugins/</font> folder, not the engine plugins folder.")
+B("Install into your project's <font face='Courier'>Plugins/</font> folder, the qualified consumer layout. Qualify engine-wide installations separately.")
 P("Both applications sharing a stream must run on the same GPU. Spout's shared-texture model does not span GPUs.")
 
 H1("3. Installation and Project Setup")
@@ -321,7 +314,7 @@ H3("Build the Blueprint")
 STEP(1,"Create a Blueprint Actor (or open the Level Blueprint) and open its Event Graph.")
 STEP(2,"Right-click the canvas, search \"Spout Sender\", and place the node.")
 FIG("SP-017")
-STEP(3,"Connect Event Tick to the Spout Sender execution input. Tick calls it every frame, which keeps the stream alive.")
+STEP(3,"Connect Event Tick to the Spout Sender execution input. Tick calls it every frame, which requests continuous frame updates; registration persists until close.")
 STEP(4,"Set <b>Spout Name</b> to a unique, stable name, for example <font face='Courier'>UnrealViewport</font>. The receiver must use this exact name.")
 STEP(5,"Set <b>Send Texture From</b> to <font face='Courier'>GameViewport</font>.")
 STEP(6,"Leave <b>Texture Render Target 2D</b> empty - it is ignored in this mode.")
@@ -342,7 +335,7 @@ STEP(1,"Create a <font face='Courier'>TextureRenderTarget2D</font> asset. RGBA8 
 FIG("SP-008")
 STEP(2,"Add a <font face='Courier'>SceneCapture2D</font> actor to the level and aim it at what you want to send.")
 STEP(3,"In the SceneCapture2D Details, set <b>Texture Target</b> to the render target from step 1.")
-STEP(4,"Set <b>Capture Source</b> to <b>Final Color (HDR) in Linear Working Color Space</b>. Do not use SceneColor (HDR) - it sends black.")
+STEP(4,"Set <b>Capture Source</b> to <b>Final Color (HDR) in Linear Working Color Space</b>. Qualify other capture sources with known pixels and matching receiver color space.")
 FIG("SP-007")
 H3("Send the render target")
 STEP(5,"On Event Tick or a timer, call <b>Spout Sender</b>.")
@@ -355,13 +348,13 @@ NOTE("If the output is black, the cause is almost always the Capture Source in s
 H1("6. Quick Start: Receiving a Spout Stream")
 P("Receiving pulls a stream from any Spout application into Unreal. You get a live texture, and optionally a ready-to-use material instance and a render target copy.")
 H3("Build the Blueprint")
-STEP(1,"On Event Tick or a timer, place a <b>Spout Receiver</b> node.")
+STEP(1,"Create a Dynamic Material Instance once and store it in a variable. On Tick or a timer, call <b>Spout Receiver With Material</b>.")
 STEP(2,"Set <b>Spout Name</b> to exactly match the sender, including case.")
-STEP(3,"Optionally set <b>Input Material</b> to a base material and <b>Texture Parameter Name</b> to a texture parameter in it (see section 10). Leave both empty if you only need the raw texture.")
+STEP(3,"Pass the stored MID to <b>Consumer Material</b> and set <b>Texture Parameter Name</b>. Leave the material empty for texture-only use.")
 STEP(4,"Optionally expand the advanced pins and set <b>Optional Output Render Target</b> to copy the frame into a render target as well.")
-STEP(5,"Read the outputs: <b>Out Texture</b> (a live UTexture2D), <b>Out Mat</b> (a dynamic material instance), and the return <b>bool</b> (true when the sender was found).")
-STEP(6,"Branch on the return value, and validate Out Mat / Out Texture before using them - the sender may not be running yet.")
-STEP(7,"Apply Out Mat to a mesh (Set Material), or sample Out Texture directly.")
+STEP(5,"Read <b>Out Texture</b> and the return <b>bool</b>. True means accepted and queued, not that pixels have finished copying.")
+STEP(6,"Branch on the return value and validate Out Texture before use; the sender may not be running yet.")
+STEP(7,"Apply your stored MID to a mesh with Set Material, or sample Out Texture directly.")
 FIG("SP-009")
 NOTE("If the receiver returns false or the image is blank, check the name match first, then confirm the sender is actually running and being called continuously.")
 
@@ -370,13 +363,13 @@ P("The sender publishes a UE texture to other Spout applications as a shared GPU
 H3("GameViewport")
 P("Sends the active window backbuffer - what you see in Play mode. The plugin hooks the point in the frame where the window is ready to present, so the capture is correctly timed. The window must be rendering and not minimized. Leave the Texture Render Target 2D pin empty.")
 H3("TextureRenderTarget2D")
-P("Sends a render target you provide. This is the flexible option: drive the render target with a SceneCapture2D, a Draw Material to Render Target call, or any other render-to-texture method. The render target is resolved on the game thread and copied on the render thread.")
+P("Sends a render target you provide. Drive it with SceneCapture2D, Draw Material to Render Target, or another render-to-texture method. The request is accepted on the game thread; its current graphics resource is resolved and copied on the render thread.")
 H3("Stream name rules")
 B("The name must match the receiver exactly, including case.")
 B("Only one sender can own a name at a time. Two senders sharing a name conflict.")
 B("Sender and receiver entries are tracked separately, so a sender and a receiver in the same project may use the same name without interfering.")
 H3("Lifetime")
-P("Call the sender continuously (Tick or timer). Nothing keeps the stream alive between calls. The shared texture is created and resized automatically when the source size or format changes. Call <b>Close Sender</b> to stop a stream; it affects only the sender entry, leaving any receiver with the same name running.")
+P("Call the sender on Tick or a timer to publish changing images. The last image remains advertised while the sender is paused. The shared texture is created and resized when the source size or format changes. Call <b>Close Sender</b> to stop advertising; it affects only the sender entry, leaving any receiver with the same name open.")
 H3("Performance")
 B("Cost scales with resolution. Use a timer when full frame rate is not needed.")
 B("The shared texture and the interop wrap are cached and reused while size and format are stable.")
@@ -406,7 +399,7 @@ NOTE("The <font face='Courier'>OutputRenderTarget</font> field on FSenderStruct 
 
 H1("9. SceneCapture2D and Render Target Notes")
 P("<b>Recommended Capture Source:</b> Final Color (HDR) in Linear Working Color Space.")
-P("<b>Do not use:</b> SceneColor (HDR) in RGB - it produces a black image on the receiver. This is a known limitation, not something tunable through other Capture Source values.")
+P("<b>Other capture sources:</b> SceneColor HDR requires qualification of capture settings, exposure, format and receiver interpretation. The plugin does not tone-map or convert pixels.")
 P("<b>Recommended render target format:</b> RGBA8 sRGB (start here). RGB10A2 is also tested and useful to reduce banding.")
 P("The plugin shares the texture as-is and does not color-correct on send, so color correctness depends on the Capture Source and render target format. The tested combination is Final Color (HDR) in Linear Working Color Space with an RGBA8 sRGB render target.")
 H3("Black-output checklist")
@@ -421,41 +414,52 @@ P("The receiver can hand you a ready-to-use material instance with the live text
 STEP(1,"Create a material with a <b>Texture Parameter</b> (the example content is M_SpoutMaterial). Connect it to Base Color or Emissive.")
 STEP(2,"Name the parameter. If you leave Texture Parameter Name empty on the node, the plugin uses <font face='Courier'>SpoutTexture</font>, so naming the parameter <font face='Courier'>SpoutTexture</font> matches the default.")
 FIG("SP-010")
-STEP(3,"Pass the material as <b>Input Material</b> to the Spout Receiver node, and set <b>Texture Parameter Name</b> to the parameter name.")
-STEP(4,"On the first call with a valid Input Material, the plugin creates a dynamic material instance, binds Out Texture to the parameter, and returns it as <b>Out Mat</b>.")
-STEP(5,"Apply Out Mat to a mesh with a Set Material node.")
+STEP(3,"Create a Dynamic Material Instance from the base material once, and retain it in a Blueprint variable.")
+STEP(4,"Supply that MID to <b>Spout Receiver With Material</b> each tick. The plugin binds the shared received texture without allocating another material.")
+STEP(5,"Use Set Material with your MID. Release Receiver Material Binding detaches just that parameter, preserving later edits; Close Receiver closes the shared session.")
 P("If you do not need a material, leave Input Material empty and use Out Texture directly, or use the Optional Output Render Target.")
 
 H1("11. Blueprint API Reference")
 P("All nodes are static functions on <font face='Courier'>USpoutBPFunctionLibrary</font>, category <font face='Courier'>Spout</font>. The function signatures below are the source of truth; Blueprint pin names match the parameter names.")
 table([["Node","Returns"],
     ["Spout Sender","bool"],["Close Sender","void"],["Spout Receiver","bool"],["Close Receiver","void"],
+    ["Spout Receiver With Material","bool"],["Release Receiver Material Binding","bool"],
+    ["Get Spout Stream Status","FSpoutStreamStatus"],["Get Spout Runtime Status","FSpoutRuntimeStatus"],
     ["Spout Info","bool"],["Get Sender Info","bool"],["Set Max Senders","int32"],
     ["Get Max Senders","void"],["Create Texture Render Target 2D","UTextureRenderTarget2D*"]],
     [9*cm,7*cm])
 SP(8)
 def api(title,sig,desc):
-    story.append(Paragraph(title,h3)); CODE(sig); P(desc)
+    signature=escape(sig).replace("\n","<br/>")
+    story.append(KeepTogether([Paragraph(title,h3), Paragraph(signature,code), Paragraph(desc,body)]))
 api("Spout Sender","bool SpoutSender(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, UTextureRenderTarget2D* TextureRenderTarget2D)",
     "Publishes a texture to Spout; the GPU copy runs on the render thread. Returns true when accepted or queued. Provide the render target when using the TextureRenderTarget2D source. Call continuously. Common mistakes: empty render target with the render-target source; calling once; name mismatch.")
 api("Close Sender","void CloseSender(FName SpoutName)",
     "Removes the named sender and releases its handle. Scoped to senders only, so a receiver using the same name is unaffected.")
 api("Spout Receiver","bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial,\n                   FName TextureParameterName, UMaterialInstanceDynamic*& OutMat,\n                   UTexture2D*& OutTexture,\n                   UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,\n                   ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto)",
-    "Receives a stream. OptionalOutputRenderTarget and Color Space are advanced-display pins. Returns true when the sender exists and a receive was enqueued. Outputs Out Mat and Out Texture, which are OUTPUTS and not ownership: the received texture belongs to the plugin, which keeps it alive while the receiver is open. Keep the values this node returns and pass them back on later calls and to Close Receiver. Texture Parameter Name defaults to SpoutTexture when empty. The frame is only copied when the sender published a new one.")
+    "Receives a stream. OptionalOutputRenderTarget and Color Space are advanced-display pins. Returns true when the sender exists and a receive was enqueued. Outputs Out Mat and Out Texture, which are OUTPUTS and not ownership: the received texture belongs to the plugin, which keeps it alive while the receiver is open. Keep the outputs for Close Receiver. C++ can reuse OutMat by reference; Blueprint callers should use the explicit Consumer Material input of Spout Receiver With Material. Texture Parameter Name defaults to SpoutTexture when empty. Upstream frames are consumed once; optional targets catch up separately, including paused senders and recreated targets.")
 P("<b>Optional Output Render Target.</b> When provided, the received frame is also copied into it. Its pixel format must match the incoming frame's format exactly and it must be single-sampled (no MSAA); no implicit format conversion is performed. A mismatched target is left completely untouched and the mismatch is logged - the call still succeeds and Out Texture still updates - which is what a target that stays black is telling you. Size differences are not a mismatch: the target is resized to match the stream.")
 P("<b>Color Space.</b> Decides how the received bytes are interpreted. <b>Auto</b> (the default) follows the format convention the Spout ecosystem publishes: 8-bit frames decode as sRGB, while 10-bit and 16-bit float frames stay linear. <b>Linear</b> applies no decoding; use it when the sender publishes linear or data values in an 8-bit format, such as a render target created with Force Linear Gamma. <b>sRGB</b> forces decoding, and is only representable for 8-bit frames: requesting it for a 10-bit or float frame fails the call and logs, rather than being silently ignored.")
+api("Spout Receiver With Material", "bool SpoutReceiverWithMaterial(FName SpoutName,\n    UMaterialInstanceDynamic* ConsumerMaterial, FName TextureParameterName,\n    UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget,\n    ESpoutColorSpace ColorSpace)",
+    "Use a stored, caller-owned MID input; this node allocates no material. Null supports texture-only use. Optional targets catch up independently while the sender is paused. Consumers sharing a name must agree on resolved color space; close the session before changing interpretation, or let a source pixel-format change establish a new interpretation.")
+api("Release Receiver Material Binding", "bool ReleaseReceiverMaterialBinding(FName SpoutName,\n    UMaterialInstanceDynamic* ConsumerMaterial, FName TextureParameterName)",
+    "Releases one parameter without closing the receiver. Restores the previous texture or engine default only while the parameter still points to this receiver image. Later manual edits and other sender bindings are preserved.")
 api("Close Receiver","void CloseReceiver(FName SpoutName, UTexture2D*& ReceivedTexture,\n                   UMaterialInstanceDynamic*& ReceivedMaterial)",
-    "Closes the receiver session for that name. There is one session per sender name, so this closes it for every graph receiving it, and it detaches the Spout texture parameter from every material the plugin bound it into. The NAME decides what is released, not the pointers: pass back the Out Texture and Out Mat this plugin gave you and both are cleared; pass anything else and it is left untouched with a warning. This node will not destroy a texture it did not create.")
+    "Closes the receiver session for that name. There is one session per sender name, so this closes it for every graph receiving it, and it restores material parameters still owned by the session, preserving later changes. The NAME decides what is released, not the pointers: pass back the Out Texture and Out Mat this plugin gave you and both are cleared; pass anything else and it is left untouched with a warning. This node will not destroy a texture it did not create.")
 api("Spout Info","bool SpoutInfo(TArray<FSenderStruct>& Senders)",
     "Fills an array with one entry per active sender. Only Name, Width, Height, and bIsAlive are populated. Returns true if the registry was queried.")
 api("Get Sender Info","bool GetSenderInfo(FName SpoutName, FSenderStruct& OutSenderStruct)",
     "Looks up one sender by name; fills Name, Width, Height, bIsAlive. Returns true if it exists.")
 api("Set Max Senders","int32 SetMaxSenders(int32 Max)",
-    "Sets the maximum sender count in Spout's registry and returns the limit actually in effect. Returns 0 when nothing changed, either because the requested value was outside the accepted range (1-1024) or because Spout is unavailable. It does not echo the requested value back.")
+    "Sets the maximum sender count in Spout's registry and returns the limit actually in effect. Returns 0 when the request could not be applied, either because the requested value was outside the accepted range (1-1024) or because Spout is unavailable. It does not echo the requested value back.")
 api("Get Max Senders","void GetMaxSenders(int32& Max)",
     "Reads the current maximum sender count into Max.")
 api("Create Texture Render Target 2D","UTextureRenderTarget2D* CreateTextureRenderTarget2D(int32 Width = 1024, int32 Height = 768,\n                        EPixelFormat Format = PF_B8G8R8A8, bool bForceLinearGamma = true)",
     "Creates a render target at runtime, sets wrap addressing on both axes, and initializes its resource. The result is NOT rooted: keep a reference to it exactly as you would with Create Render Target 2D, or it will be collected. Returns null for invalid dimensions or for a pixel format the plugin cannot share (supported: B8G8R8A8, R8G8B8A8, A2B10G10R10, FloatRGBA). Force Linear Gamma decides what colour space the sender advertises for 8-bit formats: true publishes a plain _UNORM (pair it with Color Space = Linear on the receiver), false publishes _UNORM_SRGB.")
+api("Get Spout Stream Status", "FSpoutStreamStatus GetSpoutStreamStatus(FName SpoutName, ESpoutType Type)",
+    "Returns a game-thread snapshot of the current role's activity, queue admissions/rejections, submitted frames, access misses and native failures. Active can mean awaiting a first frame. Submission does not acknowledge display by another application. Viewport coalescing is outside the non-viewport queue counters; closing a role retires its counters.")
+api("Get Spout Runtime Status", "FSpoutRuntimeStatus GetSpoutRuntimeStatus()",
+    "Returns initialized interop availability, active roles, pending/peak commands, role/queue-cap refusals and estimated image reservations. Allocation refusals have a separate counter. The query does not initialize the device. See Operational limits and status in the appendix for the default budgets.")
 H3("Enums")
 P("<b>ESpoutType:</b> Sender, Receiver. &nbsp; <b>ESpoutSendTextureFrom:</b> GameViewport, TextureRenderTarget2D.")
 P("<b>ESpoutColorSpace:</b> Auto (follow the format convention - 8-bit decodes as sRGB, 10-bit and float stay linear), Linear (no decoding), SRGB (force sRGB decoding; representable for 8-bit formats only, and refused otherwise).")
@@ -511,13 +515,13 @@ H1("15. Limitations")
 B("Windows 64-bit only.")
 B("DirectX 12 RHI required; the plugin refuses to initialize otherwise.")
 B("Both ends must be on the same GPU.")
-B("Tested render target formats are limited to RGBA8 sRGB and RGB10A2.")
+B("Supported formats are BGRA8, RGBA8, RGB10A2 and RGBA16F; color interpretation must match the source.")
 B("No colour conversion on send. The advertised colour space follows the render target's gamma setting; see section 6.")
-B("SceneCapture2D must use Final Color (HDR) in Linear Working Color Space; SceneColor (HDR) is black.")
+B("Final Color (HDR) in Linear Working Color Space is a starting point; qualify Capture Source, exposure and output format together.")
 B("One sender per name.")
 B("Senders and receivers must be called continuously.")
 B("Spout Info and Get Sender Info populate only Name, Width, Height, bIsAlive.")
-B("Marked beta; not guaranteed production-ready without testing. Error handling favors visible, logged failures over silent recovery.")
+B("The descriptor sets IsBetaVersion to false; qualification is still required. Native failures are reported and transient connection failures retry with backoff.")
 
 H1("16. Troubleshooting")
 table([["Symptom","What to do"],
@@ -528,7 +532,7 @@ table([["Symptom","What to do"],
     ["Receiver returns invalid output","Exact name match; check the return value; validate outputs; texture parameter name must match the material (default SpoutTexture)."],
     ["Black texture from SceneCapture2D","Set Capture Source to Final Color (HDR) in Linear Working Color Space."],
     ["Wrong colors or gamma","Adjust render target format and Capture Source; try RGBA8 sRGB first, then RGB10A2."],
-    ["Stream name mismatch","Names are case-sensitive; use Spout Info to read exact names."],
+    ["Stream name mismatch","Use the exact external name from Spout Info. Local FName keys do not distinguish case."],
     ["Multiple senders conflict","Unique, stable names per stream."],
     ["Performance drops","Keep the GPU receiver default; reduce resolution or update rate; prefer timers."],
     ["Crashes or instability","Update GPU drivers; avoid swapping render target resources at runtime; test resolutions; reproduce in a minimal project."],
@@ -536,7 +540,7 @@ table([["Symptom","What to do"],
     ["After an engine upgrade","Clean rebuild (delete the four Binaries/Intermediate folders), regenerate, rebuild."]],
     [4.8*cm,11.2*cm])
 SP(6)
-P("If you can reproduce a missing-DLL failure, the startup log line is a useful diagnostic to keep:")
+P("If you can reproduce a missing-DLL failure, keep the startup log line as a diagnostic.")
 FIG("SP-014")
 
 H1("17. Best Practices")
@@ -545,7 +549,7 @@ B("Start at a low resolution and raise it only when needed.")
 B("Use a timer when full frame rate is not required.")
 B("Always validate Out Mat and Out Texture before applying them.")
 B("Keep the render target format simple: RGBA8 sRGB first.")
-B("For SceneCapture2D sends, always use Final Color (HDR) in Linear Working Color Space.")
+B("For SceneCapture2D sends, start with Final Color (HDR) in Linear Working Color Space and qualify the chosen capture pipeline.")
 B("Test in a minimal project before integrating into production.")
 B("Record the engine version and the plugin binary version together; binaries are version-specific.")
 
@@ -554,6 +558,11 @@ H3("File structure")
 CODE("SpoutPlugin.uplugin\nSource/SpoutPlugin/\n  SpoutPlugin.Build.cs\n  Public/   SpoutBPFunctionLibrary.h, SpoutModule.h\n  Private/  SpoutBPFunctionLibrary.cpp, SpoutModule.cpp,\n            SpoutSender.*, SpoutReceiver.*, SpoutD3DContext.*,\n            SpoutD3DUtils.*, SpoutSenderRegistry.*, SpoutTextureUtils.*\nThirdParty/Spout/   include/, lib/amd64/ (Spout.dll, Spout.lib)\nContent/            example Blueprints, material, render targets\nResources/          Icon128.png\nDocs/               documentation and this manual\nbuild.ps1, build.bat")
 H3("Module and dependency summary")
 P("Single Runtime module <font face='Courier'>SpoutPlugin</font>, Win64 only. Public dependencies: Core, CoreUObject, Engine, RHI, RenderCore. Private: ApplicationCore, Slate, SlateCore, Projects, D3D12RHI, D3D11RHI, plus the engine DX12 and DX11 third-party libraries. Spout.dll is delay-loaded and staged as a runtime dependency.")
+H3("Operational limits and status")
+P("All public APIs require the game thread. Open streams and their last image persist until close. Editor world cleanup closes all plugin streams across PIE worlds; packaged callers must close at their own EndPlay or level boundary. Device removal requires an application restart.")
+P("GetSpoutStreamStatus exposes scheduling, submitted-frame, contention and native-failure counters. GetSpoutRuntimeStatus exposes active roles, pending work and retained-image reservations. These snapshots do not acknowledge delivery by another application.")
+P("Defaults: 32 active roles, 128 pending commands, 4 per stream, 32 consumers per receiver, 8192 pixels per dimension, 128 MiB per frame and 1024 MiB aggregate image reservations. Console variables under r.Spout.Max control admissions. Cancelled commands remain counted until drained. Old outputs retained by callers stay charged until GC/resource release. Caller-owned textures and driver/engine allocations are additional.")
+P("Named and keyed texture access are nonblocking; GPU completion can still stall rendering. Release tools require PowerShell 7.2 or newer. Candidate qualification installs exact ZIP archives into fresh consumer hosts and runs the shipped examples.")
 H3("Third-party attribution")
 B("Spout: http://spout.zeal.co/")
 B("Based on the original repository by zuyi53: https://github.com/zuyi53/Spout-UE5")
@@ -571,12 +580,12 @@ table([["Term","Meaning"],
     ["D3D11-on-D3D12","An interop layer exposing D3D12 resources to D3D11 code (here, Spout)."],
     ["Shared texture","A GPU texture exposed via a shared handle so another process can read it."]],
     [4*cm,12*cm])
-H3("Figure index")
-fig_rows=[["Figure","File","Shows"]]
-for fid in ["SP-001","SP-002","SP-003","SP-004","SP-017","SP-005","SP-018","SP-006","SP-007",
-            "SP-008","SP-009","SP-010","SP-011","SP-012","SP-013","SP-014","SP-015","SP-016"]:
-    fn,cap,_=FIGURES[fid]; fig_rows.append([fid,fn,cap])
-table(fig_rows,[1.8*cm,6.6*cm,7.6*cm])
+available_figures = [(fid, details) for fid, details in FIGURES.items()
+                     if os.path.exists(os.path.join(SHOTS, details[0]))]
+if available_figures:
+    H3("Figure index")
+    table([["Figure", "File", "Shows"]] + [[fid, details[0], details[1]] for fid, details in available_figures],
+          [1.8*cm,6.6*cm,7.6*cm])
 
 frame_body=Frame(2*cm,2*cm,A4[0]-4*cm,A4[1]-3.5*cm,id="body")
 frame_title=Frame(2*cm,2*cm,A4[0]-4*cm,A4[1]-3*cm,id="title")

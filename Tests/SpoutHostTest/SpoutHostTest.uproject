@@ -15,6 +15,10 @@
 	],
 	"Plugins": [
 		{
+			"Name": "AndroidFileServer",
+			"Enabled": false
+		},
+		{
 			"Name": "SpoutPlugin",
 			"Enabled": true,
 			"SupportedTargetPlatforms": [

@@ -27,7 +27,7 @@ must be called while the game window is actively rendering and not minimized.
 2. Place a `SceneCapture2D` actor in the level.
 3. Assign the render target to the SceneCapture2D Texture Target.
 4. Set the SceneCapture2D Capture Source to **Final Color (HDR) in Linear Working Color Space**.
-   Do not use `SceneColor (HDR)` - it produces a black image on the receiver.
+   Qualify other capture sources with known pixels and matching receiver color space.
 5. On Tick or a timer, call Spout Sender with Send Texture From set to
    `TextureRenderTarget2D` and Texture Render Target 2D set to your render target.
 6. View the stream in the external application.

@@ -6,6 +6,7 @@
  * Implements the lifecycle and cancellation model.
  */
 #include "SpoutSession.h"
+#include "SpoutLimits.h"
 
 const TCHAR* LexToString(ESpoutSessionState State)
 {
@@ -52,13 +53,20 @@ FSpoutStreamToken FSpoutSession::OpenStream(FName Name, ESpoutType Type)
 		return FSpoutStreamToken();
 	}
 
-	// Per-stream generations start at 1, so a token can never carry a zero Stream while its Session
-	// is set. Every later Cancel bumps this value and strands the tokens that captured the old one.
-	uint64& Generation = StreamGenerations.FindOrAdd(TPair<FName, ESpoutType>(Name, Type), 1);
+	// New incarnations receive globally unique generations. Removing a closed name cannot
+	// make a token from its previous incarnation current when that name is opened again.
+	const TPair<FName, ESpoutType> Key(Name, Type);
+	uint64* Generation = StreamGenerations.Find(Key);
+	if (!Generation)
+	{
+		if (StreamGenerations.Num() >= SpoutLimits::MaxActiveStreams()) { ++Rejected; return {}; }
+		Generation = &StreamGenerations.Add(Key, NextStreamGeneration++);
+		StreamStatus.Add(Key).bActive = true;
+	}
 
 	FSpoutStreamToken Token;
 	Token.Session = SessionGeneration;
-	Token.Stream = Generation;
+	Token.Stream = *Generation;
 	Token.Name = Name;
 	Token.Type = Type;
 	return Token;
@@ -82,15 +90,25 @@ bool FSpoutSession::IsCurrent(const FSpoutStreamToken& Token) const
 	return Generation != nullptr && *Generation == Token.Stream;
 }
 
+bool FSpoutSession::ExecuteIfCurrent(const FSpoutStreamToken& Token, TFunctionRef<void()> Install)
+{
+	FScopeLock Lock(&Mutex);
+	const uint64* Generation = StreamGenerations.Find(TPair<FName, ESpoutType>(Token.Name, Token.Type));
+	if (State != ESpoutSessionState::Running || Token.Session != SessionGeneration
+		|| !Generation || *Generation != Token.Stream)
+	{
+		return false;
+	}
+	Install();
+	return true;
+}
+
 void FSpoutSession::CancelStream(FName Name, ESpoutType Type)
 {
 	FScopeLock Lock(&Mutex);
 
-	// FindOrAdd rather than Find: cancelling a stream that has no entry yet still has to leave a
-	// generation behind, otherwise a token issued a moment earlier on another thread would compare
-	// equal against a freshly created entry and survive the cancel.
-	uint64& Generation = StreamGenerations.FindOrAdd(TPair<FName, ESpoutType>(Name, Type), 1);
-	++Generation;
+	StreamGenerations.Remove(TPair<FName, ESpoutType>(Name, Type));
+	StreamStatus.Remove(TPair<FName, ESpoutType>(Name, Type));
 }
 
 void FSpoutSession::BeginStop()
@@ -102,6 +120,8 @@ void FSpoutSession::BeginStop()
 	// One increment invalidates every outstanding token for every stream. Work already sitting in
 	// the render-command queue becomes a no-op from this instant, before anything is released.
 	++SessionGeneration;
+	StreamGenerations.Reset();
+	StreamStatus.Reset();
 }
 
 void FSpoutSession::EndStop()
@@ -111,6 +131,7 @@ void FSpoutSession::EndStop()
 	// Safe to forget: every token that referenced these generations also referenced the previous
 	// session generation, which BeginStop already left behind.
 	StreamGenerations.Reset();
+	StreamStatus.Reset();
 	State = ESpoutSessionState::Running;
 }
 
@@ -119,6 +140,65 @@ uint64 FSpoutSession::GetStreamGeneration(FName Name, ESpoutType Type) const
 	FScopeLock Lock(&Mutex);
 	const uint64* Generation = StreamGenerations.Find(TPair<FName, ESpoutType>(Name, Type));
 	return Generation ? *Generation : 0;
+}
+
+int32 FSpoutSession::NumStreams() const
+{
+	FScopeLock Lock(&Mutex);
+	return StreamGenerations.Num();
+}
+
+FSpoutSession::FQueuedWork::~FQueuedWork() { Owner->FinishQueued(Token); }
+
+TSharedPtr<FSpoutSession::FQueuedWork, ESPMode::ThreadSafe> FSpoutSession::TryQueue(const FSpoutStreamToken& Token)
+{
+	FScopeLock Lock(&Mutex);
+	const TPair<FName, ESpoutType> Key(Token.Name, Token.Type);
+	const uint64* Generation = StreamGenerations.Find(Key);
+	if (State != ESpoutSessionState::Running || Token.Session != SessionGeneration || !Generation || *Generation != Token.Stream) return nullptr;
+	FSpoutStreamStatus& Status = StreamStatus.FindChecked(Key);
+	const int32 Count = PendingByGeneration.FindRef(Token.Stream);
+	if (Pending >= SpoutLimits::MaxPendingCommands() || Count >= SpoutLimits::MaxPendingPerStream())
+	{
+		++Rejected; ++Status.QueueRejections; return nullptr;
+	}
+	PendingByGeneration.Add(Token.Stream, Count + 1);
+	++Pending; PeakPending = FMath::Max(PeakPending, Pending);
+	return MakeShareable(new FQueuedWork{this, Token});
+}
+
+void FSpoutSession::MarkQueued(const FSpoutStreamToken& Token)
+{
+	FScopeLock Lock(&Mutex);
+	const TPair<FName, ESpoutType> Key(Token.Name, Token.Type);
+	if (Token.Session == SessionGeneration && StreamGenerations.FindRef(Key) == Token.Stream)
+		++StreamStatus.FindChecked(Key).AcceptedRequests;
+}
+
+void FSpoutSession::FinishQueued(const FSpoutStreamToken& Token)
+{
+	FScopeLock Lock(&Mutex);
+	int32& Count = PendingByGeneration.FindChecked(Token.Stream);
+	if (--Count == 0) PendingByGeneration.Remove(Token.Stream);
+	check(Pending > 0); --Pending;
+}
+
+FSpoutStreamStatus FSpoutSession::GetStreamStatus(FName Name, ESpoutType Type) const
+{
+	FScopeLock Lock(&Mutex);
+	const TPair<FName, ESpoutType> Key(Name, Type);
+	FSpoutStreamStatus Result = StreamStatus.FindRef(Key);
+	Result.PendingCommands = PendingByGeneration.FindRef(StreamGenerations.FindRef(Key));
+	return Result;
+}
+
+FSpoutRuntimeStatus FSpoutSession::GetRuntimeStatus() const
+{
+	FScopeLock Lock(&Mutex);
+	FSpoutRuntimeStatus Result;
+	Result.ActiveStreams = StreamGenerations.Num();
+	Result.PendingCommands = Pending; Result.PeakPendingCommands = PeakPending; Result.RejectedRequests = Rejected;
+	return Result;
 }
 
 void FSpoutPendingSenders::Add(const FSpoutStreamToken& Token)

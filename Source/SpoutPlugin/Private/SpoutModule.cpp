@@ -8,6 +8,11 @@
  * the Blueprint function library's global shutdown path.
  */
 #include "SpoutModule.h"
+
+FString FSpoutModule::GetBuildSourceIdentity()
+{
+	return UTF8_TO_TCHAR(SPOUT_BUILD_SOURCE_ID);
+}
 #include "SpoutBPFunctionLibrary.h"
 
 #include "Interfaces/IPluginManager.h"

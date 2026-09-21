@@ -73,6 +73,8 @@ namespace SpoutHostTest
 
 		/** True when the sender has published at least one new frame since the last poll. */
 		bool PollNewFrame();
+		/** Reads a real pixel on the independent device, under the SDK access mutex. */
+		bool ReadFirstPixel(const FString& SenderName, FColor& Pixel);
 
 		/** The sender's frame count as last read by PollNewFrame. */
 		long GetSenderFrameCount() const;

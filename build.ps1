@@ -1,3 +1,4 @@
+#requires -Version 7.2
 # Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
 # SPDX-License-Identifier: MIT
 # Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
@@ -80,7 +81,9 @@ param(
     [switch] $KeepLogs,
 
     # Skip building and staging; only reopen and validate artifacts that already exist.
-    [switch] $ValidateOnly
+    [switch] $ValidateOnly,
+
+    [ValidateRange(1,86400)][int] $BuildTimeoutSeconds = 5400
 )
 
 # ---------------------------------------------------------------------------------------------
@@ -393,37 +396,6 @@ function Test-BuildToolContention
             $text -match 'Log\.AddFileWriter' -or
             $text -match 'Intermediate[\\/]Build[\\/]BuildRules' -or
             $text -match 'DynamicCompilation\.CompileAssembly')
-}
-
-function Get-EngineBuildId
-{
-    param([string] $EnginePath)
-
-    $buildVersionPath = Join-Path $EnginePath 'Engine\Build\Build.version'
-    if (-not (Test-Path -LiteralPath $buildVersionPath -PathType Leaf))
-    {
-        return $null
-    }
-
-    try
-    {
-        $buildVersion = Get-Content -LiteralPath $buildVersionPath -Raw | ConvertFrom-Json
-        $parts = New-Object System.Collections.ArrayList
-        [void] $parts.Add("$($buildVersion.MajorVersion).$($buildVersion.MinorVersion).$($buildVersion.PatchVersion)")
-        if ($buildVersion.PSObject.Properties.Name -contains 'BuildId' -and $buildVersion.BuildId)
-        {
-            [void] $parts.Add("BuildId=$($buildVersion.BuildId)")
-        }
-        if ($buildVersion.PSObject.Properties.Name -contains 'BranchName' -and $buildVersion.BranchName)
-        {
-            [void] $parts.Add("Branch=$($buildVersion.BranchName)")
-        }
-        return ($parts -join ' ')
-    }
-    catch
-    {
-        return $null
-    }
 }
 
 function Get-GitInfo
@@ -743,7 +715,7 @@ function Test-ReleaseArchive
         }
 
         # Licensing and shipped documentation.
-        foreach ($required in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md'))
+        foreach ($required in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md', 'Docs/BLUEPRINT_API.md', 'Docs/LIMITATIONS.md', 'Docs/RELEASE_READINESS.md'))
         {
             if (-not (Test-Entry $entries $required))
             {
@@ -772,7 +744,7 @@ function Test-ReleaseArchive
             @{ Prefix = 'Artifacts/'; What = 'Track D validation evidence' },
             @{ Prefix = 'Scripts/';   What = 'release and validation tooling' },
             @{ Prefix = 'Tests/';     What = 'the host test project' },
-            @{ Prefix = 'Docs/';      What = 'internal documentation and audit material' },
+            @{ Prefix = 'Docs/Internal/'; What = 'internal documentation and audit material' },
             @{ Prefix = '.git/';      What = 'version-control metadata' },
             @{ Prefix = '.vs/';       What = 'IDE scratch' }
         )
@@ -798,6 +770,27 @@ function Test-ReleaseArchive
         if ($trackRecords.Count -gt 0)
         {
             [void] $problems.Add("contains internal track records: $(($trackRecords | Select-Object -First 3) -join ', ')")
+        }
+
+        $publicDocs = @('Docs/BLUEPRINT_API.md','Docs/LIMITATIONS.md','Docs/RELEASE_READINESS.md')
+        foreach ($entry in $entries) {
+            if ($entry.StartsWith("$PluginName/Docs/") -and $publicDocs -notcontains $entry.Substring($PluginName.Length+1)) {
+                [void]$problems.Add("unapproved documentation file: $entry")
+            }
+        }
+        # Resolve every local Markdown link against the actual archive, not the checkout.
+        foreach ($document in @('README.md','THIRD_PARTY_NOTICES.md') + $publicDocs) {
+            $docEntry = $archive.Entries | Where-Object { $_.FullName.Replace('\','/') -eq "$PluginName/$document" } | Select-Object -First 1
+            if (-not $docEntry) { continue }
+            $docReader = [IO.StreamReader]::new($docEntry.Open())
+            try { $docText = $docReader.ReadToEnd() } finally { $docReader.Dispose() }
+            foreach ($link in [regex]::Matches($docText, '\]\(([^)]+)\)')) {
+                $target = $link.Groups[1].Value.Trim('<','>')
+                if ($target -match '^(https?:|mailto:|#)') { continue }
+                $resolved = [Uri]::new([Uri]"https://archive.invalid/$PluginName/$document", $target)
+                $entryPath = [Uri]::UnescapeDataString($resolved.AbsolutePath).TrimStart('/')
+                if ($entries -notcontains $entryPath) { [void]$problems.Add("broken local documentation link in ${document}: $target") }
+            }
         }
 
         # Local absolute paths must not be published inside the shipped documentation.
@@ -895,6 +888,26 @@ try
     }
 
     $PluginRoot = (Resolve-Path -LiteralPath $PluginRoot).Path
+    Import-Module (Join-Path $PSScriptRoot 'Scripts/TrackD.psm1') -Force
+    $buildInputs = Get-TrackDSourceIdentity -Root $PluginRoot
+    $buildGit = Get-TrackDGitInfo -RepoRoot $PluginRoot
+    $buildDescriptorPath = Join-Path $PluginRoot 'SpoutPlugin.uplugin'
+    if (-not $ValidateOnly) {
+        # BuildPlugin first copies its entire input directory into a host project. Giving it the
+        # checkout can copy generated evidence (including output inside the checkout) recursively.
+        $cleanBuildSource = Join-Path ([IO.Path]::GetFullPath($OutputRoot)) ('source-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $cleanBuildSource -Force | Out-Null
+        foreach ($item in @('Source','ThirdParty','Content','Config','Shaders','Resources','SpoutPlugin.uplugin','README.md','LICENSE','THIRD_PARTY_NOTICES.md')) {
+            $sourcePath = Join-Path $PluginRoot $item
+            if (Test-Path -LiteralPath $sourcePath) { Copy-Item -LiteralPath $sourcePath -Destination $cleanBuildSource -Recurse -Force }
+        }
+        New-Item -ItemType Directory -Path (Join-Path $cleanBuildSource 'Docs') -Force | Out-Null
+        foreach ($document in @('BLUEPRINT_API.md','LIMITATIONS.md','RELEASE_READINESS.md')) {
+            Copy-Item -LiteralPath (Join-Path $PluginRoot "Docs/$document") -Destination (Join-Path $cleanBuildSource 'Docs') -Force
+        }
+        if ((Get-TrackDSourceIdentity -Root $cleanBuildSource).Digest -ne $buildInputs.Digest) { throw 'Clean build input copy differs from the plugin sources' }
+        $buildDescriptorPath = Join-Path $cleanBuildSource 'SpoutPlugin.uplugin'
+    }
 
     if ($FullMatrix)
     {
@@ -974,14 +987,16 @@ try
     foreach ($version in $requestedVersions)
     {
         $enginePath = Resolve-EnginePath -Version $version -ExplicitMap $explicitEnginePaths
-        $runUat = Join-Path $enginePath 'Engine\Build\BatchFiles\RunUAT.bat'
-        $found = Test-Path -LiteralPath $runUat -PathType Leaf
+        $engineFacts = Get-TrackDEngineFacts -Version $version -EnginePath $enginePath
+        $runUat = $engineFacts.RunUAT
+        $found = $engineFacts.Found
 
         [void] $enginePlan.Add([ordered] @{
             Version    = $version
             EnginePath = $enginePath
             RunUAT     = $runUat
             Found      = $found
+            Facts      = $engineFacts
         })
 
         if ($found)
@@ -1021,7 +1036,8 @@ try
         $engineResult = [ordered] @{
             EngineVersion        = $version
             EnginePath           = $engine.EnginePath
-            EngineBuildId        = (Get-EngineBuildId $engine.EnginePath)
+            EngineBuildId        = $engine.Facts.BuildId
+            EngineMetadata       = $engine.Facts
             TargetConfigurations = $TargetConfigurations
             UatCommand           = $null
             UatExitCode          = $null
@@ -1050,12 +1066,13 @@ try
                 {
                     Remove-Item -LiteralPath $zip -Force
                 }
+                if (Test-Path -LiteralPath "$zip.identity.json") { Remove-Item -LiteralPath "$zip.identity.json" -Force }
             }
 
             # --- UAT -------------------------------------------------------------------------
             $uatArgs = @(
                 'BuildPlugin',
-                "-Plugin=$descriptorPath",
+                "-Plugin=$buildDescriptorPath",
                 "-Package=$buildOut",
                 '-TargetPlatforms=Win64',
                 '-Rocket'
@@ -1080,12 +1097,14 @@ try
                     Write-Step "Waited ${settled}s for the previous engine's UnrealBuildTool to release its shared state"
                 }
 
-                # Tee so the log is retained and the console still shows progress. $LASTEXITCODE is
-                # captured immediately: a nonzero UAT status is a release failure, not a warning.
-                & $engine.RunUAT @uatArgs 2>&1 | Tee-Object -FilePath $uatLog | Out-Null
-                $uatExit = $LASTEXITCODE
+                # Use the same bounded process-tree termination and live log drain as the
+                # consumer checks. A blocked child or inherited pipe cannot hang a release.
+                $uatProcess = Invoke-TrackDProcess -FilePath $engine.RunUAT -ArgumentList $uatArgs -StdOutPath $uatLog -TimeoutSeconds $BuildTimeoutSeconds
+                $engineResult.UatProcess = $uatProcess
+                $uatExit = $uatProcess.ExitCode
 
-                if ($uatExit -eq 0) { break }
+                if ($uatExit -eq 0 -and -not $uatProcess.TimedOut -and -not $uatProcess.CleanupFailed) { break }
+                if ($uatProcess.TimedOut -or $uatProcess.CleanupFailed) { $uatExit = -1; break }
 
                 # Contention is retried; anything else fails the release on its first attempt.
                 if ($attempt -le 3 -and (Test-BuildToolContention $uatLog))
@@ -1249,6 +1268,18 @@ try
             Write-Step "Validating $($candidate.Label) archive: $($candidate.Path)"
             $validation = Test-ReleaseArchive -ZipPath $candidate.Path -ExpectedVersion $releaseVersion `
                 -ExpectedSpoutDllHash $repoSpoutDllHash -Label $candidate.Label
+            try {
+                if ($ValidateOnly) { $identity = Read-TrackDArtifactIdentity -Artifact $candidate.Path }
+                else {
+                    if ((Get-TrackDSourceIdentity -Root $PluginRoot).Digest -ne $buildInputs.Digest) { throw 'Plugin build inputs changed during release construction' }
+                    $identity = New-TrackDArtifactIdentity -Artifact $candidate.Path -SourceIdentity $buildInputs -Engine (Get-TrackDEngineFacts -Version $version -EnginePath $engine.EnginePath) -Configuration ($TargetConfigurations -join ',') -Git $buildGit
+                }
+                if ($identity.Engine.Version -ne $version) { throw 'Archive belongs to a different engine build' }
+                $validation['BuildIdentity'] = $identity
+            } catch {
+                $validation.Valid = $false
+                $validation.Problems += "Artifact provenance: $($_.Exception.Message)"
+            }
 
             [void] $artifacts.Add($validation)
 
@@ -1338,7 +1369,7 @@ finally
             $manifestCommit = $null
             $manifestBranch = $null
             $manifestDirty = $null
-            if ($gitInfoForManifest)
+            if ($gitInfoForManifest -and -not $ValidateOnly)
             {
                 $manifestCommit = $gitInfoForManifest.Commit
                 $manifestBranch = $gitInfoForManifest.Branch
@@ -1359,6 +1390,7 @@ finally
                 Commit               = $manifestCommit
                 Branch               = $manifestBranch
                 WorkingTreeDirty     = $manifestDirty
+                ValidationInvocationGit = $gitInfoForManifest
                 DeclaredEngines      = $DeclaredEngineVersions
                 RequestedEngines     = $requestedVersions
                 OmittedEngines       = $omittedVersions
@@ -1386,7 +1418,7 @@ finally
                 $manifest['PartialReleaseNotice'] = "PARTIAL RELEASE. Only these engine versions were built and validated: $($manifest.RequestedEngines -join ', '). Omitted: $($manifest.OmittedEngines -join ', ')."
             }
 
-            $script:ManifestPath = Join-Path $manifestDir ("release-manifest-{0}.json" -f (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss'))
+            $script:ManifestPath = Join-Path $manifestDir ("release-manifest-{0}-{1}.json" -f (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss'), [Guid]::NewGuid().ToString('N'))
             $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $script:ManifestPath -Encoding UTF8
 
             Write-Host ''

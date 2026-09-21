@@ -20,6 +20,7 @@
 #include "SpoutSession.h"
 #include "SpoutTextureUtils.h"
 #include "SpoutValidation.h"
+#include "SpoutLimits.h"
 
 #include "Materials/MaterialInstanceDynamic.h"
 #include "RHI.h"
@@ -38,6 +39,8 @@ namespace
 	class FSpoutShutdownSteps final : public ISpoutLifecycleSteps
 	{
 	public:
+		explicit FSpoutShutdownSteps(bool bInRestart = true) : bRestart(bInRestart) {}
+		bool bRestart;
 		virtual void EnterStoppingState() override
 		{
 			FSpoutSession::Get().BeginStop();
@@ -76,19 +79,22 @@ namespace
 
 		virtual void LeaveStoppingState() override
 		{
-			FSpoutSession::Get().EndStop();
+			if (bRestart) FSpoutSession::Get().EndStop();
 		}
 	};
 }
 
 void USpoutBPFunctionLibrary::EnsureSpoutInitialized()
 {
-	// Safe to call from any thread; guarded by an internal mutex.
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return;
+	// Public entry points and UObject work are game-thread only.
+	if (!FSpoutSession::Get().IsRunning()) return;
 	FSpoutD3DContext::Get().InitializeIfNeeded();
 }
 
 void USpoutBPFunctionLibrary::CloseAllStreams()
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return;
 	// Order matters: flushing rendering commands FIRST and removing the back-buffer delegate
 	// afterwards lets the render thread pass the flush marker and invoke the still-subscribed
 	// delegate, which enqueues more module-owned work behind the very flush the teardown was
@@ -99,7 +105,9 @@ void USpoutBPFunctionLibrary::CloseAllStreams()
 
 void USpoutBPFunctionLibrary::GlobalShutdown()
 {
-	CloseAllStreams();
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return;
+	FSpoutShutdownSteps Steps(false);
+	SpoutLifecycle::RunOrderedShutdown(Steps);
 	FSpoutD3DContext::Get().Shutdown();
 
 	// After the context is gone nothing else will use the tracker, and the UObject system is still
@@ -109,6 +117,7 @@ void USpoutBPFunctionLibrary::GlobalShutdown()
 
 int32 USpoutBPFunctionLibrary::SetMaxSenders(int32 Max)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return 0;
 	// Returns the EFFECTIVE limit, not the requested one. Echoing the argument back unconditionally
 	// would leave a caller unable to tell a successful change from a rejected value, or from Spout
 	// being entirely unavailable.
@@ -154,6 +163,7 @@ int32 USpoutBPFunctionLibrary::SetMaxSenders(int32 Max)
 
 UTextureRenderTarget2D* USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(int32 Width, int32 Height, EPixelFormat Format, bool bForceLinearGamma)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return nullptr;
 	// Dimension and format validation lives in CreateRenderTarget2D, at the allocation site, so it
 	// cannot be bypassed by an internal caller. Returns null on rejection.
 	return SpoutTextureUtils::CreateRenderTarget2D(Width, Height, Format, bForceLinearGamma);
@@ -161,16 +171,36 @@ UTextureRenderTarget2D* USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(int
 
 bool USpoutBPFunctionLibrary::SpoutSender(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, UTextureRenderTarget2D* TextureRenderTarget2D)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
 	return FSpoutSender::Send(SpoutName, SendTextureFrom, TextureRenderTarget2D);
 }
 
 void USpoutBPFunctionLibrary::CloseSender(FName SpoutName)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return;
 	FSpoutSender::Close(SpoutName);
+}
+
+bool USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial,
+	FName TextureParameterName, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace)
+{
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
+	check(IsInGameThread());
+	return FSpoutReceiver::Receive(SpoutName, nullptr, TextureParameterName, ConsumerMaterial, OutTexture, OptionalOutputRenderTarget, ColorSpace);
+}
+
+bool USpoutBPFunctionLibrary::ReleaseReceiverMaterialBinding(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial, FName TextureParameterName)
+{
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
+	check(IsInGameThread());
+	FSpoutReceiverOwnership* Ownership = FSpoutReceiverOwnership::Peek();
+	return Ownership && Ownership->ReleaseMaterialBinding(SpoutName, ConsumerMaterial,
+		TextureParameterName.IsNone() ? FName(TEXT("SpoutTexture")) : TextureParameterName);
 }
 
 void USpoutBPFunctionLibrary::CloseReceiver(FName SpoutName, UTexture2D*& ReceivedTexture, UMaterialInstanceDynamic*& ReceivedMaterial)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return;
 	// The plugin's own record for SpoutName decides what may be released, and nothing is destroyed
 	// by hand at all.
 	//
@@ -245,6 +275,7 @@ bool USpoutBPFunctionLibrary::SpoutReceiver(
 	ESpoutColorSpace ColorSpace
 )
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
 	// OptionalOutputRenderTarget is copied into by both the GPU and CPU receive paths when it is
 	// compatible with the incoming frame, and excluded and left untouched when it is not.
 	return FSpoutReceiver::Receive(SpoutName, InputMaterial, TextureParameterName, OutMat, OutTexture, OptionalOutputRenderTarget, ColorSpace);
@@ -252,6 +283,7 @@ bool USpoutBPFunctionLibrary::SpoutReceiver(
 
 bool USpoutBPFunctionLibrary::SpoutInfo(TArray<FSenderStruct>& Senders)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
 	// Reset first, on every path. A failed enumeration must never leave the caller holding the
 	// previous frame's list.
 	Senders.Reset();
@@ -370,6 +402,7 @@ bool USpoutBPFunctionLibrary::SpoutInfo(TArray<FSenderStruct>& Senders)
 
 bool USpoutBPFunctionLibrary::GetSenderInfo(FName SpoutName, FSenderStruct& OutSenderStruct)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
 	// Reset before anything can fail. Otherwise a failed lookup leaves the caller's struct holding
 	// whatever it contained before, which reads as a live sender.
 	OutSenderStruct = FSenderStruct();
@@ -423,6 +456,7 @@ bool USpoutBPFunctionLibrary::GetSenderInfo(FName SpoutName, FSenderStruct& OutS
 
 void USpoutBPFunctionLibrary::GetMaxSenders(int32& Max)
 {
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return;
 	// Initialize before anything can fail: leaving the caller's previous value in place would make
 	// a failed query indistinguishable from a successful one. Zero is not a valid limit, so it
 	// unambiguously means "could not be read".
@@ -436,4 +470,29 @@ void USpoutBPFunctionLibrary::GetMaxSenders(int32& Max)
 		FScopeLock SpoutLock(&Context.GetSpoutMutex());
 		Max = SenderNames->GetMaxSenders();
 	}
+}
+
+FSpoutStreamStatus USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName SpoutName, ESpoutType Type)
+{
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return {};
+	FSpoutStreamStatus Result = FSpoutSession::Get().GetStreamStatus(SpoutName, Type);
+	if (const auto Entry = FSpoutSenderRegistry::Get().Find(SpoutName, Type))
+	{
+		Entry->FrameSync.GetStatus(Result.FramesSubmitted, Result.AccessMisses);
+		Result.bHasFrame = Result.FramesSubmitted > 0;
+		Result.NativeFailures = Entry->NativeFailures.load();
+		Result.LastNativeError = Entry->LastNativeError.load();
+	}
+	return Result;
+}
+
+FSpoutRuntimeStatus USpoutBPFunctionLibrary::GetSpoutRuntimeStatus()
+{
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return {};
+	FSpoutRuntimeStatus Result = FSpoutSession::Get().GetRuntimeStatus();
+	Result.bInteropAvailable = FSpoutD3DContext::Get().IsSpoutAvailable();
+	Result.EstimatedRetainedBytes = SpoutLimits::RetainedBytes();
+	Result.PeakEstimatedRetainedBytes = SpoutLimits::PeakRetainedBytes();
+	Result.RejectedAllocations = SpoutLimits::RejectedAllocations();
+	return Result;
 }

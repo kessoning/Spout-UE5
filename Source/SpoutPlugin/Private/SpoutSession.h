@@ -15,7 +15,7 @@
  *   - A SESSION generation, bumped whenever a global teardown begins. Bumping it invalidates every
  *     token that any stream ever issued, which is what makes "no late work after teardown" a
  *     property of the data rather than a property of the ordering.
- *   - A per-stream generation, bumped when one stream is closed individually. This is what lets
+ *   - A unique generation for each new stream incarnation, retired on close. This is what lets
  *     CloseSender('A') cancel A's queued send without disturbing B.
  *   - A Running/Stopping state, so work cannot be queued INTO a teardown that is already underway.
  *
@@ -63,9 +63,9 @@ struct FSpoutStreamToken
 /**
  * Process-wide lifecycle and cancellation authority.
  *
- * Every method is safe to call from any thread; the whole object is guarded by one mutex, and the
- * operations are short map lookups. IsCurrent() is on the render thread's per-frame path, so it
- * does one lookup and nothing else.
+ * Methods serialize on one mutex. IsCurrent is a short lookup. ExecuteIfCurrent also
+ * holds that mutex through native sender installation; cancellation waits for it to
+ * finish before removing the entry, so installation cannot resurrect a closed stream.
  */
 class FSpoutSession
 {
@@ -93,13 +93,29 @@ public:
 	 */
 	FSpoutStreamToken OpenStream(FName Name, ESpoutType Type);
 
+	// A captured lease counts cancelled commands until their render lambdas are destroyed.
+	struct FQueuedWork
+	{
+		FSpoutSession* Owner;
+		FSpoutStreamToken Token;
+		~FQueuedWork();
+	};
+	TSharedPtr<FQueuedWork, ESPMode::ThreadSafe> TryQueue(const FSpoutStreamToken& Token);
+	void MarkQueued(const FSpoutStreamToken& Token);
+	FSpoutStreamStatus GetStreamStatus(FName Name, ESpoutType Type) const;
+	FSpoutRuntimeStatus GetRuntimeStatus() const;
+
 	/** True when the token still describes live, uncancelled work in the current session. */
 	bool IsCurrent(const FSpoutStreamToken& Token) const;
+
+	/** Serialize native entry installation with cancellation. Callback must not call
+	 * session methods, flush render work, or wait for the game thread. */
+	bool ExecuteIfCurrent(const FSpoutStreamToken& Token, TFunctionRef<void()> Install);
 
 	/**
 	 * Cancels outstanding work for one stream.
 	 *
-	 * Bumps only that stream's generation, so other streams -- including a stream with the same
+	 * Retires only that stream's generation, so other streams -- including a stream with the same
 	 * FName in the other role -- are untouched. A later OpenStream for the same name gets a fresh
 	 * token and works normally, so a close/reopen cycle is not a permanent kill.
 	 */
@@ -113,6 +129,7 @@ public:
 
 	/** Current generation for one stream, or 0 if it has never been opened. Diagnostics and tests. */
 	uint64 GetStreamGeneration(FName Name, ESpoutType Type) const;
+	int32 NumStreams() const;
 
 private:
 	mutable FCriticalSection Mutex;
@@ -120,8 +137,15 @@ private:
 
 	// Starts at 1 so that 0 unambiguously means "no token".
 	uint64 SessionGeneration = 1;
+	uint64 NextStreamGeneration = 1;
 
 	TMap<TPair<FName, ESpoutType>, uint64> StreamGenerations;
+	TMap<TPair<FName, ESpoutType>, FSpoutStreamStatus> StreamStatus;
+	TMap<uint64, int32> PendingByGeneration;
+	int32 Pending = 0;
+	int32 PeakPending = 0;
+	int64 Rejected = 0;
+	void FinishQueued(const FSpoutStreamToken& Token);
 };
 
 /**

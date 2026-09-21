@@ -35,21 +35,24 @@
  *    whenever a handle exists, even when the matching CheckAccess() timed out and this process
  *    never owned the mutex.
  *
- * Threading: every method is safe to call from any thread. The object is guarded by one
- * critical section, which is the innermost of the plugin's own locks. The lock order for the
- * whole plugin, outermost first, is:
+ * State is guarded by a critical section. Acquired Windows mutex ownership must be
+ * released on the same thread; production access scopes run entirely on the render thread.
+ * The resource/copy lock order, outermost first, is:
  *
  *      FSpoutD3DContext::D3D11ContextMutex      (D3D11 immediate context and the wrap caches)
  *   -> FSpoutSharedSender::ResourceMutex        (one entry's shared texture, handle and wraps)
  *   -> FSpoutD3DContext::SpoutMutex             (Spout's process-global sender-name list)
  *   -> FSpoutFrameSync::Mutex                   (this object)
- *   -> the Spout named access mutex             (cross-process, bounded by the SDK's own timeout)
+ *   -> the Spout named access mutex             (cross-process, nonblocking try-acquire)
  *
  * A path may enter at any level and skip levels; it may never take an outer lock while holding
  * an inner one. Both the send and the receive path take the named access mutex from inside the
  * D3D11 context mutex, never the other way round, so the two cannot invert on each other. The
- * cross-process wait is bounded by the SDK (a few frames), so a peer that stops responding costs
- * a skipped frame, never a hang.
+ * named-mutex attempt does not wait on a busy peer. Once access is acquired, the caller
+ * waits for GPU completion before releasing it. This GPU wait can stall the render thread.
+ * Keyed resources also use nonblocking acquisition and key zero, matching the Spout protocol.
+ * Sender installation additionally holds Session::Mutex before the registry/resource locks;
+ * it never flushes RHI work or waits for the game thread while holding that mutex.
  *
  * FSpoutD3DContext::InitMutex is outside this order entirely: it guards only device creation and
  * teardown and is never held while any of the above is taken.
@@ -110,10 +113,42 @@ public:
 	 * frame from a new one, and copying is the option that cannot drop data.
 	 */
 	virtual bool GetNewFrame() = 0;
+
+	/**
+	 * True when a closed backend may be handed to a later stream instead of being destroyed.
+	 * Only the SDK backend says yes: constructing spoutFrameCount queries the display mode and
+	 * timer resolution, which is comparatively expensive, and a stream restart constructs two of
+	 * them. Every other backend keeps this default and is destroyed rather than pooled.
+	 */
+	virtual bool IsRecyclable() const { return false; }
 };
 
-/** Builds the real SDK-backed implementation, or null when Spout is unavailable in this process. */
+/**
+ * Builds the real SDK-backed implementation, or null when Spout is unavailable in this process.
+ *
+ * Prefers a recycled backend: a backend returned by RecycleSpoutSdkFrameSyncBackend holds no
+ * mutex, semaphore or name state that Open does not reinitialise, so reuse is invisible to the
+ * protocol and skips the expensive SDK construction on every stream restart.
+ */
 TUniquePtr<ISpoutFrameSyncBackend> MakeSpoutSdkFrameSyncBackend();
+
+/**
+ * Returns a closed backend to the process-wide pool, or destroys it when the pool is full or the
+ * backend is not recyclable. Called by FSpoutFrameSync after Close; never with an open backend.
+ */
+void RecycleSpoutSdkFrameSyncBackend(TUniquePtr<ISpoutFrameSyncBackend> Backend);
+
+/**
+ * Destroys every pooled backend. Must run before Spout.dll is unloaded, because the SDK
+ * destructor is in that DLL; FSpoutD3DContext::Shutdown calls it.
+ */
+void DrainSpoutSdkFrameSyncBackendPool();
+
+/** Number of pooled backends. Diagnostics and tests. */
+int32 NumPooledSpoutSdkFrameSyncBackends();
+
+/** Upper bound on pooled backends; anything beyond it is destroyed on recycle. */
+int32 MaxPooledSpoutSdkFrameSyncBackends();
 
 /**
  * One stream's half of the Spout access and frame-count protocol.
@@ -134,10 +169,7 @@ TUniquePtr<ISpoutFrameSyncBackend> MakeSpoutSdkFrameSyncBackend();
  * lands makes a failed access attempt cost latency instead of a frame, so skipped frames stay
  * consistent.
  *
- * With no backend (Spout unavailable, or a non-Windows build) every operation degrades to
- * "permit the work": access is granted, frames are reported new, publication is a no-op. That
- * matches the SDK's own no-mutex behaviour and keeps a missing DLL from silently stopping
- * every copy in the plugin.
+ * With no backend, or after a failed Open, access and frame publication are refused.
  */
 class FSpoutFrameSync
 {
@@ -172,7 +204,7 @@ public:
 
 	bool IsOpen() const;
 
-	/** Sender: publishes the frame just copied. Call after the copy is submitted, before releasing access. */
+	/** Sender: call after GPU copy completion, before releasing access. */
 	void PublishFrame();
 
 	/**
@@ -188,6 +220,9 @@ public:
 	/** Receiver: records that the pending frame was actually copied. */
 	void MarkFrameConsumed();
 
+	/** Request the current image again after a native source generation changes. */
+	void RequestCurrentFrame();
+
 	/** True while a frame reported new by the peer has not yet been copied. Diagnostics and tests. */
 	bool HasPendingFrame() const;
 
@@ -199,6 +234,7 @@ public:
 	int32 GetReleaseCount() const;
 	int32 GetFailedAcquireCount() const;
 	int32 GetPublishedFrameCount() const;
+	void GetStatus(int64& OutFrames, int64& OutAccessMisses) const;
 
 private:
 	friend class FSpoutTextureAccessScope;
@@ -218,10 +254,11 @@ private:
 	bool bAccessHeld = false;
 	bool bFramePending = false;
 
-	int32 AcquireCount = 0;
-	int32 ReleaseCount = 0;
-	int32 FailedAcquireCount = 0;
-	int32 PublishedFrameCount = 0;
+	int64 AcquireCount = 0;
+	int64 ReleaseCount = 0;
+	int64 FailedAcquireCount = 0;
+	int64 PublishedFrameCount = 0;
+	int64 ConsumedFrameCount = 0;
 };
 
 /**

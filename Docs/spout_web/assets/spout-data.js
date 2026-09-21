@@ -157,7 +157,7 @@ SPOUT.api = [
     sig: "int32 SetMaxSenders(int32 Max)",
     purpose: "Sets the maximum sender count in Spout's registry and returns the limit actually in effect afterwards. It does not echo the requested value back.",
     inputs: [["Max", "int32 — the new maximum sender count (accepted range 1–1024)."]],
-    returns: "The limit actually in effect afterwards. 0 when nothing was changed: the requested value was outside 1–1024 or Spout is unavailable.",
+    returns: "The limit actually in effect afterwards. 0 when the request could not be applied: the requested value was outside 1–1024 or Spout is unavailable.",
     when: "When you need more (or fewer) concurrent senders than Spout's default registry size."
   },
   {
@@ -208,9 +208,9 @@ SPOUT.troubleshooting = [
   { symptom: "Spout.dll missing", fix: "Copy it from ThirdParty/Spout/lib/amd64/ to Binaries/Win64/, or rebuild from source so it is staged automatically." },
   { symptom: "Sender not visible externally", fix: "Confirm DirectX 12; confirm the sender is called continuously; one sender per name; for GameViewport the window must be actively rendering and not minimized." },
   { symptom: "Receiver returns invalid output", fix: "Exact name match; check the return value; validate outputs; the texture parameter name must match the material." },
-  { symptom: "Black texture from SceneCapture2D", fix: "Set Capture Source to Final Color (HDR) in Linear Working Color Space. SceneColor (HDR) sends black." },
+  { symptom: "Black texture from SceneCapture2D", fix: "Set Capture Source to Final Color (HDR) in Linear Working Color Space. Capture Source, exposure and output format must be qualified together." },
   { symptom: "Wrong colors or gamma", fix: "Adjust render target format and Capture Source; try RGBA8 sRGB first, then RGB10A2." },
-  { symptom: "Stream name mismatch", fix: "Names are case-sensitive. Use Spout Info to read the exact sender names." },
+  { symptom: "Stream name mismatch", fix: "Use the exact external name from Spout Info. Local FName keys do not distinguish case." },
   { symptom: "Multiple senders conflict", fix: "Use unique, stable names per stream. Only one sender can own a name at a time." },
   { symptom: "Performance drops", fix: "Keep the GPU receiver at its default; reduce resolution or update rate; prefer timers over Tick." },
   { symptom: "Crashes or instability", fix: "Update GPU drivers; avoid swapping render target resources at runtime; test resolutions; reproduce in a minimal project." },
@@ -229,13 +229,13 @@ SPOUT.limitations = [
   "Windows 64-bit only.",
   "DirectX 12 RHI required; the plugin refuses to initialize otherwise.",
   "Both ends must be on the same GPU.",
-  "Tested render target formats are limited to RGBA8 sRGB and RGB10A2.",
+  "Supported formats are BGRA8, RGBA8, RGB10A2 and RGBA16F; color interpretation must match the source.",
   "No colour conversion on send; the advertised colour space follows the render target's Force Linear Gamma setting.",
-  "SceneCapture2D must use Final Color (HDR) in Linear Working Color Space; SceneColor (HDR) is black.",
+  "Final Color (HDR) in Linear Working Color Space is a starting point; qualify Capture Source, exposure and output format together.",
   "One sender per name.",
   "Senders and receivers must be called continuously.",
   "Spout Info and Get Sender Info populate only Name, Width, Height, bIsAlive.",
-  "Marked beta; not guaranteed production-ready without testing. Error handling favors visible, logged failures over silent recovery."
+  "The descriptor sets IsBetaVersion to false; qualification is still required. Native failures are reported and transient connection failures retry with backoff."
 ];
 
 /* ---- Best practices ---- */
@@ -245,7 +245,7 @@ SPOUT.bestPractices = [
   "Use a timer when full frame rate is not required.",
   "Always validate Out Mat and Out Texture before applying them.",
   "Keep the render target format simple: RGBA8 sRGB first.",
-  "For SceneCapture2D sends, always use Final Color (HDR) in Linear Working Color Space.",
+  "For SceneCapture2D sends, start with Final Color (HDR) in Linear Working Color Space and qualify the chosen capture pipeline.",
   "Test in a minimal project before integrating into production.",
   "Record the engine version and the plugin binary version together; binaries are version-specific."
 ];

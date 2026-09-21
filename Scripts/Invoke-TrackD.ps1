@@ -191,6 +191,10 @@ $selfTestProblems = New-Object System.Collections.ArrayList
 # second; found at stage 5 it costs an hour of packaging first.
 $pipelineScripts = @(
     'TrackD.psm1',
+    'TrackD.Identity.ps1',
+    'Test-TrackDIdentity.ps1',
+    'Test-TrackDDelivery.ps1',
+    'Merge-PackagedHostManifests.ps1',
     'Invoke-AutomationTests.ps1',
     'Invoke-PackagedHostMatrix.ps1',
     'Invoke-PerformanceBaselines.ps1',
@@ -269,6 +273,11 @@ foreach ($contentionProblem in (Test-TrackDBuildContentionClassifier))
 }
 
 # build.ps1 and build.bat are release inputs; their absence is a release failure, not a warning.
+try {
+    $identityTest = Invoke-TrackDProcess -FilePath 'pwsh' -ArgumentList @('-NoProfile','-File',(Join-Path $PSScriptRoot 'Test-TrackDIdentity.ps1'),'-EvidenceRoot',(Join-Path $context.Manifests 'identity-selftest')) -StdOutPath (Join-Path $context.Manifests 'identity-selftest.log') -TimeoutSeconds 60 -WorkingDirectory $RepoRoot
+    if ($identityTest.ExitCode -ne 0 -or $identityTest.TimedOut) { [void] $selfTestProblems.Add('evidence identity regression checks failed') }
+} catch { [void] $selfTestProblems.Add("evidence identity regression checks: $($_.Exception.Message)") }
+
 foreach ($required in @('build.ps1', 'build.bat', 'SpoutPlugin.uplugin', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md'))
 {
     if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $required) -PathType Leaf))
@@ -334,7 +343,7 @@ $automationArgs = @(
     '-EngineRoot', $EngineRoot,
     '-WorkRoot', $WorkRoot
 )
-foreach ($pair in $EnginePaths) { $automationArgs += @('-EnginePaths', $pair) }
+if ($EnginePaths.Count) { $automationArgs += @('-EnginePaths', ($EnginePaths -join ',')) }
 
 [void] (Invoke-Stage -Name 'Automation' -ScriptPath (Join-Path $PSScriptRoot 'Invoke-AutomationTests.ps1') `
     -Arguments $automationArgs -TimeoutSeconds 14400)
@@ -360,7 +369,7 @@ else
 {
     $buildPluginArgs += @('-Partial', '-EngineVersions', ($packagingEngines -join ','))
 }
-foreach ($pair in $EnginePaths) { $buildPluginArgs += @('-EnginePaths', $pair) }
+if ($EnginePaths.Count) { $buildPluginArgs += @('-EnginePaths', ($EnginePaths -join ',')) }
 
 if ($runPackaging)
 {
@@ -433,7 +442,7 @@ $packagedHostArgs = @(
     '-WorkRoot', $WorkRoot,
     '-LaunchRepeats', $LaunchRepeats
 )
-foreach ($pair in $EnginePaths) { $packagedHostArgs += @('-EnginePaths', $pair) }
+if ($EnginePaths.Count) { $packagedHostArgs += @('-EnginePaths', ($EnginePaths -join ',')) }
 
 [void] (Invoke-Stage -Name 'Packaged-host matrix' -ScriptPath (Join-Path $PSScriptRoot 'Invoke-PackagedHostMatrix.ps1') `
     -Arguments $packagedHostArgs -Skip:(-not $runPackaging) `
@@ -452,7 +461,7 @@ $performanceArgs = @(
     '-Seconds', $PerformanceSeconds
 )
 if ($Trace) { $performanceArgs += '-Trace' }
-foreach ($pair in $EnginePaths) { $performanceArgs += @('-EnginePaths', $pair) }
+if ($EnginePaths.Count) { $performanceArgs += @('-EnginePaths', ($EnginePaths -join ',')) }
 
 [void] (Invoke-Stage -Name 'Performance baselines' -ScriptPath (Join-Path $PSScriptRoot 'Invoke-PerformanceBaselines.ps1') `
     -Arguments $performanceArgs -Skip:(-not $Performance) `
@@ -469,7 +478,7 @@ $cleanSourceArgs = @(
     '-EngineRoot', $EngineRoot,
     '-WorkRoot', $WorkRoot
 )
-foreach ($pair in $EnginePaths) { $cleanSourceArgs += @('-EnginePaths', $pair) }
+if ($EnginePaths.Count) { $cleanSourceArgs += @('-EnginePaths', ($EnginePaths -join ',')) }
 
 [void] (Invoke-Stage -Name 'Clean-source copy' -ScriptPath (Join-Path $PSScriptRoot 'New-CleanSourceCopy.ps1') `
     -Arguments $cleanSourceArgs -Skip:(-not $CleanSource) `

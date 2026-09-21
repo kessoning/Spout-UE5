@@ -156,7 +156,7 @@ $supportedPixelFormats = @([regex]::Matches($formatPolicyText, 'PF_[A-Za-z0-9]+'
 $blueprintFunctions = @()
 $ufunctionMatches = [regex]::Matches(
     $bpHeaderText,
-    'UFUNCTION\s*\(\s*BlueprintCallable[\s\S]*?\)\s*[\r\n]+\s*static\s+[A-Za-z0-9_:\*&<>\s]+?\b(\w+)\s*\(')
+    'UFUNCTION\s*\(\s*Blueprint(?:Callable|Pure)[\s\S]*?\)\s*[\r\n]+\s*static\s+[A-Za-z0-9_:\*&<>\s]+?\b(\w+)\s*\(')
 foreach ($match in $ufunctionMatches)
 {
     $blueprintFunctions += $match.Groups[1].Value
@@ -318,6 +318,7 @@ $publicDocRelatives = @(
     'Docs/CHANGELOG.md',
     'Docs/INSTALLATION.md',
     'Docs/LIMITATIONS.md',
+    'Docs/RELEASE_READINESS.md',
     'Docs/PACKAGING_AND_DISTRIBUTION.md',
     'Docs/QUICK_START.md',
     'Docs/RECEIVER.md',
@@ -366,6 +367,8 @@ foreach ($file in $websiteFiles)
 $correctionRecords = @('CHANGELOG.md', 'UPDATES_NOTES.md', 'Docs/CHANGELOG.md')
 
 $forbiddenClaims = @(
+    @{ Name = 'P2Persistence'; Pattern = '(?i)Nothing keeps the stream alive|stream is not kept alive between calls|costs nothing on the frames'; Finding = 'AUD-024'; Detail = 'registration persists and idle calls still have a cost' }
+    @{ Name = 'P2BetaMetadata'; Pattern = '(?i)Marked beta|VERSION\+"  \(beta\)"'; Finding = 'AUD-024'; Detail = 'descriptor beta metadata must match current implementation' }
     @{ Name = 'ddcompiler';           Pattern = 'd3dcompiler';                                    Finding = 'AUD-012'; Detail = 'the d3dcompiler dependency was removed from SpoutPlugin.Build.cs' }
     @{ Name = 'EnsureGammaResources'; Pattern = 'EnsureGammaResources';                           Finding = 'AUD-012'; Detail = 'the sender gamma pipeline was removed' }
     @{ Name = 'SanitizeGamma';        Pattern = 'SanitizeGamma';                                  Finding = 'AUD-012'; Detail = 'the sender gamma pipeline was removed' }

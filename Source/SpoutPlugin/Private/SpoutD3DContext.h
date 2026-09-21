@@ -10,6 +10,7 @@
 
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
+#include "SpoutLogThrottle.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -20,6 +21,8 @@
 #include <wrl/client.h>
 #include "SpoutDX/SpoutDirectX.h"
 #include "SpoutDX/SpoutSenderNames.h"
+#include "SpoutSdkSafety.h"
+#include "SpoutGpuCompletion.h"
 #include "Windows/HideWindowsPlatformTypes.h"
 #ifdef GetNextSibling
 #undef GetNextSibling
@@ -44,7 +47,11 @@ public:
 	ID3D11On12Device* GetD3D11On12Device() const;
 	ID3D12CommandQueue* GetD3D12CommandQueue() const;
 
-	spoutSenderNames* GetSenderNames() const;
+	/** Call only while holding D3D11ContextMutex. */
+	bool PrepareGpuCompletion();
+	HRESULT WaitForGpuCompletion();
+
+	FSpoutSafeSenderNames* GetSenderNames() const;
 	spoutDirectX* GetSpoutDirectX() const;
 
 	FCriticalSection& GetD3D11ContextMutex();
@@ -62,6 +69,9 @@ private:
 	FCriticalSection D3D11ContextMutex;
 	// Protects Spout global registry access.
 	FCriticalSection SpoutMutex;
+	bool bUnsupportedRHI = false;
+	double NextInitializeAttempt = 0;
+	FSpoutLogThrottle InitializationLogThrottle;
 
 #if PLATFORM_WINDOWS
 	Microsoft::WRL::ComPtr<ID3D11Device> D3D11Device;
@@ -69,7 +79,9 @@ private:
 	Microsoft::WRL::ComPtr<ID3D11On12Device> D3D11On12Device;
 	Microsoft::WRL::ComPtr<ID3D12CommandQueue> D3D12CommandQueue;
 	// Owned Spout helpers; lifetime matches D3D device lifetime.
-	TUniquePtr<spoutSenderNames> SpoutSenderNames;
+	TUniquePtr<FSpoutSafeSenderNames> SpoutSenderNames;
 	TUniquePtr<spoutDirectX> SpoutDirectX;
+	FSpoutGpuCompletion GpuCompletion;
+	FSpoutLogThrottle GpuFailureLogThrottle;
 #endif
 };

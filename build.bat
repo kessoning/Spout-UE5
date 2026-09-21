@@ -73,13 +73,13 @@ goto :collect
 
 :run
 
-REM Prefer PowerShell 7+ when it is installed. Windows PowerShell 5.1 is a supported fallback;
-REM build.ps1 avoids optional modules precisely so both editions work.
+REM The release and validation tools require PowerShell 7.2 or newer.
 where pwsh >nul 2>&1
 if %ERRORLEVEL%==0 (
     pwsh -NoProfile -ExecutionPolicy Bypass -File "%SPOUT_TARGET%" %SPOUT_ARGS%
 ) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%SPOUT_TARGET%" %SPOUT_ARGS%
+    echo PowerShell 7.2 or newer is required. Install it from https://aka.ms/powershell-release?tag=stable
+    exit /b 2
 )
 
 REM Capture first: any command in between, including pause, resets ERRORLEVEL.

@@ -1,3 +1,4 @@
+#requires -Version 7.2
 # Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
 # SPDX-License-Identifier: MIT
 # Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
@@ -336,7 +337,12 @@ function Get-TrackDEngineFacts
         Found         = (Test-Path -LiteralPath $runUat -PathType Leaf)
         EditorPresent = (Test-Path -LiteralPath $editorCmd -PathType Leaf)
         BuildId       = $null
+        BuildIdSource = $null
         BuildVersion  = $null
+        BuildVersionData = $null
+        BuildVersionSHA256 = $null
+        EditorModulesSHA256 = $null
+        MetadataWarnings = @()
     }
 
     $buildVersionPath = Join-Path $EnginePath 'Engine\Build\Build.version'
@@ -344,16 +350,43 @@ function Get-TrackDEngineFacts
     {
         try
         {
-            $buildVersion = Get-Content -LiteralPath $buildVersionPath -Raw | ConvertFrom-Json
+            $buildVersionBytes = [IO.File]::ReadAllBytes($buildVersionPath)
+            $facts.BuildVersionSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($buildVersionBytes)).ToLowerInvariant()
+            $buildVersion = [Text.Encoding]::UTF8.GetString($buildVersionBytes).TrimStart([char]0xfeff) | ConvertFrom-Json
+            $facts.BuildVersionData = $buildVersion
             $facts.BuildVersion = "$($buildVersion.MajorVersion).$($buildVersion.MinorVersion).$($buildVersion.PatchVersion)"
             if ($buildVersion.PSObject.Properties.Name -contains 'BuildId')
             {
                 $facts.BuildId = [string] $buildVersion.BuildId
+                $facts.BuildIdSource = 'Engine/Build/Build.version'
             }
         }
-        catch { }
+        catch { $facts.MetadataWarnings += "Cannot read Build.version metadata: $($_.Exception.Message)" }
     }
 
+    # Installed engines keep the editor module compatibility ID in UnrealEditor.modules,
+    # not Build.version. Preserve the full version/changelist separately from this ID.
+    $modulesPath = Join-Path $EnginePath 'Engine/Binaries/Win64/UnrealEditor.modules'
+    if (Test-Path -LiteralPath $modulesPath -PathType Leaf)
+    {
+        try
+        {
+            $modulesBytes = [IO.File]::ReadAllBytes($modulesPath)
+            $facts.EditorModulesSHA256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($modulesBytes)).ToLowerInvariant()
+            $modules = [Text.Encoding]::UTF8.GetString($modulesBytes).TrimStart([char]0xfeff) | ConvertFrom-Json
+            if ($modules.PSObject.Properties.Name -contains 'BuildId' -and -not [string]::IsNullOrWhiteSpace([string]$modules.BuildId))
+            {
+                $facts.BuildId = [string]$modules.BuildId
+                $facts.BuildIdSource = 'Engine/Binaries/Win64/UnrealEditor.modules'
+            }
+        }
+        catch { $facts.MetadataWarnings += "Cannot read UnrealEditor.modules metadata: $($_.Exception.Message)" }
+    }
+
+    if ($facts.BuildVersion -and "$($facts.BuildVersionData.MajorVersion).$($facts.BuildVersionData.MinorVersion)" -ne $Version)
+    {
+        throw "Engine version mismatch: requested UE $Version, but '$EnginePath' reports UE $($facts.BuildVersion). Correct the engine path override."
+    }
     return $facts
 }
 
@@ -644,7 +677,7 @@ function New-TrackDRunContext
 
     if ([string]::IsNullOrWhiteSpace($RunId))
     {
-        $RunId = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+        $RunId = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N')
     }
     if ([string]::IsNullOrWhiteSpace($ArtifactsRoot))
     {
@@ -652,6 +685,7 @@ function New-TrackDRunContext
     }
 
     $runRoot = Join-Path $ArtifactsRoot $RunId
+    if (Test-Path -LiteralPath $runRoot) { throw "Run directory already exists: $runRoot. Use a new RunId to prevent stale stage evidence." }
 
     $context = [ordered] @{
         RepoRoot          = $RepoRoot
@@ -729,8 +763,12 @@ function Invoke-TrackDProcess
         [string[]] $ArgumentList = @(),
         [Parameter(Mandatory)][string] $StdOutPath,
         [string] $StdErrPath,
-        [int] $TimeoutSeconds = 900,
-        [string] $WorkingDirectory
+        [ValidateRange(1,86400)][int] $TimeoutSeconds = 900,
+        [string] $WorkingDirectory,
+        [ValidateRange(0,60)][int] $TerminationTimeoutSeconds = 15,
+        [ValidateRange(0,60)][int] $OutputDrainTimeoutSeconds = 5,
+        # Test seam for a refused termination. Production uses tree kill with a parent fallback.
+        [scriptblock] $TerminateProcess
     )
 
     if ([string]::IsNullOrWhiteSpace($StdErrPath))
@@ -756,21 +794,19 @@ function Invoke-TrackDProcess
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $false
+    $psi.CreateNoWindow = $true
     if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
 
-    $stdOutBuilder = New-Object System.Text.StringBuilder
-    $stdErrBuilder = New-Object System.Text.StringBuilder
-
-    $outEvent = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -MessageData $stdOutBuilder -Action {
-        if ($null -ne $EventArgs.Data) { [void] $Event.MessageData.AppendLine($EventArgs.Data) }
-    }
-    $errEvent = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -MessageData $stdErrBuilder -Action {
-        if ($null -ne $EventArgs.Data) { [void] $Event.MessageData.AppendLine($EventArgs.Data) }
-    }
+    if (-not ('TrackDProcessOutput' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'TrackD.ProcessOutput.cs') }
+    $cancellation = [Threading.CancellationTokenSource]::new()
+    $terminationErrors = @()
+    $outputDrainTimedOut = $false
+    $cleanupFailed = $false
+    $processId = $null
+    $exitCode = $null
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $timedOut = $false
@@ -778,8 +814,9 @@ function Invoke-TrackDProcess
     try
     {
         [void] $process.Start()
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
+        $processId = $process.Id
+        $outputTask = [TrackDProcessOutput]::Drain($process.StandardOutput, [IO.Path]::GetFullPath($StdOutPath), $cancellation.Token)
+        $errorTask = [TrackDProcessOutput]::Drain($process.StandardError, [IO.Path]::GetFullPath($StdErrPath), $cancellation.Token)
 
         if (-not $process.WaitForExit($TimeoutSeconds * 1000))
         {
@@ -787,41 +824,45 @@ function Invoke-TrackDProcess
             try
             {
                 # Entire tree: Unreal's children keep running (and keep the log open) otherwise.
-                $process.Kill($true)
+                if ($TerminateProcess) { & $TerminateProcess $process } else { $process.Kill($true) }
             }
             catch
             {
-                try { $process.Kill() } catch { }
+                $terminationErrors += $_.Exception.Message
+                if (-not $TerminateProcess) {
+                    try { $process.Kill() } catch { $terminationErrors += $_.Exception.Message }
+                }
             }
             # Give the kill a moment to land so the captured output is complete.
-            [void] $process.WaitForExit(15000)
+            $cleanupFailed = -not $process.WaitForExit($TerminationTimeoutSeconds * 1000)
         }
 
-        # Flush the async readers before reading the builders.
-        $process.WaitForExit()
+        # An orphan can keep a pipe open even after its parent exits. Drain under its own
+        # deadline; neither process termination nor redirected output may wait forever.
+        $drain = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($outputTask,$errorTask))
+        try { $outputDrainTimedOut = -not $drain.Wait($OutputDrainTimeoutSeconds * 1000) }
+        catch { $cleanupFailed = $true; $terminationErrors += "Output capture: $($_.Exception.Message)" }
+        if ($outputDrainTimedOut) { $cleanupFailed = $true; $cancellation.Cancel() }
+        if ($process.HasExited -and -not $cleanupFailed) { $exitCode = $process.ExitCode }
     }
     finally
     {
         $stopwatch.Stop()
-        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
-        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
-        Remove-Job -Id $outEvent.Id -Force -ErrorAction SilentlyContinue
-        Remove-Job -Id $errEvent.Id -Force -ErrorAction SilentlyContinue
+        $cancellation.Cancel()
+        $process.Dispose()
+        $cancellation.Dispose()
     }
-
-    Set-Content -LiteralPath $StdOutPath -Value $stdOutBuilder.ToString() -Encoding UTF8
-    Set-Content -LiteralPath $StdErrPath -Value $stdErrBuilder.ToString() -Encoding UTF8
-
-    $exitCode = $null
-    try { $exitCode = $process.ExitCode } catch { $exitCode = $null }
-    $process.Dispose()
 
     return [ordered] @{
         FilePath        = $FilePath
         Arguments       = $ArgumentList
         CommandLine     = ('"{0}" {1}' -f $FilePath, ($ArgumentList -join ' '))
         ExitCode        = $exitCode
+        ProcessId       = $processId
         TimedOut        = $timedOut
+        CleanupFailed   = $cleanupFailed
+        OutputDrainTimedOut = $outputDrainTimedOut
+        TerminationErrors = $terminationErrors
         DurationSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
         StdOutPath      = $StdOutPath
         StdErrPath      = $StdErrPath
@@ -918,6 +959,7 @@ function New-TrackDHostStaging
         [Parameter(Mandatory)][string] $RepoRoot,
         [Parameter(Mandatory)][string] $StagingProjectDir,
         [string] $PluginSourceRoot,
+		[switch] $PreservePluginBuildOutput,
         [switch] $Force
     )
 
@@ -942,6 +984,14 @@ function New-TrackDHostStaging
 
     $pluginDest = Join-Path $StagingProjectDir ('Plugins\{0}' -f $script:PluginName)
     New-Item -ItemType Directory -Path $pluginDest -Force | Out-Null
+	if ($PreservePluginBuildOutput) {
+		[void](Copy-TrackDTree -Source $PluginSourceRoot -Destination $pluginDest -ExcludeDirectories @())
+		foreach ($file in Get-ChildItem -LiteralPath $PluginSourceRoot -Recurse -File) {
+			$relative = [IO.Path]::GetRelativePath($PluginSourceRoot,$file.FullName)
+			if ((Get-TrackDSha256 $file.FullName) -ne (Get-TrackDSha256 (Join-Path $pluginDest $relative))) { throw "Archive installation differs: $relative" }
+		}
+		return [ordered]@{ProjectDir=$StagingProjectDir;ProjectFile=(Join-Path $StagingProjectDir "$($script:HostProjectName).uproject");PluginDir=$pluginDest;PluginSourceRoot=$PluginSourceRoot;MissingItems=@();ExactArchiveInstallation=$true}
+	}
 
     # Exactly what a consuming project needs, and nothing else. Notably absent: Tests/, Scripts/,
     # Docs/ and Artifacts/ - internal material that must never travel with the plugin.
@@ -2223,7 +2273,21 @@ function Get-TrackDExitCode
     return 0
 }
 
+. (Join-Path $PSScriptRoot 'TrackD.Identity.ps1')
+. (Join-Path $PSScriptRoot 'TrackD.Performance.ps1')
+
 Export-ModuleMember -Function @(
+    'Test-TrackDPerformanceResult',
+    'Expand-TrackDArchiveCandidate',
+    'Build-TrackDControlHost',
+    'Build-TrackDNativeTools',
+    'Get-TrackDSourceIdentity',
+    'New-TrackDEvidenceRun',
+    'New-TrackDLaunchIdentity',
+    'Get-TrackDIdentityArguments',
+    'Test-TrackDLaunchIdentity',
+    'New-TrackDArtifactIdentity',
+    'Read-TrackDArtifactIdentity',
     'Get-TrackDDeclaredEngineVersions',
     'Get-TrackDPluginName',
     'Get-TrackDHostProjectName',

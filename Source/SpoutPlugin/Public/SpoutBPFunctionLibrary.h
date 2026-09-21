@@ -114,12 +114,52 @@ struct FSenderStruct
 	FSenderStruct() {}
 };
 
+/** Snapshot counters never turn an accepted request into a synchronous pixel-delivery guarantee. */
+USTRUCT(BlueprintType)
+struct FSpoutStreamStatus
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly, Category="Spout") bool bActive = false;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") bool bHasFrame = false;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int32 PendingCommands = 0;
+	/** Enqueued non-viewport commands; excludes requests refused after queue reservation. */
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 AcceptedRequests = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 QueueRejections = 0;
+	/** Published sender frames, or receiver copies whose CPU upload may still be queued. */
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 FramesSubmitted = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 AccessMisses = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 NativeFailures = 0;
+	/** Zero after recovery; signed Windows HRESULT on a native failure. */
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 LastNativeError = 0;
+};
+
+USTRUCT(BlueprintType)
+struct FSpoutRuntimeStatus
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly, Category="Spout") bool bInteropAvailable = false;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int32 ActiveStreams = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int32 PendingCommands = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int32 PeakPendingCommands = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 RejectedRequests = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 EstimatedRetainedBytes = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 PeakEstimatedRetainedBytes = 0;
+	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 RejectedAllocations = 0;
+};
+
+/** All public entry points require the game thread, including C++ callers. */
 UCLASS(ClassGroup = Spout, Blueprintable)
 class SPOUTPLUGIN_API USpoutBPFunctionLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 
 public:
+	/** Snapshot of one active name/role; closed or undiscovered names return bActive=false. */
+	UFUNCTION(BlueprintPure, Category="Spout")
+	static FSpoutStreamStatus GetSpoutStreamStatus(FName SpoutName, ESpoutType Type);
+	/** Process-wide queue/resource admission counters, without initializing the graphics bridge. */
+	UFUNCTION(BlueprintPure, Category="Spout")
+	static FSpoutRuntimeStatus GetSpoutRuntimeStatus();
 	// --- Lifecycle ---
 	
 	// Called by module shutdown; drains render commands and releases D3D/Spout resources.
@@ -136,7 +176,9 @@ public:
 
 	/**
 	 * Sends a texture to Spout asynchronously via the render thread.
-	 * This does NOT stall the game thread, but does perform a GPU copy on the render thread.
+	 * Call on the game thread. GPU copies and completion waits run on the render thread;
+	 * queueing or closing a stream can wait for an in-progress native installation.
+	 * Sources must have one mip, one array slice and one sample; disable Auto Generate Mips.
 	 *
 	 * Returns whether the request was ACCEPTED, not whether it succeeded. The copy, the creation of
 	 * the shared texture, and the registration of the name with Spout all happen afterwards on the
@@ -171,26 +213,33 @@ public:
 	 * sender was found, its advertised size/format/handle passed validation, the destination texture
 	 * exists, and the copy was queued for the render thread. False means the request was rejected on
 	 * the game thread and nothing was queued.
+	 * Call on the game thread. Opening the native handle and validating its actual
+	 * descriptor happen later on the render thread; an incompatible or vanished
+	 * source is skipped and logged even when this call returned true.
 	 *
 	 * OutMat and OutTexture are outputs, not ownership. The received texture belongs to the plugin,
 	 * which keeps it alive for as long as the receiver is open and releases it on Close Receiver or
 	 * on session shutdown; Out Texture is the plugin's texture, handed to you to use. Keep the
-	 * values this node returns and pass them back on subsequent calls and to Close Receiver. They
+	 * values this node returns and pass them to Close Receiver. C++ callers can reuse OutMat;
+	 * Blueprint callers should use Spout Receiver With Material with a stored MID input. Outputs
 	 * are only ever assigned on success and are deliberately left untouched on failure, so a
 	 * temporary sender dropout does not orphan anything.
 	 *
 	 * There is one receiver session per sender name. Every graph receiving the same name shares that
 	 * one received texture — but each gets its OWN material instance, created from its OWN Input
 	 * Material. A graph is never handed another graph's material because the sender names matched.
-	 * Close Receiver on that name closes the shared session for every graph using it, and detaches
-	 * the Spout texture parameter from every material the plugin bound it into.
+	 * Close Receiver on that name closes the shared session for every graph using it, and restores
+	 * material parameters that still reference this session's texture. Later user edits are preserved.
 	 *
-	 * OptionalOutputRenderTarget must match the incoming frame's pixel format and be single-sampled.
+	 * OptionalOutputRenderTarget must match the incoming pixel format, be single-sampled,
+	 * and have Auto Generate Mips disabled.
 	 * A mismatched target is left completely untouched and the mismatch is logged; the call still
 	 * succeeds and OutTexture still updates. Size mismatches are resolved by resizing the target.
 	 *
-	 * The frame is only copied when the sender has actually published a new one, so a sender running
-	 * slower than this graph's tick costs nothing on the frames in between.
+	 * Upstream frames are consumed once. Each optional target catches up independently, including
+	 * late attachment and resource recreation while the sender is paused. Unchanged targets skip copies.
+	 * Consumers sharing a name must agree on resolved color space; conflicting calls fail until close
+	 * or a source pixel-format change creates a new interpretation.
 	 *
 	 * ColorSpace decides how the received bytes are interpreted:
 	 *   - Auto (default): 8-bit frames decode as sRGB, 10-bit and 16-bit float frames stay linear.
@@ -201,7 +250,7 @@ public:
 	 *     frame fails the call and logs, rather than being silently ignored.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Spout", meta = (AdvancedDisplay = "5",
-		ToolTip = "Queues a Spout receive on the render thread. Returns true when the sender was found and the copy was queued - not that the copy completed. Only copies when the sender published a new frame. Keep Out Texture / Out Mat and pass them to Close Receiver."))
+		ToolTip = "Queues a receive; true means accepted, not completed. For repeated Blueprint material use, prefer Spout Receiver With Material and a stored MID. Keep the outputs for Close Receiver."))
 	static bool SpoutReceiver(const FName SpoutName,
 							  UMaterialInterface* InputMaterial,
 							  FName TextureParameterName,
@@ -209,6 +258,24 @@ public:
 							  UTexture2D*& OutTexture,
 							  UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,
 							  ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto);
+
+	/**
+	 * Receives into an explicitly reusable MID. Create the MID once with Unreal's Create Dynamic
+	 * Material Instance node, keep it in a variable and supply it here each tick. Null is allowed
+	 * for texture-only use. This node allocates no material. The texture is shared per sender name;
+	 * the first accepted color interpretation remains in effect until close or a source format change.
+	 * Optional targets catch up from the completed image even when the sender is paused.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Spout", meta = (DisplayName = "Spout Receiver With Material"))
+	static bool SpoutReceiverWithMaterial(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial,
+		FName TextureParameterName, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,
+		ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto);
+
+	/** Releases only this material parameter binding. Other consumers and the shared session remain
+	 * open. Restores the saved texture (or engine default) only if the parameter still points to
+	 * this binding's image; subsequent user or other-session edits are preserved. */
+	UFUNCTION(BlueprintCallable, Category = "Spout")
+	static bool ReleaseReceiverMaterialBinding(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial, FName TextureParameterName);
 
 	/**
 	 * Tears down a receiver started with SpoutReceiver.

@@ -1,16 +1,91 @@
 # Changelog
 
-## Unreleased
-
-_Nothing yet._
-
-## 1.0.0 - 2026-08-03
+## 1.0.0 - 2026-09-21
 
 First stable release. The plugin leaves beta: the sender and receiver lifecycles, the cross-process
 synchronisation protocol and the packaging layout are now covered by automated validation that runs
 on every supported engine version, and the documentation matches the implementation.
 
 Supported scope is unchanged: Windows 64-bit, Direct3D 12, Unreal Engine 5.3 through 5.8.
+
+1.0.0 was prepared in August 2026 but not distributed. A production-readiness review followed; its
+fixes and the release testing are part of this release and are listed first, followed by the notes
+from the August preparation.
+
+### Production-readiness fixes and release testing (September 2026)
+
+#### Fixed
+- Restart performance: recycle closed Spout SDK frame-count backends instead of constructing
+  one per stream incarnation. Profiling showed that construction cost about 14-15 ms twice per
+  close/reopen (receiver entry on the game thread, sender entry on the render thread) and was nearly
+  the whole restart stall; shared-texture creation, name registration, wrapping and the received
+  texture each cost well under 1 ms. The pool is bounded, drained before the DLL unloads, and covered
+  by restart automation tests. Trace scopes now mark every native send/receive/create/close step.
+  Ownership, GPU completion, peer access and retention accounting are unchanged; closed outputs still
+  stay reserved until Unreal garbage collection, which the retention budget documents.
+- Technical debt: record Unreal editor module build IDs from `UnrealEditor.modules`, preserve full
+  engine version/changelist metadata and hash the source files; report metadata parse failures.
+- Share engine metadata resolution across release tools and reject engine-path overrides whose
+  installed major/minor version differs from the requested build before launching Unreal.
+- Independently validate performance duration, target delivery, counter consistency, end-of-run
+  progress and exact invocation IDs instead of relying on a host-reported pass. Add offline regression
+  coverage for malformed and misleading results; preserve validation of archived measurements.
+- Retire closed stream generations, defer failed receiver discovery allocation, bound active roles
+  and queued work, and account for caller-retained receiver images and resize overlap.
+- Use nonblocking keyed texture access with exact ownership results; preserve the key-zero Spout protocol.
+- Enforce public game-thread affinity, keep final shutdown stopped, latch unsupported RHI and back off
+  native connect/registration failures. Add public stream/runtime status and reservation diagnostics.
+- Forward engine-path lists once, require PowerShell 7.2+, bound process termination/log draining and
+  preserve native log bytes. Ship an explicit public documentation subset and validate archive-local links.
+- Qualify exact archive installations and shipped example assets in consumer hosts; add restart-phase
+  timings and regression checks for discovery churn, cancelled backlog, retained outputs and live contention.
+- Repair the shipped sender's missing render-target input and the receiver's missing material input.
+  Both examples now close their stream on EndPlay; the receiver creates and reuses its own MID.
+- Cache completed receiver frames and deliver them independently to optional targets, including
+  paused senders, late attachment and resource recreation.
+- Restore only material bindings still owned by a receiver; preserve cross-name and manual rebinding.
+- Advertise 8-bit sender color intent from effective RHI flags and reject conflicting color requests
+  for an existing same-format receiver session. Log CPU map failures while retaining a pending retry.
+- Require actual measured pixel progress in performance gates; isolate evidence per invocation and
+  bind launches and artifacts to original source/build identities. Reject stale, duplicate or mixed evidence.
+- Persist failed smoke/performance reports and propagate nonzero process exits on older Unreal launch loops.
+- Register exact names under the SDK's shared registry lock, with explicit collision/capacity
+  refusal; the bundled SDK binary is unchanged.
+  Registry inspection uses bounded name slots, with no STL container ownership crossing the DLL.
+- Release Windows mutex ownership on abandoned access, discard that frame, and allow recovery.
+  Protect the exact-name registry transaction against the SDK's analogous memory-map lock bug.
+  Failed synchronization setup now prevents copying and retries on later calls.
+- Resolve sender/receiver RHI resources on the render thread and keep native source replacement
+  paired with its destination snapshot. Serialize sender installation with cancellation.
+- Validate opened native texture dimensions, format, mip count, array size and sample layout
+  before copying. Reject incompatible optional targets before resizing them.
+- Use writable, state-tracked backing resources for received `UTexture2D` objects, including
+  after caller resource recreation. Initialize new outputs transparently.
+- Order Unreal's native submission before D3D11On12 access and wait for GPU copy completion
+  before shared-texture handoff. Force native copy-state barriers on UE 5.3-5.5, where ordinary
+  RHI transitions defer them until an engine draw/copy. UE 5.3 uses an additional GPU-idle wait because it lacks the
+  newer public submission barrier. These waits can increase render-thread frame time.
+- Log interop/GPU completion failures with throttling; retry transient shared-handle failures.
+
+#### Added
+- `SpoutReceiverWithMaterial` takes an explicit reusable MID input; `ReleaseReceiverMaterialBinding`
+  releases one parameter without closing the shared receiver. Existing signatures remain available.
+- Compiled Blueprint reuse/GC, paused fan-out, CPU retry and color metadata regression tests.
+- Packaged external-process pixel qualification and paced delivery/latency measurements with idle
+  and independent no-plugin baselines. The twice-per-second restart-churn scenario now runs at the
+  60 Hz work rate but still fails its delivery gate at the default retention budget, by contract;
+  the failed result is retained rather than bypassed.
+- A paced close/reopen performance scenario (`restartpaced`): one 1080p sender and receiver closed
+  and reopened every two seconds through the Blueprint nodes. It is the qualified close/reopen
+  workload at the default retention budget under those stated conditions, not a general safe
+  restart rate. The retention contract, the default budget and the `startupshutdown` stress
+  scenario are unchanged.
+- Immutable artifact identity sidecars and evidence-isolation regression checks.
+- Native SDK regression tools for exact-name ownership and abandoned mutex recovery.
+- Real-pixel Unreal tests on GPU and CPU receive paths, with an independent native process,
+  delayed initialization, resizing, resource replacement, cancellation and rejection cases.
+- A standalone Windows runtime probe for the successful-wrap ID 916 debug diagnostic.
+  The focused pixel tests recognize only that exact diagnostic; production logging is unfiltered.
 
 ### Highlights
 - **Game viewport senders are validated end to end.** A packaged game now proves, on every release

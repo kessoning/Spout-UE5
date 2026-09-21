@@ -20,6 +20,7 @@
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
 #include "UObject/StrongObjectPtr.h"
+#include "SpoutHostTestViewportProbe.h"
 
 class UMaterialInstanceDynamic;
 class UTexture2D;
@@ -30,6 +31,7 @@ namespace SpoutHostTest
 	enum class EPerfScenario : uint8
 	{
 		None,
+		Baseline,
 		Sender1080p,
 		Receiver1080p,
 		Sender4K,
@@ -38,7 +40,8 @@ namespace SpoutHostTest
 		CpuFallback,
 		IdleReceiver,
 		ResizeChurn,
-		StartupShutdown
+		StartupShutdown,
+		RestartPaced
 	};
 
 	class FPerfHarness
@@ -74,6 +77,7 @@ namespace SpoutHostTest
 		void DriveScenario(int32 FrameIndex);
 
 		void RecordSample(float DeltaSeconds);
+		void ObserveDelivery();
 		void WriteResults();
 		void FailAndFinish(const FString& Reason);
 
@@ -113,6 +117,23 @@ namespace SpoutHostTest
 		int32 RejectedSends = 0;
 		int32 ResizeEvents = 0;
 		int32 StreamRestartEvents = 0;
+		double NextWorkSeconds = 0.0;
+		double LastWorkSeconds = 0.0;
+		int32 ExpectedDeliveries = 0;
+		int32 ObservedDeliveries = 0;
+		int32 PixelMismatches = 0;
+		int32 StaleObservations = 0;
+		double ValidationSeconds = 0.0;
+		double PeakCloseReceiverMs = 0, PeakCloseSenderMs = 0, PeakSendCallMs = 0, PeakReceiveCallMs = 0, PeakObserverMs = 0;
+		double CloseReceiverSeconds = 0, CloseSenderSeconds = 0;
+
+		TArray<int32> PublishedSequences;
+		TArray<int32> ObservedSequences;
+		TArray<int64> PreviousReceiverSubmissions;
+		TArray<double> LastProgressTimes;
+		TMap<int32, double> PublishTimes;
+		TArray<double> DeliveryLatenciesMs;
+		TArray<TUniquePtr<FViewportSenderProbe>> PixelProbes;
 
 		TArray<FFrameSample> Samples;
 

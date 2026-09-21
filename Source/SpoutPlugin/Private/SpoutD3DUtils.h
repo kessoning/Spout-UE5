@@ -12,6 +12,9 @@
 #include "SpoutRHIState.h"
 #include "Templates/RefCounting.h"
 
+class FRHICommandListImmediate;
+class FRHITexture;
+
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <d3d11.h>
@@ -50,6 +53,12 @@ private:
  * Routing both through SpoutRHIState::GetCopyBracket is what keeps them from drifting apart.
  */
 Microsoft::WRL::ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, SpoutRHIState::EWrapState State);
+
+/** Submit UE transitions through the native submission thread before external queue use. */
+void SubmitSpoutInteropTransitions(FRHICommandListImmediate& RHICmdList);
+
+/** Transition UE tracking and, on 5.3-5.5, force the native state before external access. */
+void TransitionSpoutInteropTexture(FRHICommandListImmediate& RHICmdList, FRHITexture* Texture, ERHIAccess Before, ERHIAccess After);
 
 /**
  * Small bounded cache of D3D11-on-12 wraps, keyed by the native D3D12 resource.

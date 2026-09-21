@@ -9,6 +9,9 @@
 // loads the plugin module rather than merely shipping its files.
 
 using System.IO;
+using System;
+using System.Linq;
+using System.Text;
 using UnrealBuildTool;
 
 public class SpoutHostTest : ModuleRules
@@ -16,6 +19,26 @@ public class SpoutHostTest : ModuleRules
 	public SpoutHostTest(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		string hostRoot = Path.GetFullPath(Path.Combine(ModuleDirectory, "../.."));
+		var inputs = new[] { "Source", "Config" }.SelectMany(dir => Directory.GetFiles(Path.Combine(hostRoot, dir), "*", SearchOption.AllDirectories))
+			.Concat(new[] { Path.Combine(hostRoot, "SpoutHostTest.uproject") })
+			.OrderBy(file => Path.GetRelativePath(hostRoot, file).Replace('\\', '/'), StringComparer.Ordinal).ToArray();
+		// UE 5.3 omits Cryptography.Primitives from rules references. Resolve the platform SHA256
+		// static method at runtime, without changing engine assemblies or implementing cryptography.
+
+		{
+			var hashMethod = System.Type.GetType("System.Security.Cryptography.SHA256, System.Security.Cryptography.Algorithms", true)
+				.GetMethod("HashData", new[] { typeof(byte[]) });
+			Func<byte[], byte[]> hash = data => (byte[])hashMethod.Invoke(null, new object[] { data });
+			var canonical = new StringBuilder();
+			foreach (var file in inputs)
+			{
+				ExternalDependencies.Add(file);
+				canonical.Append(Path.GetRelativePath(hostRoot, file).Replace('\\', '/')).Append('\t')
+					.Append(BitConverter.ToString(hash(File.ReadAllBytes(file))).Replace("-", "").ToLowerInvariant()).Append('\n');
+			}
+			PrivateDefinitions.Add("SPOUT_HOST_SOURCE_ID=\"" + BitConverter.ToString(hash(Encoding.UTF8.GetBytes(canonical.ToString()))).Replace("-", "").ToLowerInvariant() + "\"");
+		}
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{

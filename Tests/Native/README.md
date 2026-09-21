@@ -1,0 +1,58 @@
+# Native regression tools
+
+Requirements: 64-bit Windows, Visual Studio C++ tools, CMake, a hardware D3D11/D3D12
+device, and Windows Graphics Tools for the debug-layer probe. These tests use the
+repository's exact SDK headers, import library and DLL.
+
+From the repository root:
+
+```powershell
+cmake -S Tests/Native -B Artifacts/NativeBuild -A x64
+cmake --build Artifacts/NativeBuild --config Release
+ctest --test-dir Artifacts/NativeBuild -C Release --output-on-failure
+```
+
+`SpoutSdkSafetyTests` checks exact-name collision refusal at 31/63/127/255 bytes,
+preservation of foreign metadata, capacity refusal, balanced teardown and a
+separate process that dies holding the access mutex. The capacity test changes
+only its local SDK instance, not the user's persistent Spout settings. Crash peers
+use unique names and terminate only themselves.
+An additional private SDK memory map tests abandoned registry-map ownership;
+the crash test does not abandon the machine-wide sender registry.
+
+`D3D11On12WrapProbe` isolates Windows' optional-metadata diagnostic (ID 916).
+On the qualification machine it prints HRESULT 0 and a valid wrapper together
+with that diagnostic, without Unreal or Spout loaded. Its exit code tests the
+actual API result; it is not a claim that the debug queue is empty.
+
+`SpoutPixelPeer` is launched by `SpoutPlugin.P0.ExternalProcessPixelsBothDirections`.
+It uses a separate native D3D11 device and the stock SDK texture-access protocol.
+Both sides compare every pixel of a sequence-dependent pattern. The native sender
+also alternates sizes. Pass its executable to an isolated Unreal host:
+
+```text
+UnrealEditor-Cmd.exe <SpoutHostTest.uproject> "-ExecCmds=Automation RunTests SpoutPlugin.P0;Quit" -unattended -NoSound -rhivalidation -d3ddebug "-SpoutNativePeer=<absolute SpoutPixelPeer.exe path>" "-ReportExportPath=<new empty report directory>"
+```
+
+The external-process test reports a warning and skips when `-SpoutNativePeer` is
+absent. Such a run does **not** qualify cross-process correctness. Qualification
+requires that argument, a fresh nonempty report, every selected test passing,
+and engine exit code zero. With `-d3ddebug`, only the exact reproduced ID 916
+diagnostic is expected in the pixel tests; resource-state errors remain failures.
+Production code does not filter the debug queue.
+
+The automation, packaged-host and performance scripts build the peer in an isolated directory and
+pass it automatically. Packaged smoke and performance qualification fail when it is absent.
+The `receive` mode accepts an optional final `srgb` argument to require typed sRGB metadata;
+the default requires UNORM. The native receiver also creates a shader-resource view using that
+advertised format, so incompatible color metadata fails qualification. Patterns include changing alpha and all channel values, while the
+origin alpha remains 255 to distinguish a frame from a newly cleared receiver output.
+
+`Scripts/Test-TrackDDelivery.ps1` takes a provenance-checked packaged executable and native peer.
+It deliberately stops measured transfers, corrupts qualification pixels, and runs corrupted pixels
+through packaged smoke. It requires the intended failures and error exits, and uses the matrix's
+actual required-marker list and smoke verdict to verify rejection.
+
+Use a dedicated host project. Tests close their own streams and restore the
+receiver-path console setting, but are intended for automation rather than a
+user's active scene. The checked-in host/matrix scripts provide isolated staging.

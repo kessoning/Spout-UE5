@@ -7,6 +7,7 @@
  * name registration used by both sender and receiver paths.
  */
 #include "SpoutSenderRegistry.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "SpoutD3DContext.h"
 #include "SpoutModule.h"
 #include "SpoutValidation.h"
@@ -14,19 +15,16 @@
 bool FSpoutSdkSenderNameBackend::CreateSender(const ANSICHAR* Utf8Name, uint32 Width, uint32 Height, void* SharedHandle, uint32 Format)
 {
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
-	spoutSenderNames* SenderNames = Context.GetSenderNames();
+	FSpoutSafeSenderNames* SenderNames = Context.GetSenderNames();
 	if (!SenderNames)
 	{
 		return false;
 	}
 
-	// spoutSenderNames::CreateSender takes a mutable char*, so hand it a local copy rather than
-	// casting away const on the caller's buffer.
-	TArray<ANSICHAR> MutableName(Utf8Name, FCStringAnsi::Strlen(Utf8Name) + 1);
-
+	// The adapter owns exact-name registration under the SDK's cross-process registry lock.
 	FScopeLock SpoutLock(&Context.GetSpoutMutex());
-	return SenderNames->CreateSender(
-		MutableName.GetData(),
+	return SenderNames->CreateSenderExact(
+		Utf8Name,
 		Width,
 		Height,
 		static_cast<HANDLE>(SharedHandle),
@@ -91,6 +89,7 @@ void FSpoutSharedSender::ReleaseResources()
 {
 	// Release shared textures and cached wrappers under lock.
 	FScopeLock Lock(&ResourceMutex);
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReleaseNativeResources);
 
 	// Close the cross-process protocol first, while the texture it names still exists. By this
 	// point the ordered teardown has already flushed rendering commands, so no access scope can be
@@ -101,6 +100,9 @@ void FSpoutSharedSender::ReleaseResources()
 	StagingTexture.Reset();
 	CachedWrappedResource.Reset();
 	CachedRTWrappedResource.Reset();
+	ReceivedFrame.SafeRelease();
+	ReceivedFrameNumber = 0;
+	DestinationDeliveries.Empty();
 
 	SharedHandle = nullptr;
 	SharedFormat = DXGI_FORMAT_UNKNOWN;
@@ -135,7 +137,11 @@ TSharedPtr<FSpoutSharedSender> FSpoutSenderRegistry::FindOrAdd(const FName& Name
 		return *Existing;
 	}
 
-	TSharedPtr<FSpoutSharedSender> NewSender = MakeShared<FSpoutSharedSender>(Name, Type);
+	TSharedPtr<FSpoutSharedSender> NewSender;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ConstructRegistryEntry);
+		NewSender = MakeShared<FSpoutSharedSender>(Name, Type);
+	}
 	Senders.Add(Key, NewSender);
 	return NewSender;
 }

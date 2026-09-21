@@ -32,7 +32,7 @@ to fill the render target is with a `SceneCapture2D` - see [SCENECAPTURE2D.md](S
 
 ## Lifetime and update behavior
 
-- The sender must be called continuously (Tick or timer) to keep the stream alive and updated.
+- The sender must be called continuously (Tick or timer) to request continuous frame updates; registration persists until close.
   There is no background thread keeping it running between calls.
 - The shared texture is created or resized automatically when the source dimensions or format
   change. On the first valid send the stream is registered in Spout's global registry; later
