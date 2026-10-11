@@ -26,6 +26,38 @@ namespace SpoutLimits
 	 * render thread reads its own copy of the setting.
 	 */
 	uint32 AccessWaitMs();
+
+	// ---- Experimental receive settings, all off by default. With both r.Spout.FrameWaitMs and
+	// r.Spout.FrameCountRecheck at 0 none of the operations they add runs.
+	// They are separate from the access wait above: that one waits for a peer to RELEASE the
+	// texture, these concern a sender's next PUBLICATION. ----
+
+	/** Upper clamp of r.Spout.FrameWaitMs and r.Spout.FrameWaitBudgetMs, milliseconds. */
+	constexpr float MaxFrameWaitMs = 4.0f;
+	/** Default of r.Spout.FrameWaitBudgetMs, milliseconds. */
+	constexpr float DefaultFrameWaitBudgetMs = 1.0f;
+	/** r.Spout.FrameWaitPollUs default and clamps, microseconds. */
+	constexpr int32 DefaultFrameWaitPollUs = 150;
+	constexpr int32 MinFrameWaitPollUs = 50;
+	constexpr int32 MaxFrameWaitPollUs = 1000;
+
+	/**
+	 * Longest new-frame wait per receive call, seconds: r.Spout.FrameWaitMs clamped to
+	 * 0..MaxFrameWaitMs. Zero (the default) disables the wait entirely.
+	 */
+	double FrameWaitSeconds();
+
+	/** Total new-frame wait time allowed per render frame across all streams, seconds. */
+	double FrameWaitBudgetSeconds();
+
+	/** Interval between frame-count polls inside a wait, seconds. */
+	double FrameWaitPollSeconds();
+
+	/**
+	 * Whether the sender's notification is read again while texture access is held and the read
+	 * history is kept: r.Spout.FrameCountRecheck != 0, and always when the frame wait is enabled.
+	 */
+	bool FrameCountRecheck();
 }
 
 // Lifetime follows the actual retained texture/entry, including old outputs held by callers.

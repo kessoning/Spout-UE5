@@ -20,6 +20,22 @@ namespace
 		TEXT("0 never waits: a busy texture skips that transfer at once. The wait ends as soon as the peer releases the lock. ")
 		TEXT("It applies to each attempt (one per stream transfer), not per frame, runs on the render thread, and Windows scheduling can make it last longer than requested."),
 		ECVF_RenderThreadSafe);
+	// Experimental, off by default, read on the render thread.
+	TAutoConsoleVariable<float> GSpoutFrameWaitMs(TEXT("r.Spout.FrameWaitMs"), 0.0f,
+		TEXT("Experimental. 0 (default): off. Otherwise the longest time in milliseconds, clamped to 0..4, that one receive call waits for the sender's next frame ")
+		TEXT("when it found none and the sender's own publication history says the next one is due within that time. ")
+		TEXT("Runs on the render thread before any texture access is taken, so it never holds the sender's access lock, and it keeps that thread busy while it waits."),
+		ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<float> GSpoutFrameWaitBudgetMs(TEXT("r.Spout.FrameWaitBudgetMs"), SpoutLimits::DefaultFrameWaitBudgetMs,
+		TEXT("Experimental. Total time in milliseconds, clamped to 0..4, that all receivers together may spend in the new-frame wait within one render frame."),
+		ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<int32> GSpoutFrameWaitPollUs(TEXT("r.Spout.FrameWaitPollUs"), SpoutLimits::DefaultFrameWaitPollUs,
+		TEXT("Experimental. Interval in microseconds, clamped to 50..1000, between frame-count polls inside a new-frame wait."),
+		ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<int32> GSpoutFrameCountRecheck(TEXT("r.Spout.FrameCountRecheck"), 0,
+		TEXT("Experimental. 1: the sender's frame notification is read again while the texture access lock is held, and a receive call that found nothing new still copies ")
+		TEXT("when the sender published since the previous call. 0 (default): unchanged behaviour. Always on while r.Spout.FrameWaitMs is above 0."),
+		ECVF_RenderThreadSafe);
 	FCriticalSection GSpoutLimitBudgetMutex;
 	int64 GSpoutLimitReserved = 0, GSpoutLimitPeak = 0, GSpoutLimitRejected = 0;
 }
@@ -40,6 +56,11 @@ bool SpoutLimits::FrameBytes(int64 Width, int64 Height, EPixelFormat Format, int
 	return true;
 }
 uint32 SpoutLimits::AccessWaitMs() { return static_cast<uint32>(FMath::Clamp(GSpoutAccessWaitMs.GetValueOnAnyThread(),0,MaxAccessWaitMs)); }
+// A value that is not a finite number resolves to off.
+double SpoutLimits::FrameWaitSeconds() { const float V = GSpoutFrameWaitMs.GetValueOnAnyThread(); return FMath::IsFinite(V) ? double(FMath::Clamp(V,0.0f,MaxFrameWaitMs))/1000.0 : 0.0; }
+double SpoutLimits::FrameWaitBudgetSeconds() { const float V = GSpoutFrameWaitBudgetMs.GetValueOnAnyThread(); return FMath::IsFinite(V) ? double(FMath::Clamp(V,0.0f,MaxFrameWaitMs))/1000.0 : 0.0; }
+double SpoutLimits::FrameWaitPollSeconds() { return double(FMath::Clamp(GSpoutFrameWaitPollUs.GetValueOnAnyThread(),MinFrameWaitPollUs,MaxFrameWaitPollUs))/1000000.0; }
+bool SpoutLimits::FrameCountRecheck() { return GSpoutFrameCountRecheck.GetValueOnAnyThread() != 0 || FrameWaitSeconds() > 0.0; }
 int64 SpoutLimits::RetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitReserved; }
 int64 SpoutLimits::PeakRetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitPeak; }
 int64 SpoutLimits::RejectedAllocations() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitRejected; }

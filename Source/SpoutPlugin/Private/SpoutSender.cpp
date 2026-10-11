@@ -20,6 +20,7 @@
 #include "SpoutSession.h"
 #include "SpoutValidation.h"
 #include "SpoutLimits.h"
+#include "SpoutInstrument.h"
 
 #include <atomic>
 
@@ -176,6 +177,29 @@ namespace
 	 * cache instead, which is keyed to that sender's source; it always sends exactly one name, so only
 	 * the first entry's cache is consulted.
 	 */
+#if SPOUT_WITH_INSTRUMENT
+	/**
+	 * Measurement builds: one send destination's row. Declared before the destination's access
+	 * scope, so it is destroyed after it: the release time is stamped once access has been given
+	 * back, on every path out of the loop body.
+	 */
+	struct FSendRecordScope
+	{
+		bool bEnabled;
+		SpoutInstrument::FRecord Rec;
+		TArray<SpoutInstrument::FRecord, TInlineAllocator<4>>& Records;
+		FSendRecordScope(bool bInEnabled, TArray<SpoutInstrument::FRecord, TInlineAllocator<4>>& InRecords) : bEnabled(bInEnabled), Records(InRecords) {}
+		~FSendRecordScope()
+		{
+			if (bEnabled)
+			{
+				Rec.TRelease = SpoutInstrument::Now();
+				Records.Add(Rec);
+			}
+		}
+	};
+#endif
+
 	void SendTextureOnRenderThread(
 		TConstArrayView<FSpoutStreamToken> Tokens,
 		const FTextureRHIRef& SourceRHI,
@@ -187,6 +211,10 @@ namespace
 		{
 			return;
 		}
+
+		// Measurement builds only: r.Spout.Instrument.Bypass bit 1 returns before any Spout work,
+		// so the same load can be measured with no Spout work.
+		SPOUT_INSTRUMENT(if (SpoutInstrument::BypassMask() & 2) return;)
 
 		// Cancellation check first, before anything with a cost. Everything below this point is
 		// skipped entirely for work that was closed or torn down after it was queued: no registry
@@ -355,10 +383,18 @@ namespace
 				? SpoutRHIState::EResourceRole::ViewportBackBuffer
 				: SpoutRHIState::EResourceRole::SenderRenderTarget);
 
+		SPOUT_INSTRUMENT(
+			const bool bInstrument = SpoutInstrument::IsEnabled();
+			uint64 TDrain0 = 0, TDrain1 = 0, TWrap0 = 0, TWrap1 = 0;
+			TArray<SpoutInstrument::FRecord, TInlineAllocator<4>> Records;
+			if (bInstrument) SpoutInstrument::Calibrate(Context.GetD3D12CommandQueue());
+		)
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendTransitionSubmit);
 			TransitionSpoutInteropTexture(RHICmdList, SourceRHI, Bracket.EntryBefore, Bracket.CopyAccess);
+			SPOUT_INSTRUMENT(if (bInstrument) TDrain0 = SpoutInstrument::Now();)
 			SubmitSpoutInteropTransitions(RHICmdList);
+			SPOUT_INSTRUMENT(if (bInstrument) TDrain1 = SpoutInstrument::Now();)
 		}
 
 		{
@@ -369,9 +405,11 @@ namespace
 			ComPtr<ID3D11Texture2D> WrappedSource;
 			{
 				TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendWrapSource);
+				SPOUT_INSTRUMENT(if (bInstrument) TWrap0 = SpoutInstrument::Now();)
 				WrappedSource = SourceWrapCache
 					? SourceWrapCache->GetOrCreate(NativeRes, Bracket.WrapState)
 					: GetWrappedResource(*Destinations[0].Entry, NativeRes, Bracket.WrapState);
+				SPOUT_INSTRUMENT(if (bInstrument) TWrap1 = SpoutInstrument::Now();)
 			}
 
 			if (WrappedSource)
@@ -392,9 +430,23 @@ namespace
 						// failed wait means a peer is still reading this texture. Skipping is
 						// the correct response -- overwriting it would tear the frame the peer is
 						// mid-read of -- and the scope owns nothing, so nothing is released.
+						SPOUT_INSTRUMENT(
+							FSendRecordScope RecScope(bInstrument, Records);
+							SpoutInstrument::FRecord& Rec = RecScope.Rec;
+							if (bInstrument)
+							{
+								if (Destination.Entry->InstrumentId < 0) Destination.Entry->InstrumentId = SpoutInstrument::RegisterStream(Destination.Entry->Name, bIsViewport ? TEXT("SV") : TEXT("S"));
+								Rec.Kind = TEXT('S');
+								Rec.Stream = Destination.Entry->InstrumentId;
+								Rec.FrameRT = GFrameCounterRenderThread;
+								Rec.TDrain0 = TDrain0; Rec.TDrain1 = TDrain1; Rec.TWrap0 = TWrap0; Rec.TWrap1 = TWrap1;
+								Rec.TAccess0 = SpoutInstrument::Now();
+							}
+						)
 						FSpoutTextureAccessScope Access(
 							Destination.Entry->FrameSync,
 							Destination.SharedTexture.GetReference());
+						SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = SpoutInstrument::Now(); Rec.Acquired = Access.IsAcquired() ? 1 : 0; })
 
 						if (!Access.IsAcquired())
 						{
@@ -408,19 +460,24 @@ namespace
 							continue;
 						}
 
+						SPOUT_INSTRUMENT(if (bInstrument) SpoutInstrument::GetGpuBracket().Begin(Context.GetImmediateContext());)
 						{
 							TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendCopyResource);
 							Context.GetImmediateContext()->CopyResource(
 								Destination.SharedTexture.GetReference(),
 								WrappedSource.Get());
 						}
+						SPOUT_INSTRUMENT(if (bInstrument) { SpoutInstrument::GetGpuBracket().End(Context.GetImmediateContext()); Rec.TCopyRec = SpoutInstrument::Now(); })
 
 						// Completion precedes announcement and mutex release. A submitted copy
 						// may still be running on the GPU when a foreign device starts reading.
-						if (SUCCEEDED(Context.WaitForGpuCompletion()))
+						const HRESULT CompletionResult = Context.WaitForGpuCompletion();
+						SPOUT_INSTRUMENT(if (bInstrument) { Rec.TGpuDone = SpoutInstrument::Now(); Rec.Hr = static_cast<int32>(CompletionResult); SpoutInstrument::GetGpuBracket().Resolve(Context.GetImmediateContext(), Rec); })
+						if (SUCCEEDED(CompletionResult))
 						{
 							TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendPublishFrame);
 							Destination.Entry->FrameSync.PublishFrame();
+							SPOUT_INSTRUMENT(if (bInstrument) { Rec.TPublish = SpoutInstrument::Now(); Rec.SenderFrame = Destination.Entry->FrameSync.GetLastObservedSenderFrame(); })
 						}
 					}
 				}
@@ -444,6 +501,13 @@ namespace
 			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendRestoreTransition);
 			TransitionSpoutInteropTexture(RHICmdList, SourceRHI, Bracket.CopyAccess, Bracket.ExitAfter);
 		}
+		SPOUT_INSTRUMENT(
+			if (bInstrument)
+			{
+				const uint64 TRestore = SpoutInstrument::Now();
+				for (SpoutInstrument::FRecord& R : Records) { R.TRestore = TRestore; SpoutInstrument::Push(R); }
+			}
+		)
 	}
 
 	class FSpoutViewportSender
@@ -786,6 +850,10 @@ namespace
 							// Every queued sender publishes the same back buffer, so they share one
 							// transition, one flush and one acquire scope. Tokens that went stale
 							// between the present and this command running are dropped inside.
+							SPOUT_INSTRUMENT(
+								const bool bInstrumentViewport = SpoutInstrument::IsEnabled();
+								const uint64 TViewport0 = bInstrumentViewport ? SpoutInstrument::Now() : 0;
+							)
 							SendTextureOnRenderThread(
 								TokensToSend,
 								BackBufferCopy,
@@ -793,6 +861,10 @@ namespace
 								RHICmdList,
 								&BackBufferWrapCache
 							);
+							SPOUT_INSTRUMENT(
+								const uint64 TViewport1 = bInstrumentViewport ? SpoutInstrument::Now() : 0;
+								uint64 TViewport2 = TViewport1;
+							)
 
 #if SPOUT_BACKBUFFER_USES_VIEWPORT_PROVIDER
 							// UE 5.8: the ISlateViewportProvider refactor removed the
@@ -806,7 +878,22 @@ namespace
 							// the acquire scope); the render-target send path keeps its per-sender
 							// caches and is unaffected.
 							InvalidateBackBufferWraps();
+							SPOUT_INSTRUMENT(if (bInstrumentViewport) TViewport2 = SpoutInstrument::Now();)
 #endif
+							SPOUT_INSTRUMENT(
+								if (bInstrumentViewport)
+								{
+									SpoutInstrument::FRecord ViewportRecord;
+									ViewportRecord.Kind = TEXT('V');
+									ViewportRecord.Stream = -2;
+									ViewportRecord.FrameRT = GFrameCounterRenderThread;
+									ViewportRecord.TDetect = TViewport0;
+									ViewportRecord.TRestore = TViewport1;
+									ViewportRecord.TWrap0 = TViewport1;
+									ViewportRecord.TWrap1 = TViewport2;
+									SpoutInstrument::Push(ViewportRecord);
+								}
+							)
 						}
 					);
 				}

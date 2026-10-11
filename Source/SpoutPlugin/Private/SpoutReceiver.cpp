@@ -16,6 +16,8 @@
 #include "SpoutReceiver.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "SpoutLimits.h"
+#include "SpoutInstrument.h"
+#include "SpoutFrameWait.h"
 #include "Materials/MaterialInterface.h"
 #include "SpoutD3DContext.h"
 #include "SpoutD3DUtils.h"
@@ -286,13 +288,95 @@ namespace
 	// an external sender advertising a compressed, planar, depth or 32-bit float layout would
 	// have its bytes copied into a BGRA8 destination and reinterpreted.
 
+	/**
+	 * The experimental new-frame wait (r.Spout.FrameWaitMs, off by default) for one receive call
+	 * that found no new frame. Runs before any plugin lock or texture access is taken, so nothing the
+	 * sender needs is held while it waits. Limited by r.Spout.FrameWaitMs per call and by
+	 * r.Spout.FrameWaitBudgetMs per render frame across all streams; ended early when the stream is
+	 * cancelled or the engine is exiting. Returns true when a frame is pending afterwards. With the
+	 * setting at 0 it returns false at once.
+	 */
+	bool TryWaitForPublication(FSpoutSharedSender& Receiver, const FSpoutStreamToken& Token, FSpoutFrameWaitReport& OutReport, double& OutBudgetBeforeSeconds, double& OutBudgetAfterSeconds)
+	{
+		return SpoutFrameWait::RunBudgetedWait(SpoutLimits::FrameWaitSeconds(), GFrameCounterRenderThread,
+			[&Receiver, &Token](double GrantedSeconds, FSpoutFrameWaitReport& Report)
+			{
+				return Receiver.FrameSync.WaitForPublication(GrantedSeconds, SpoutLimits::FrameWaitPollSeconds(),
+					[&Token]() { return IsEngineExitRequested() || !FSpoutSession::Get().IsCurrent(Token); }, Report);
+			},
+			OutReport, OutBudgetBeforeSeconds, OutBudgetAfterSeconds);
+	}
+
+#if SPOUT_WITH_INSTRUMENT
+	/** Measurement builds: starts one receive row. */
+	void BeginReceiveRecord(SpoutInstrument::FRecord& Rec, FSpoutSharedSender& Receiver, TCHAR Kind)
+	{
+		if (Receiver.InstrumentId < 0) Receiver.InstrumentId = SpoutInstrument::RegisterStream(Receiver.Name, TEXT("R"));
+		Rec.Kind = Kind;
+		Rec.Stream = Receiver.InstrumentId;
+		Rec.FrameRT = GFrameCounterRenderThread;
+		Rec.Pending = Receiver.FrameSync.HasPendingFrame() ? 1 : 0;
+		Rec.ReceivedBefore = Receiver.ReceivedFrameNumber;
+		Rec.TDetect = SpoutInstrument::Now();
+	}
+
+	/** Measurement builds: what the check stage did. */
+	void RecordReceiveCheck(SpoutInstrument::FRecord& Rec, const FSpoutReceiveCheck& Check)
+	{
+		if (Check.bTransferWithoutNotification) Rec.Flags |= 32;
+		if (!Check.bWaitAsked || !(Rec.Flags & 1)) return;
+		const FSpoutFrameWaitReport& Report = Check.WaitReport;
+		Rec.WaitDecision = static_cast<int32>(Report.Decision);
+		Rec.WaitOutcome = static_cast<int32>(Report.Outcome);
+		Rec.TWait0 = Report.WaitBeginCycles;
+		Rec.TWait1 = Report.WaitEndCycles;
+		Rec.WaitPolls = Report.Polls;
+		Rec.WaitBoundUs = Report.BoundSeconds * 1e6;
+		if (Report.PredictedLatestSeconds > 0.0)
+		{
+			const double DetectSeconds = double(Rec.TDetect) * FPlatformTime::GetSecondsPerCycle64();
+			Rec.PredLoUs = (Report.PredictedEarliestSeconds - DetectSeconds) * 1e6;
+			Rec.PredHiUs = (Report.PredictedLatestSeconds - DetectSeconds) * 1e6;
+		}
+		Rec.PeriodUs = Report.PeriodSeconds * 1e6;
+		Rec.CountAfterWait = Report.CountAfter;
+		Rec.BudgetBeforeUs = Check.BudgetBeforeSeconds * 1e6;
+		Rec.BudgetAfterUs = Check.BudgetAfterSeconds * 1e6;
+		if (Check.bPendingAfterWait) Rec.Flags |= 8;
+		// A probe is flagged only when it ended Published or TimedOut, as the predictor counts it.
+		if (Report.bProbe && (Report.Outcome == SpoutFrameWait::EOutcome::Published || Report.Outcome == SpoutFrameWait::EOutcome::TimedOut)) Rec.Flags |= 16;
+		Rec.PredSuspensions = Report.PredictorSuspensions;
+		Rec.PredWastedWaits = Report.PredictorWastedWaits;
+		Rec.PredJitterUs = Report.PredictorJitterSeconds >= 0.0 ? Report.PredictorJitterSeconds * 1e6 : -1.0;
+	}
+
+	/** Measurement builds: the read under access, taken from the frame sync's own record of it. */
+	void RecordUnderAccess(SpoutInstrument::FRecord& Rec, const FSpoutSharedSender& Receiver)
+	{
+		const FSpoutFrameSync::FNotificationStats Stats = Receiver.FrameSync.GetNotificationStats();
+		Rec.CountUnderAccess = Stats.UnderAccessCount;
+		Rec.NewUnderAccess = Stats.bNewUnderAccess ? 1 : 0;
+	}
+
+	/** Measurement builds: what the call left for the downstream deliveries, then the row is queued. */
+	void FinishReceiveRecord(SpoutInstrument::FRecord& Rec, const FSpoutSharedSender& Receiver)
+	{
+		const FSpoutFrameSync::FNotificationStats Stats = Receiver.FrameSync.GetNotificationStats();
+		Rec.ReceivedAfter = Receiver.ReceivedFrameNumber;
+		Rec.FrameRequests = Stats.CurrentFrameRequests;
+		Rec.SyncOpens = Stats.Opens;
+		SpoutInstrument::Push(Rec);
+	}
+#endif
+
 	// GPU-direct path: wrap UE RHI destinations as D3D11 textures via D3D11-on-12 and
 	// issue CopyResource straight from the external shared texture. Zero CPU readback.
 	void ReceiveOnRenderThread_GPU(
 		TSharedPtr<FSpoutSharedSender> Receiver,
 		TRefCountPtr<FRHITexture> DestTextureRHI,
 		TRefCountPtr<FRHITexture> DestRenderTargetRHI,
-		FRHICommandListImmediate& RHICmdList)
+		FRHICommandListImmediate& RHICmdList,
+		const FSpoutStreamToken& Token)
 	{
 		if (!DestTextureRHI.IsValid() && !DestRenderTargetRHI.IsValid())
 		{
@@ -320,10 +404,49 @@ namespace
 		// Called outside the access mutex on purpose. The mutex protects the COPY, not the count:
 		// a frame counted here and copied a moment later under the mutex is still a whole,
 		// untorn frame -- at worst a newer one than the count referred to.
-		if (!Receiver->FrameSync.ConsumeNewFrame())
+		//
+		// The read is the first step of the check stage shared with the CPU path
+		// (SpoutFrameWait::CheckForNewFrame). With the experimental settings at their defaults the
+		// stage is this read and nothing else. With them on, a read that found nothing new may wait
+		// for the sender's next publication, here, before the transitions, the D3D11 context lock
+		// and the access scope, so that nothing the sender needs is held; and a read that found
+		// nothing new still copies when the sender published since the previous read.
+		const bool bRecheckNotification = SpoutLimits::FrameCountRecheck();
+		SPOUT_INSTRUMENT(
+			const bool bInstrument = SpoutInstrument::IsEnabled();
+			SpoutInstrument::FRecord Rec;
+			if (bInstrument)
+			{
+				SpoutInstrument::Calibrate(Context.GetD3D12CommandQueue());
+				BeginReceiveRecord(Rec, *Receiver, TEXT('R'));
+			}
+		)
+		FSpoutReceiveCheck Check;
+		const bool bTransfer = SpoutFrameWait::CheckForNewFrame(Receiver->FrameSync,
+			[&](bool bNewFrameAtRead)
+			{
+				SPOUT_INSTRUMENT(
+					if (bInstrument)
+					{
+						Rec.NewFrame = bNewFrameAtRead ? 1 : 0;
+						Rec.SenderFrame = Receiver->FrameSync.GetLastObservedSenderFrame();
+						Rec.Flags |= (SpoutLimits::FrameWaitSeconds() > 0.0 ? 1 : 0) | (bRecheckNotification ? 2 : 0);
+					}
+				)
+			},
+			[&](FSpoutFrameWaitReport& Report, double& BudgetBeforeSeconds, double& BudgetAfterSeconds)
+			{
+				return TryWaitForPublication(*Receiver, Token, Report, BudgetBeforeSeconds, BudgetAfterSeconds);
+			},
+			Check);
+		SPOUT_INSTRUMENT(if (bInstrument) RecordReceiveCheck(Rec, Check);)
+		if (!bTransfer)
 		{
+			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TRestore = SpoutInstrument::Now(); FinishReceiveRecord(Rec, *Receiver); })
 			return;
 		}
+		// The row is queued when the function is left, whichever way.
+		SPOUT_INSTRUMENT(ON_SCOPE_EXIT { if (bInstrument) FinishReceiveRecord(Rec, *Receiver); };)
 
 		// Resolve native D3D12 resources up front. A null native means interop wrapping is
 		// unavailable for that destination and it must be skipped (not fatal for the other).
@@ -371,7 +494,9 @@ namespace
 
 		// Flush so D3D12 state transitions are submitted and visible to the D3D11-on-12 device
 		// before Acquire/CopyResource runs. Mirrors the sender path.
+		SPOUT_INSTRUMENT(if (bInstrument) Rec.TDrain0 = SpoutInstrument::Now();)
 		SubmitSpoutInteropTransitions(RHICmdList);
+		SPOUT_INSTRUMENT(if (bInstrument) Rec.TDrain1 = SpoutInstrument::Now();)
 
 		{
 			// Serialize D3D11 immediate-context access with the sender path.
@@ -385,6 +510,7 @@ namespace
 				ComPtr<ID3D11Texture2D> WrappedRT;
 				TArray<ID3D11Texture2D*, TInlineAllocator<2>> ToAcquire;
 
+				SPOUT_INSTRUMENT(if (bInstrument) Rec.TWrap0 = SpoutInstrument::Now();)
 				if (DestTextureRHI.IsValid() && DestNative)
 				{
 					Wrapped = GetOrCreateReceiverWrap(*Receiver, DestNative, TextureBracket.WrapState);
@@ -401,6 +527,7 @@ namespace
 						ToAcquire.Add(WrappedRT.Get());
 					}
 				}
+				SPOUT_INSTRUMENT(if (bInstrument) Rec.TWrap1 = SpoutInstrument::Now();)
 
 				if (ToAcquire.Num() > 0)
 				{
@@ -417,7 +544,9 @@ namespace
 					// r.Spout.AccessWaitMs. A failed wait means the sender is mid-write, and
 					// reading anyway would produce a torn frame. The scope owns nothing on failure,
 					// so nothing is released, and the frame stays pending for the next call.
+					SPOUT_INSTRUMENT(if (bInstrument) Rec.TAccess0 = SpoutInstrument::Now();)
 					FSpoutTextureAccessScope Access(Receiver->FrameSync, SharedTexture.Get());
+					SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = SpoutInstrument::Now(); Rec.Acquired = Access.IsAcquired() ? 1 : 0; })
 					if (!Access.IsAcquired())
 					{
 						if (Receiver->AccessLogThrottle.ShouldLog())
@@ -430,12 +559,23 @@ namespace
 					}
 					else
 					{
+						// Experimental: the notification read again while access is held. A sender
+						// publishes before it releases access, so a frame published before this point
+						// is seen now instead of being reported new again on the next call, after its
+						// image was already copied. It makes a frame pending; it clears nothing.
+						if (bRecheckNotification)
+						{
+							Receiver->FrameSync.ObserveNotificationUnderAccess();
+							SPOUT_INSTRUMENT(if (bInstrument) RecordUnderAccess(Rec, *Receiver);)
+						}
+
 						// Acquire all destinations in their already-submitted COPY_DEST state.
 						// Wait for the copies while shared access remains held; scope exit then
 						// releases the wrappers and submits their outgoing transitions.
 						FScopedD3D11On12Acquire Acquire(ToAcquire);
 						if (Acquire.IsValid() && Context.PrepareGpuCompletion())
 						{
+							SPOUT_INSTRUMENT(if (bInstrument) SpoutInstrument::GetGpuBracket().Begin(ImmediateContext);)
 							if (Wrapped)
 							{
 								TRACE_CPUPROFILER_EVENT_SCOPE(Spout_RecvCopyResource);
@@ -445,19 +585,29 @@ namespace
 							{
 								ImmediateContext->CopyResource(WrappedRT.Get(), SharedTexture.Get());
 							}
+							SPOUT_INSTRUMENT(if (bInstrument) { SpoutInstrument::GetGpuBracket().End(ImmediateContext); Rec.TCopyRec = SpoutInstrument::Now(); })
 
-							// The frame has been read; stop holding it pending. Inside the acquire
-							// scope so a wrap failure leaves it pending instead.
-							if (SUCCEEDED(Context.WaitForGpuCompletion()))
+							// The completion point of the GPU path: the copy has finished on the GPU
+							// and access is still held. Only here does the frame stop being pending;
+							// a wrap failure or a failed completion wait leaves it pending instead.
+							const HRESULT CompletionResult = Context.WaitForGpuCompletion();
+							SPOUT_INSTRUMENT(if (bInstrument) { Rec.TGpuDone = SpoutInstrument::Now(); Rec.Hr = static_cast<int32>(CompletionResult); SpoutInstrument::GetGpuBracket().Resolve(ImmediateContext, Rec); })
+							if (SUCCEEDED(CompletionResult))
 							{
-								Receiver->FrameSync.MarkFrameConsumed();
-								++Receiver->ReceivedFrameNumber;
+								const bool bDelivered = Receiver->FrameSync.CompleteTransfer();
+								SPOUT_INSTRUMENT(if (bInstrument) { Rec.Completed = 1; Rec.Delivered = bDelivered ? 1 : 0; })
+								if (bDelivered)
+								{
+									++Receiver->ReceivedFrameNumber;
+								}
 							}
 						}
 					}
 				}
 			}
 		}
+		// The access scope and the D3D11 context lock have ended.
+		SPOUT_INSTRUMENT(if (bInstrument) Rec.TRelease = SpoutInstrument::Now();)
 
 		// Always restore, even if the access wait, the wrap or the Acquire failed, so UE's state
 		// tracking stays consistent with the earlier Transition. The declared previous state is the
@@ -470,6 +620,7 @@ namespace
 		{
 			TransitionSpoutInteropTexture(RHICmdList, DestRenderTargetRHI, RenderTargetBracket.CopyAccess, RenderTargetBracket.ExitAfter);
 		}
+		SPOUT_INSTRUMENT(if (bInstrument) Rec.TRestore = SpoutInstrument::Now();)
 	}
 
 	// CPU fallback path. Copy into a STAGING texture, Map, issue
@@ -479,7 +630,8 @@ namespace
 		TSharedPtr<FSpoutSharedSender> Receiver,
 		TRefCountPtr<FRHITexture> DestTextureRHI,
 		TRefCountPtr<FRHITexture> DestRenderTargetRHI,
-		FRHICommandListImmediate& RHICmdList)
+		FRHICommandListImmediate& RHICmdList,
+		const FSpoutStreamToken& Token)
 	{
 		if (!DestTextureRHI.IsValid() && !DestRenderTargetRHI.IsValid())
 		{
@@ -493,8 +645,42 @@ namespace
 		uint32 LocalHeight = 0;
 
 		// Same rule as the GPU path: no new frame means the staging copy, the map and both
-		// texture updates are all skipped.
-		if (!Receiver->FrameSync.ConsumeNewFrame())
+		// texture updates are all skipped. The same check stage as the GPU path, taken before any
+		// lock or access.
+		const bool bRecheckNotification = SpoutLimits::FrameCountRecheck();
+		SPOUT_INSTRUMENT(
+			const bool bInstrument = SpoutInstrument::IsEnabled();
+			SpoutInstrument::FRecord Rec;
+			if (bInstrument) BeginReceiveRecord(Rec, *Receiver, TEXT('C'));
+			ON_SCOPE_EXIT
+			{
+				if (bInstrument)
+				{
+					Rec.TRestore = SpoutInstrument::Now();
+					FinishReceiveRecord(Rec, *Receiver);
+				}
+			};
+		)
+		FSpoutReceiveCheck Check;
+		const bool bTransfer = SpoutFrameWait::CheckForNewFrame(Receiver->FrameSync,
+			[&](bool bNewFrameAtRead)
+			{
+				SPOUT_INSTRUMENT(
+					if (bInstrument)
+					{
+						Rec.NewFrame = bNewFrameAtRead ? 1 : 0;
+						Rec.SenderFrame = Receiver->FrameSync.GetLastObservedSenderFrame();
+						Rec.Flags |= (SpoutLimits::FrameWaitSeconds() > 0.0 ? 1 : 0) | (bRecheckNotification ? 2 : 0);
+					}
+				)
+			},
+			[&](FSpoutFrameWaitReport& Report, double& BudgetBeforeSeconds, double& BudgetAfterSeconds)
+			{
+				return TryWaitForPublication(*Receiver, Token, Report, BudgetBeforeSeconds, BudgetAfterSeconds);
+			},
+			Check);
+		SPOUT_INSTRUMENT(if (bInstrument) RecordReceiveCheck(Rec, Check);)
+		if (!bTransfer)
 		{
 			return;
 		}
@@ -520,7 +706,9 @@ namespace
 			SharedTexture->GetDesc(&SharedDesc);
 			const bool bKeyedShared = (SharedDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) != 0;
 			ON_SCOPE_EXIT { if (bKeyedShared) ImmediateContext->Flush(); };
+			SPOUT_INSTRUMENT(if (bInstrument) Rec.TAccess0 = SpoutInstrument::Now();)
 			FSpoutTextureAccessScope Access(Receiver->FrameSync, SharedTexture.Get());
+			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = SpoutInstrument::Now(); Rec.Acquired = Access.IsAcquired() ? 1 : 0; })
 			if (!Access.IsAcquired())
 			{
 				if (Receiver->AccessLogThrottle.ShouldLog())
@@ -532,13 +720,24 @@ namespace
 				return;
 			}
 
+			// Experimental: the notification read again while access is held, as on the GPU path.
+			if (bRecheckNotification)
+			{
+				Receiver->FrameSync.ObserveNotificationUnderAccess();
+				SPOUT_INSTRUMENT(if (bInstrument) RecordUnderAccess(Rec, *Receiver);)
+			}
+
 			// A Flush alone submits asynchronously and cannot hand ownership back safely.
 			ImmediateContext->CopyResource(StagingTexture.Get(), SharedTexture.Get());
-			if (FAILED(Context.WaitForGpuCompletion()))
+			SPOUT_INSTRUMENT(if (bInstrument) Rec.TCopyRec = SpoutInstrument::Now();)
+			const HRESULT StagingResult = Context.WaitForGpuCompletion();
+			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TGpuDone = SpoutInstrument::Now(); Rec.Hr = static_cast<int32>(StagingResult); })
+			if (FAILED(StagingResult))
 			{
 				return;
 			}
 		}
+		SPOUT_INSTRUMENT(if (bInstrument) Rec.TRelease = SpoutInstrument::Now();)
 
 		D3D11_MAPPED_SUBRESOURCE Mapped = {};
 		HRESULT MapResult;
@@ -580,8 +779,15 @@ namespace
 			}
 
 			ImmediateContext->Unmap(StagingTexture.Get(), 0);
-			Receiver->FrameSync.MarkFrameConsumed();
-			++Receiver->ReceivedFrameNumber;
+			// The completion point of the CPU path: the staging copy finished under access, access
+			// was released, and the map and the upload succeeded. A publication made after the
+			// read under access is not consumed by this: the next read reports it.
+			const bool bDelivered = Receiver->FrameSync.CompleteTransfer();
+			SPOUT_INSTRUMENT(if (bInstrument) { Rec.Completed = 1; Rec.Delivered = bDelivered ? 1 : 0; })
+			if (bDelivered)
+			{
+				++Receiver->ReceivedFrameNumber;
+			}
 		}
 		else
 		{
@@ -842,6 +1048,9 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			{
 				return;
 			}
+			// Measurement builds only: r.Spout.Instrument.Bypass bit 0 returns before any Spout
+			// work, so the same load can be measured without it.
+			SPOUT_INSTRUMENT(if (SpoutInstrument::BypassMask() & 1) return;)
 			// Native source replacement and destination resolution share ONE render
 			// command. Later game-thread receives cannot replace half of this pair.
 			FSpoutD3DContext& RenderContext = FSpoutD3DContext::Get();
@@ -875,11 +1084,11 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			const uint64 PreviousFrame = Receiver->ReceivedFrameNumber;
 			if (bUseGPUPath)
 			{
-				ReceiveOnRenderThread_GPU(Receiver, TextureRHI, nullptr, RHICmdList);
+				ReceiveOnRenderThread_GPU(Receiver, TextureRHI, nullptr, RHICmdList, Token);
 			}
 			else
 			{
-				ReceiveOnRenderThread_CPU(Receiver, TextureRHI, nullptr, RHICmdList);
+				ReceiveOnRenderThread_CPU(Receiver, TextureRHI, nullptr, RHICmdList, Token);
 			}
 			if (PreviousFrame != Receiver->ReceivedFrameNumber) Receiver->ReceivedFrame = TextureRHI;
 			for (auto It = Receiver->DestinationDeliveries.CreateIterator(); It; ++It)

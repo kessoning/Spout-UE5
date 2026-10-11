@@ -12,6 +12,8 @@
  */
 #include "SpoutFrameSync.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "HAL/PlatformTime.h"
+#include <immintrin.h> // _mm_pause between frame-notification polls
 
 #include "SpoutLimits.h"
 #include "SpoutModule.h"
@@ -80,6 +82,16 @@ namespace
 		virtual bool GetNewFrame() override
 		{
 			return FrameCount.GetNewFrame();
+		}
+
+		virtual int64 GetSenderFrame() override
+		{
+			return static_cast<int64>(FrameCount.GetSenderFrame());
+		}
+
+		virtual bool IsFrameCountEnabled() override
+		{
+			return FrameCount.IsFrameCountEnabled();
 		}
 
 		virtual bool IsRecyclable() const override { return true; }
@@ -226,7 +238,9 @@ bool FSpoutFrameSync::Open(const ANSICHAR* Utf8Name)
 		Backend->CloseAccessMutex();
 		Backend->CleanupFrameCount();
 		bOpen = false;
-		bFramePending = false;
+		Notify.Reset();
+		if (bPredictorLive) Predictor.Reset();
+		bPredictorLive = false;
 		OpenUtf8Name.Reset();
 	}
 
@@ -248,6 +262,10 @@ bool FSpoutFrameSync::Open(const ANSICHAR* Utf8Name)
 	OpenUtf8Name.Append(Utf8Name, NameLength + 1);
 
 	bOpen = true;
+	// A newly opened name starts with nothing pending and no read history. Nothing can be pending
+	// here already: a frame only becomes pending on an open stream.
+	Notify.Reset();
+	++OpenCount;
 	return bMutexCreated;
 }
 
@@ -261,7 +279,7 @@ void FSpoutFrameSync::Close()
 		// ordered teardown closes explicitly before that, so the second call must not hand the SDK
 		// a second CloseAccessMutex/CleanupFrameCount pair for a handle it has already given up.
 		bAccessHeld = false;
-		bFramePending = false;
+		Notify.Reset();
 		OpenUtf8Name.Reset();
 		return;
 	}
@@ -269,7 +287,7 @@ void FSpoutFrameSync::Close()
 	if (!Backend)
 	{
 		bOpen = false;
-		bFramePending = false;
+		Notify.Reset();
 		OpenUtf8Name.Reset();
 		return;
 	}
@@ -289,7 +307,11 @@ void FSpoutFrameSync::Close()
 
 	bOpen = false;
 	bAccessHeld = false;
-	bFramePending = false;
+	// A pending frame of a closed stream is dropped, never turned into a delivery, and nothing
+	// learnt about one name carries over to the next.
+	Notify.Reset();
+	if (bPredictorLive) Predictor.Reset();
+	bPredictorLive = false;
 	OpenUtf8Name.Reset();
 }
 
@@ -325,31 +347,58 @@ bool FSpoutFrameSync::ConsumeNewFrame()
 	// latched rather than re-asked. Once a frame is known to be pending it stays pending until a
 	// copy actually lands, so a timed-out access wait costs one frame of latency instead of losing
 	// the frame entirely.
-	if (Backend->GetNewFrame())
+	const bool bSdkNew = Backend->GetNewFrame();
+
+	// Experimental. With r.Spout.FrameWaitMs and r.Spout.FrameCountRecheck at their defaults (both
+	// off) the rest of this function is two setting reads and the latch above.
+	const bool bWaitEnabled = SpoutLimits::FrameWaitSeconds() > 0.0;
+	const bool bTrack = bWaitEnabled || SpoutLimits::FrameCountRecheck();
+	const bool bPending = Notify.BeginAttempt(bSdkNew, bTrack ? ReadBackendCountLocked() : FSpoutNotificationState::NoCount, bTrack);
+	if (bWaitEnabled)
 	{
-		bFramePending = true;
+		// Only this call is a read for the predictor: suspensions and probe times are counted in
+		// receive attempts, and the read interval is estimated from these times.
+		bPredictorLive = true;
+		const double ReadSeconds = Now();
+		Predictor.BeginRead(ReadSeconds);
+		Predictor.ObserveCount(ReadSeconds, Notify.GetReadCount());
+	}
+	else if (bPredictorLive)
+	{
+		// The wait was turned off: forget the history, so turning it on again starts clean.
+		Predictor.Reset();
+		bPredictorLive = false;
 	}
 
-	return bFramePending;
+	return bPending;
 }
 
 void FSpoutFrameSync::RequestCurrentFrame()
 {
 	FScopeLock Lock(&Mutex);
-	if (bOpen) bFramePending = true;
+	if (!bOpen) return;
+	Notify.RequestCurrentFrame();
+	// A new native source generation invalidates the publication history.
+	if (bPredictorLive) Predictor.Reset();
 }
 
 void FSpoutFrameSync::MarkFrameConsumed()
 {
+	CompleteTransfer();
+}
+
+bool FSpoutFrameSync::CompleteTransfer()
+{
 	FScopeLock Lock(&Mutex);
-	if (bFramePending) ++ConsumedFrameCount;
-	bFramePending = false;
+	const bool bDelivered = Notify.CompleteTransfer();
+	if (bDelivered) ++ConsumedFrameCount;
+	return bDelivered;
 }
 
 bool FSpoutFrameSync::HasPendingFrame() const
 {
 	FScopeLock Lock(&Mutex);
-	return bFramePending;
+	return Notify.IsOwed();
 }
 
 bool FSpoutFrameSync::IsAccessHeld() const
@@ -449,3 +498,283 @@ void FSpoutFrameSync::ReleaseTextureAccess(void* SharedTexture)
 		Backend->AllowTextureAccess(SharedTexture);
 	}
 }
+
+// ---------------------------------------------------------------------------------------------
+// Experimental: the new-frame wait and the read under access (r.Spout.FrameWaitMs and
+// r.Spout.FrameCountRecheck, both off by default). Only the SDK's public calls are used. The frame
+// count is a notification hint here and never an image identity; see SpoutNotificationState.h.
+// ---------------------------------------------------------------------------------------------
+
+int64 FSpoutFrameSync::ReadBackendCountLocked() const
+{
+	if (!Backend || !Backend->IsFrameCountEnabled()) return FSpoutNotificationState::NoCount;
+	const int64 Count = Backend->GetSenderFrame();
+	return Count > 0 ? Count : FSpoutNotificationState::NoCount;
+}
+
+void FSpoutFrameSync::FillPredictorTotalsLocked(FSpoutFrameWaitReport& OutReport) const
+{
+	OutReport.PredictorSuspensions = Predictor.GetSuspensions();
+	OutReport.PredictorWastedWaits = Predictor.GetWastedWaits();
+	OutReport.PredictorJitterSeconds = Predictor.GetJitterSeconds();
+}
+
+bool FSpoutFrameSync::WaitForPublication(double BoundSeconds, double PollSeconds, TFunctionRef<bool()> ShouldAbort, FSpoutFrameWaitReport& OutReport)
+{
+	OutReport = FSpoutFrameWaitReport();
+	OutReport.BoundSeconds = BoundSeconds;
+
+	int64 ReadCount = FSpoutNotificationState::NoCount;
+	{
+		FScopeLock Lock(&Mutex);
+		if (!Backend || !bOpen)
+		{
+			OutReport.Decision = SpoutFrameWait::EDecision::NoCount;
+			OutReport.Outcome = SpoutFrameWait::EOutcome::Closed;
+			return false;
+		}
+		FillPredictorTotalsLocked(OutReport);
+		if (bAccessHeld)
+		{
+			// The sender needs the access mutex to write the frame this call would wait for.
+			// Waiting here could only time out, and would hold the sender up while it did.
+			OutReport.Decision = SpoutFrameWait::EDecision::AccessHeld;
+			return false;
+		}
+		if (Notify.IsOwed())
+		{
+			OutReport.Decision = SpoutFrameWait::EDecision::AlreadyNew;
+			return true;
+		}
+		if (!Notify.IsCountKnown())
+		{
+			// No count: there is no publication to wait for, and every read is reported new anyway.
+			OutReport.Decision = SpoutFrameWait::EDecision::NoCount;
+			return false;
+		}
+		ReadCount = Notify.GetReadCount();
+		OutReport.CountBefore = ReadCount;
+		OutReport.CountAfter = ReadCount;
+		// The read that began this attempt saw the count unchanged a moment ago; the rule starts from there.
+		const SpoutFrameWait::FPrediction Prediction = Predictor.Predict(Now(), BoundSeconds);
+		OutReport.Decision = Prediction.Decision;
+		OutReport.PeriodSeconds = Prediction.PeriodSeconds;
+		OutReport.PredictedEarliestSeconds = Prediction.EarliestSeconds;
+		OutReport.PredictedLatestSeconds = Prediction.LatestSeconds;
+		OutReport.bProbe = Prediction.bProbe;
+		if (Prediction.Decision != SpoutFrameWait::EDecision::Wait || BoundSeconds <= 0.0)
+		{
+			return false;
+		}
+	}
+
+	// The polling loop. The lock is taken for each poll and dropped in between.
+	++FrameWaitAttempts;
+	bool bPending = false;
+	OutReport.WaitBeginCycles = FPlatformTime::Cycles64();
+	const double Begin = Now();
+	const double Deadline = Begin + BoundSeconds;
+	const double Interval = FMath::Max(PollSeconds, 0.00002);
+	double NextPoll = Begin + Interval;
+	for (;;)
+	{
+		double T = Now();
+		while (T < NextPoll && T < Deadline)
+		{
+			// A pause, not a yield. SwitchToThread gives the rest of this thread's time slice to
+			// another thread that is ready on the same processor, and when this thread runs again
+			// is then up to the scheduler, not to the bound. The cost of pausing instead is that
+			// the render thread keeps its core busy for the length of the wait.
+			_mm_pause();
+			T = Now();
+		}
+		if (ShouldAbort())
+		{
+			OutReport.Outcome = SpoutFrameWait::EOutcome::Aborted;
+			break;
+		}
+		FScopeLock Lock(&Mutex);
+		if (!Backend || !bOpen)
+		{
+			OutReport.Outcome = SpoutFrameWait::EOutcome::Closed;
+			break;
+		}
+		const bool bSdkNew = Backend->GetNewFrame();
+		const int64 Count = ReadBackendCountLocked();
+		T = Now();
+		++OutReport.Polls;
+		OutReport.CountAfter = Count;
+		const FSpoutNotificationState::EPoll Poll = Notify.ObservePoll(bSdkNew, Count);
+		Predictor.ObserveCount(T, Count);
+		if (Poll == FSpoutNotificationState::EPoll::Published)
+		{
+			OutReport.Outcome = SpoutFrameWait::EOutcome::Published;
+			Predictor.ObserveWaitSucceeded();
+			++FrameWaitPublished;
+			bPending = true;
+			break;
+		}
+		if (Poll == FSpoutNotificationState::EPoll::CountLost)
+		{
+			// The count went away under the wait. The frame is pending, as on every read without a count.
+			OutReport.Outcome = SpoutFrameWait::EOutcome::CountLost;
+			bPending = true;
+			break;
+		}
+		if (T >= Deadline)
+		{
+			OutReport.Outcome = SpoutFrameWait::EOutcome::TimedOut;
+			Predictor.ObserveWaitTimedOut();
+			++FrameWaitTimedOut;
+			break;
+		}
+		NextPoll = T + Interval;
+	}
+	OutReport.WaitEndCycles = FPlatformTime::Cycles64();
+	{
+		// After the end time, so the budget is not charged for it.
+		FScopeLock Lock(&Mutex);
+		FillPredictorTotalsLocked(OutReport);
+	}
+	return bPending;
+}
+
+bool FSpoutFrameSync::BeginTransferWithoutNotification(bool bWaitMade)
+{
+	FScopeLock Lock(&Mutex);
+	if (!Backend || !bOpen || !Notify.ShouldTransferWithoutNotification(bWaitMade))
+	{
+		return false;
+	}
+	Notify.BeginFallbackTransfer();
+	return true;
+}
+
+void FSpoutFrameSync::ObserveNotificationUnderAccess()
+{
+	FScopeLock Lock(&Mutex);
+	if (!Backend || !bOpen || !bAccessHeld)
+	{
+		return;
+	}
+	const bool bSdkNew = Backend->GetNewFrame();
+	const int64 Count = ReadBackendCountLocked();
+	Notify.ObserveUnderAccess(bSdkNew, Count);
+	// Observed now, at the time it was read: after the copy's completion wait "the count was still
+	// N" could be false.
+	if (bPredictorLive) Predictor.ObserveCount(Now(), Count);
+}
+
+int64 FSpoutFrameSync::GetLastObservedSenderFrame()
+{
+	FScopeLock Lock(&Mutex);
+	return Backend ? Backend->GetSenderFrame() : -1;
+}
+
+FSpoutFrameSync::FNotificationStats FSpoutFrameSync::GetNotificationStats() const
+{
+	FScopeLock Lock(&Mutex);
+	FNotificationStats Stats;
+	Stats.Notifications = Notify.GetNotifications();
+	Stats.Copies = Notify.GetCopies();
+	Stats.CopiesWithoutNotification = Notify.GetCopiesWithoutNotification();
+	Stats.CopiedAheadOfRead = Notify.GetCopiedAheadOfRead();
+	Stats.Polls = Notify.GetPolls();
+	Stats.Transients = Notify.GetTransients();
+	Stats.CurrentFrameRequests = Notify.GetCurrentFrameRequests();
+	Stats.Opens = OpenCount;
+	Stats.ReadCount = Notify.GetReadCount();
+	Stats.PreviousReadCount = Notify.GetPreviousReadCount();
+	Stats.UnderAccessCount = Notify.GetUnderAccessCount();
+	Stats.bNewUnderAccess = Notify.WasNewUnderAccess();
+	return Stats;
+}
+
+void FSpoutFrameSync::GetFrameWaitStats(int64& OutAttempts, int64& OutPublished, int64& OutTimedOut) const
+{
+	OutAttempts = FrameWaitAttempts.load();
+	OutPublished = FrameWaitPublished.load();
+	OutTimedOut = FrameWaitTimedOut.load();
+}
+
+void FSpoutFrameSync::GetPredictorStats(int64& OutSuspensions, int64& OutInconsistent, int64& OutGlitches, int64& OutResets) const
+{
+	FScopeLock Lock(&Mutex);
+	OutSuspensions = Predictor.GetSuspensions();
+	OutInconsistent = Predictor.GetInconsistentObservations();
+	OutGlitches = Predictor.GetGlitches();
+	OutResets = Predictor.GetResets();
+}
+
+void FSpoutFrameSync::GetPredictorReadState(int64& OutReads, double& OutReadIntervalSeconds, int64& OutSuspendedReadsLeft, int64& OutReadsUntilProbe, int64& OutProbes) const
+{
+	FScopeLock Lock(&Mutex);
+	OutReads = Predictor.GetReads();
+	OutReadIntervalSeconds = Predictor.GetReadIntervalSeconds();
+	OutSuspendedReadsLeft = Predictor.GetSuspendedReadsLeft();
+	OutReadsUntilProbe = Predictor.GetReadsUntilProbe();
+	OutProbes = Predictor.GetProbes();
+}
+
+double FSpoutFrameSync::Now() const
+{
+#if WITH_DEV_AUTOMATION_TESTS
+	if (ClockForTests) return ClockForTests();
+#endif
+	return SpoutFrameWait::NowSeconds();
+}
+
+namespace SpoutFrameWait
+{
+	bool CheckForNewFrame(FSpoutFrameSync& Sync, TFunctionRef<void(bool)> AfterRead,
+		TFunctionRef<bool(FSpoutFrameWaitReport&, double&, double&)> TryWait, FSpoutReceiveCheck& Out)
+	{
+		Out = FSpoutReceiveCheck();
+		Out.bNewFrameAtRead = Sync.ConsumeNewFrame();
+		AfterRead(Out.bNewFrameAtRead);
+		if (Out.bNewFrameAtRead)
+		{
+			return true;
+		}
+		Out.bWaitAsked = true;
+		if (TryWait(Out.WaitReport, Out.BudgetBeforeSeconds, Out.BudgetAfterSeconds))
+		{
+			// The poll that saw the publication made the frame pending; nothing else to do here.
+			Out.bPendingAfterWait = true;
+			return true;
+		}
+		// Nothing pending. A wait that was made (and timed out, was aborted or found the stream
+		// closed) decides alone. Without one, the sender having published since the previous read is
+		// enough to copy, as it is with the settings off; see BeginTransferWithoutNotification.
+		if (Sync.BeginTransferWithoutNotification(Out.WaitReport.WasWaitMade()))
+		{
+			Out.bTransferWithoutNotification = true;
+			return true;
+		}
+		return false;
+	}
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void FSpoutFrameSync::SetClockForTests(TFunction<double()> InClock)
+{
+	FScopeLock Lock(&Mutex);
+	ClockForTests = MoveTemp(InClock);
+}
+
+void FSpoutFrameSync::PrimePredictorForTests(double PeriodSeconds, double NextInSeconds, int64 CurrentCount)
+{
+	FScopeLock Lock(&Mutex);
+	Predictor.Reset();
+	bPredictorLive = true;
+	const int32 Publications = SpoutFrameWait::FTuning::MinPublications + 10;
+	const double Last = Now() + NextInSeconds - PeriodSeconds;
+	for (int32 K = Publications; K >= 0; --K)
+	{
+		const double T = Last - double(K) * PeriodSeconds;
+		// Seen at the previous count 50 us earlier, then at the new count: a 50 us observation.
+		Predictor.ObserveCount(T - 0.00005, CurrentCount - K - 1);
+		Predictor.ObserveCount(T, CurrentCount - K);
+	}
+}
+#endif

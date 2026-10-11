@@ -49,6 +49,24 @@ public class SpoutPlugin : ModuleRules
             PrivateDefinitions.Add("SPOUT_BUILD_SOURCE_ID=\"" + digest + "\"");
         }
 
+        // Instrumented builds only. The marker file sits in the plugin's root folder, outside every
+        // directory hashed above and outside the declared release inputs, so the source identity of
+        // an instrumented build equals that of the release build made from the same commit, and no
+        // release can carry the instrumentation. Without the marker SPOUT_WITH_INSTRUMENT is 0 and
+        // SpoutInstrument.cpp and every SPOUT_INSTRUMENT(...) statement compile to nothing.
+        //
+        // The marker is registered with UBT only while it exists: a registered file that is missing
+        // invalidates the makefile on every build. Removing the marker is therefore always noticed;
+        // adding it to a tree that was already built may not be, so make instrumented builds in a
+        // fresh tree and check for the instrumentation's console variable afterwards.
+        string instrumentMarker = Path.Combine(ModulePath, "SpoutInstrument.enable");
+        bool bInstrument = File.Exists(instrumentMarker);
+        if (bInstrument)
+        {
+            ExternalDependencies.Add(instrumentMarker);
+        }
+        PrivateDefinitions.Add("SPOUT_WITH_INSTRUMENT=" + (bInstrument ? "1" : "0"));
+
         // Public include paths are consumed by downstream modules; keep Spout headers
         // private so they do not pull <d3d11.h>/<Windows.h> into every consumer.
         PublicIncludePaths.AddRange(new string[] {

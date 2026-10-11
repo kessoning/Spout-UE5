@@ -20,6 +20,16 @@ use unique names and terminate only themselves.
 An additional private SDK memory map tests abandoned registry-map ownership;
 the crash test does not abandon the machine-wide sender registry.
 
+`SpoutNotificationTests` compiles the plugin's two engine-free receive headers
+(`SpoutNotificationState.h`, `SpoutPublishPredictor.h`) as they are. It checks every transition of
+the receive-side notification state against expectations written by hand, drives the publication
+predictor with made-up times, and then drives the bundled SDK's public frame-count calls
+(`GetNewFrame`, `GetSenderFrame`, `IsFrameCountEnabled`), also while a second receiver reads the
+same sender as fast as it can. It exits 2, not 0, when frame counting is disabled on the machine,
+so a skipped SDK part is never read as a pass. Its `INFO` lines report how often the other
+receiver's read made the count look one low; those figures depend on the machine and are not
+judged.
+
 `D3D11On12WrapProbe` isolates Windows' optional-metadata diagnostic (ID 916).
 On the qualification machine it prints HRESULT 0 and a valid wrapper together
 with that diagnostic, without Unreal or Spout loaded. Its exit code tests the

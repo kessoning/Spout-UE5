@@ -104,6 +104,9 @@ public:
 	 */
 	FSpoutLogThrottle AccessLogThrottle;
 
+	/** Measurement builds: the stream id registered with SpoutInstrument, or -1 until first used. */
+	int32 InstrumentId = -1;
+
 	// Shared DX11 texture exposed to other Spout clients (senders only).
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> SharedTexture;
 	HANDLE SharedHandle = nullptr;

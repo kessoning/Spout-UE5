@@ -65,6 +65,9 @@
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
 #include "Templates/UniquePtr.h"
+#include "Templates/Function.h"
+#include "SpoutFrameWait.h"
+#include "SpoutNotificationState.h"
 #include <atomic>
 
 /**
@@ -117,6 +120,19 @@ public:
 	 * frame from a new one, and copying is the option that cannot drop data.
 	 */
 	virtual bool GetNewFrame() = 0;
+
+	/**
+	 * The frame count the most recent GetNewFrame saw (the SDK's public GetSenderFrame), or -1 when
+	 * the backend has none. Zero means the sender has not published a count.
+	 *
+	 * A notification hint and nothing more. It never identifies an image: another receiver's
+	 * GetNewFrame lowers the count for an instant, so the value can be one below the true count
+	 * whenever it is read, including while this process holds texture access.
+	 */
+	virtual int64 GetSenderFrame() { return -1; }
+
+	/** Whether frame counting is switched on for this stream (the SDK's public IsFrameCountEnabled). */
+	virtual bool IsFrameCountEnabled() { return false; }
 
 	/**
 	 * True when a closed backend may be handed to a later stream instead of being destroyed.
@@ -218,17 +234,127 @@ public:
 	 * reported frame has still not been copied. False means the shared texture holds the same
 	 * frame that was already copied, so the whole receive -- transitions, RHI flush and GPU copy
 	 * -- can be skipped.
+	 *
+	 * This call BEGINS a receive attempt: it is the attempt's one read. Call it once per attempt.
+	 * With the experimental settings on it also records the count for the read history and counts
+	 * a read for the predictor; a poll inside WaitForPublication is not a read.
 	 */
 	bool ConsumeNewFrame();
 
-	/** Receiver: records that the pending frame was actually copied. */
+	/** Receiver: records that the pending frame was actually copied. Same as CompleteTransfer. */
 	void MarkFrameConsumed();
+
+	/**
+	 * Receiver: the copy completed successfully. This is the only place where a pending frame stops
+	 * being pending: the GPU path calls it after the copy's GPU completion while access is still
+	 * held, the CPU path after access was released and the map and the upload succeeded. A refused
+	 * access, a failed copy, a failed completion wait and a cancelled stream never reach it, so the
+	 * frame stays pending and is tried again.
+	 *
+	 * Returns whether the copy counts as a delivery: true for every copy made for a pending frame or
+	 * as a transfer without a notification (see BeginTransferWithoutNotification). Every successful
+	 * copy is a delivery. A copy that repeats the image already delivered is not told apart, because
+	 * that would mean trusting a frame count as an image identity.
+	 */
+	bool CompleteTransfer();
 
 	/** Request the current image again after a native source generation changes. */
 	void RequestCurrentFrame();
 
 	/** True while a frame reported new by the peer has not yet been copied. Diagnostics and tests. */
 	bool HasPendingFrame() const;
+
+	// ---- Experimental (r.Spout.FrameWaitMs, r.Spout.FrameCountRecheck; both off by default). None
+	// of the following changes anything unless one of the two settings is on. Only the SDK's public
+	// calls are used: GetNewFrame, GetSenderFrame and IsFrameCountEnabled. ----
+
+	/**
+	 * Waits for the sender's next publication, for at most BoundSeconds, polling the frame
+	 * notification every PollSeconds. Call only after ConsumeNewFrame returned false, and never from
+	 * inside an FSpoutTextureAccessScope: the sender needs the access mutex to write the frame being
+	 * waited for, so a wait attempted while this object holds access is refused
+	 * (EDecision::AccessHeld) without a single poll.
+	 *
+	 * The wait is attempted only when the sender publishes a count and this stream's publication
+	 * history predicts the next publication inside the bound (FPublishPredictor). A poll is the
+	 * SDK's GetNewFrame; it ends the wait only when the count has risen above the count the read saw.
+	 * The frame-sync lock is taken per poll, not across the wait, so Close() on another thread is not
+	 * held up and is noticed at the next poll. ShouldAbort is asked before every poll, outside the
+	 * lock; it is how a cancelled stream or an exiting engine ends the wait early.
+	 *
+	 * Returns true when a frame is pending afterwards. The publication the wait saw is latched by
+	 * the poll that saw it; nothing else needs to be called to keep it.
+	 */
+	bool WaitForPublication(double BoundSeconds, double PollSeconds, TFunctionRef<bool()> ShouldAbort, FSpoutFrameWaitReport& OutReport);
+
+	/**
+	 * Whether this attempt transfers although no frame is pending, and if so marks it. True only
+	 * when the read history is kept, no wait was made in this attempt (bWaitMade false), and the
+	 * count at this attempt's read differs from the count at the previous attempt's read. The
+	 * previous transfer may have copied that publication already; the one after it could be
+	 * overwritten before the next read, so the copy is made now, as it is with the settings off.
+	 */
+	bool BeginTransferWithoutNotification(bool bWaitMade);
+
+	/**
+	 * Reads the sender's notification while this object holds texture access. A sender publishes
+	 * before it releases access, so a publication made before this point is seen here instead of
+	 * being reported new again at the next read, after its image was already copied. A new
+	 * notification makes the frame pending; nothing is cleared, because reading under access does
+	 * not prove that the copy will complete. Does nothing when access is not held.
+	 */
+	void ObserveNotificationUnderAccess();
+
+	/** The count the most recent read, poll or read under access saw, or -1. Measurement logs and tests. */
+	int64 GetLastObservedSenderFrame();
+
+	/** Counters of the notification state. Takes the lock. Measurement logs and tests. */
+	struct FNotificationStats
+	{
+		int64 Notifications = 0;
+		int64 Copies = 0;
+		int64 CopiesWithoutNotification = 0;
+		int64 CopiedAheadOfRead = 0;
+		int64 Polls = 0;
+		int64 Transients = 0;
+		int64 CurrentFrameRequests = 0;
+		int64 Opens = 0;
+		int64 ReadCount = -1;
+		int64 PreviousReadCount = -1;
+		int64 UnderAccessCount = -1;
+		/** What the read under access answered in the current attempt. */
+		bool bNewUnderAccess = false;
+	};
+	FNotificationStats GetNotificationStats() const;
+
+	/** Counters of the new-frame wait. Lock-free. Diagnostics and tests. */
+	void GetFrameWaitStats(int64& OutAttempts, int64& OutPublished, int64& OutTimedOut) const;
+
+	/** Predictor counters (suspensions, inconsistent observations, glitches, resets). Takes the lock. Tests. */
+	void GetPredictorStats(int64& OutSuspensions, int64& OutInconsistent, int64& OutGlitches, int64& OutResets) const;
+
+	/**
+	 * The predictor's once-per-attempt state: reads begun (one per ConsumeNewFrame while the wait is
+	 * on), the read-interval estimate (seconds, 0 until two timed reads), reads left in the current
+	 * suspension, reads until the next probe time, and probe waits made. Takes the lock. Tests.
+	 */
+	void GetPredictorReadState(int64& OutReads, double& OutReadIntervalSeconds, int64& OutSuspendedReadsLeft, int64& OutReadsUntilProbe, int64& OutProbes) const;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	/**
+	 * Tests only: the clock this object reads instead of QPC seconds; an empty function restores QPC.
+	 * The wait's spin reads it on every iteration, so a test clock must move forward on every call
+	 * or the wait never ends.
+	 */
+	void SetClockForTests(TFunction<double()> InClock);
+
+	/**
+	 * Tests only: gives the predictor a regular publication history at PeriodSeconds whose next
+	 * publication falls NextInSeconds from now. CurrentCount must be above 50. Lets a test reach the
+	 * polling loop without replaying seconds of real time.
+	 */
+	void PrimePredictorForTests(double PeriodSeconds, double NextInSeconds, int64 CurrentCount);
+#endif
 
 	/** True while this object holds cross-process access. Diagnostics and tests. */
 	bool IsAccessHeld() const;
@@ -248,6 +374,12 @@ private:
 	bool AcquireTextureAccess(void* SharedTexture);
 	void ReleaseTextureAccess(void* SharedTexture);
 
+	/** The clock of the predictor and the wait: QPC seconds unless a test set one. */
+	double Now() const;
+	/** The backend's count as the notification state takes it: -1 unless counting is on and the count is above zero. Mutex held. */
+	int64 ReadBackendCountLocked() const;
+	void FillPredictorTotalsLocked(FSpoutFrameWaitReport& OutReport) const;
+
 	mutable FCriticalSection Mutex;
 
 	TUniquePtr<ISpoutFrameSyncBackend> Backend;
@@ -257,7 +389,8 @@ private:
 
 	bool bOpen = false;
 	bool bAccessHeld = false;
-	bool bFramePending = false;
+	/** Whether a frame is pending, and with the experimental settings on the read history. */
+	FSpoutNotificationState Notify;
 
 	int64 AcquireCount = 0;
 	int64 ReleaseCount = 0;
@@ -266,7 +399,55 @@ private:
 	std::atomic<int64> FailedAcquireCount{0};
 	std::atomic<int64> PublishedFrameCount{0};
 	std::atomic<int64> ConsumedFrameCount{0};
+
+	// Experimental new-frame wait, guarded by Mutex unless atomic.
+	SpoutFrameWait::FPublishPredictor Predictor;
+	/** True while the predictor is being fed (the wait is enabled); it is reset when the wait is turned off. */
+	bool bPredictorLive = false;
+	/** Opens over this object's lifetime (the already-open fast path does not count). */
+	int64 OpenCount = 0;
+	std::atomic<int64> FrameWaitAttempts{0};
+	std::atomic<int64> FrameWaitPublished{0};
+	std::atomic<int64> FrameWaitTimedOut{0};
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Set only by tests, before the object is used; empty means QPC. */
+	TFunction<double()> ClockForTests;
+#endif
 };
+
+/** What the check stage of one receive attempt did. */
+struct FSpoutReceiveCheck
+{
+	/** What the attempt's read (ConsumeNewFrame) answered. */
+	bool bNewFrameAtRead = false;
+	/** The read found nothing new, so the wait was asked for; it may have declined at once (WaitReport.Decision). */
+	bool bWaitAsked = false;
+	/** A frame became pending during the wait. */
+	bool bPendingAfterWait = false;
+	/** Nothing is pending and no wait was made, but the sender published since the previous read: the transfer is made anyway. */
+	bool bTransferWithoutNotification = false;
+	FSpoutFrameWaitReport WaitReport;
+	double BudgetBeforeSeconds = 0.0;
+	double BudgetAfterSeconds = 0.0;
+};
+
+namespace SpoutFrameWait
+{
+	/**
+	 * The check stage of one receive attempt, the same for the GPU and the CPU receive path. One
+	 * read, which begins the attempt (ConsumeNewFrame). When it found nothing new, the wait (TryWait:
+	 * the receiver's budgeted new-frame wait, which declines at once when r.Spout.FrameWaitMs is 0).
+	 * When there is still nothing pending and no wait was made, the transfer without a notification
+	 * (FSpoutFrameSync::BeginTransferWithoutNotification). AfterRead runs between the read and the
+	 * wait. Returns whether a transfer is to be attempted.
+	 *
+	 * With both experimental settings off this is ConsumeNewFrame and nothing else: TryWait declines
+	 * and the transfer without a notification needs the read history, which is not kept.
+	 */
+	bool CheckForNewFrame(FSpoutFrameSync& Sync, TFunctionRef<void(bool bNewFrameAtRead)> AfterRead,
+		TFunctionRef<bool(FSpoutFrameWaitReport& OutReport, double& OutBudgetBeforeSeconds, double& OutBudgetAfterSeconds)> TryWait,
+		FSpoutReceiveCheck& Out);
+}
 
 /**
  * Scoped cross-process access to one shared texture.
