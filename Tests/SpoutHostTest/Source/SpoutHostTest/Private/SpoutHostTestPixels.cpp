@@ -80,7 +80,11 @@ namespace SpoutHostTest
 		if (!SenderClass || !ReceiverClass || !SenderTarget || !ReceiverTarget || !MaterialAsset) { Error=TEXT("a shipped example asset is missing from the consumer package"); return false; }
 		// Inject deterministic pixels into the example's authored input. No Blueprint graph
 		// or package is rewritten; this controls the image source, like an external capture.
-		SenderTarget->InitCustomFormat(256,16,PF_B8G8R8A8,true); SenderTarget->UpdateResource();
+		// The target keeps its authored gamma, so the example is qualified as it ships: an sRGB
+		// target must still be published as plain BGRA8 that SpoutGL receivers accept.
+		const bool bAuthoredLinear=SenderTarget->bForceLinearGamma;
+		if (FReport* Report=FReport::Get()) Report->SetField(TEXT("shippedSenderTargetForceLinearGamma"),bAuthoredLinear?TEXT("true"):TEXT("false"));
+		SenderTarget->InitCustomFormat(256,16,PF_B8G8R8A8,bAuthoredLinear); SenderTarget->UpdateResource();
 		ReceiverTarget->InitCustomFormat(32,16,PF_B8G8R8A8,true); ReceiverTarget->UpdateResource();
 		AActor* Sender=World->SpawnActor<AActor>(SenderClass);
 		if (!Sender) { Error=TEXT("shipped sender cannot spawn"); return false; }
@@ -172,10 +176,13 @@ namespace SpoutHostTest
 		if (!FParse::Value(FCommandLine::Get(), TEXT("SpoutNativePeer="), Exe) || !IFileManager::Get().FileExists(*Exe))
 		{ Error = TEXT("external pixel qualification requires -SpoutNativePeer=<built oracle>"); return false; }
 		const FString Prefix = TEXT("SpoutHostPixels_") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
+		// Both 8-bit layouts, linear and sRGB. Every one must arrive as the plain _UNORM texture
+		// with the exact bytes and alpha: the peer checks the real resource format and every pixel.
+		for (EPixelFormat Format : {PF_B8G8R8A8, PF_R8G8B8A8})
 		for (bool Linear : {true, false})
 		{
-			const FName Name(*(Prefix + (Linear ? TEXT("_Linear") : TEXT("_SRGB"))));
-			TStrongObjectPtr<UTextureRenderTarget2D> Source(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(256, 16, PF_B8G8R8A8, Linear));
+			const FName Name(*(Prefix + (Format==PF_B8G8R8A8 ? TEXT("_BGRA") : TEXT("_RGBA")) + (Linear ? TEXT("_Linear") : TEXT("_SRGB"))));
+			TStrongObjectPtr<UTextureRenderTarget2D> Source(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(256, 16, Format, Linear));
 			if (!Source.IsValid()) { Error=TEXT("pixel source allocation failed"); return false; }
 			ON_SCOPE_EXIT { USpoutBPFunctionLibrary::CloseSender(Name); FlushRenderingCommands(); };
 			const FString Output = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / (Name.ToString()+TEXT(".json")));
@@ -192,7 +199,7 @@ namespace SpoutHostTest
 				FlushRenderingCommands();
 				if (Sequence==1)
 				{
-					const FString Args=FString::Printf(TEXT("receive %s \"%s\" %s"),*Name.ToString(),*Output,Linear?TEXT("linear"):TEXT("srgb"));
+					const FString Args=FString::Printf(TEXT("receive %s \"%s\" %s"),*Name.ToString(),*Output,Format==PF_B8G8R8A8?TEXT("bgra"):TEXT("rgba"));
 					Peer=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr);
 					if (!Peer.IsValid()) break;
 				}

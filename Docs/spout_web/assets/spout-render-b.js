@@ -147,7 +147,7 @@ window.RENDER_B = function () {
     <div class="reveal">${C.leadList([
       "A release folder contains <strong>Binaries</strong> (with Spout.dll), Content, Resources, Source, and SpoutPlugin.uplugin.",
       "Precompiled releases must include <code>Spout.dll</code> in <code>Binaries/Win64</code>.",
-      "Releases are built per engine version with <code>RunUAT BuildPlugin ... -TargetPlatforms=Win64 -Rocket</code>, then .pdb files are removed and a clean folder is zipped per version. <code>Intermediate/Build</code> is deliberately kept, so Blueprint-only users can package a project without a compiler.",
+      "Releases are built per engine version with <code>RunUAT BuildPlugin ... -TargetPlatforms=Win64 -Rocket</code>, then .pdb files are removed and a clean folder is zipped per version. <code>Intermediate/Build</code> is deliberately kept as BuildPlugin produces it. Packaging a game is supported with Visual Studio. With the plugin in a Blueprint-only project's Plugins/ folder, add a C++ class before packaging (verified workaround).",
       "The repository <code>build.ps1</code> does this for UE 5.3 through 5.8. A binary built for one engine version will not load in another."
     ])}</div>
     <h3 class="block-title reveal">Clean rebuild after an engine upgrade</h3>

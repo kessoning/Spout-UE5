@@ -57,8 +57,13 @@ do not need to write C++ to use the plugin.
   will not initialize on any other RHI. It logs `SpoutPlugin requires DX12 RHI.` and stops.
 - `Spout.dll`, bundled with the plugin under `ThirdParty/Spout/lib/amd64/` and staged to the
   plugin's `Binaries/Win64/` at build time.
-- For source builds: Visual Studio 2022 with the C++ toolchain and a matching Windows SDK.
+- For source builds and for packaging a game (the supported workflow): Visual Studio 2022 with
+  the C++ workload and toolchain and a Windows SDK supported by your engine version. Opening a
+  project with the prebuilt plugin in a matching editor does not need a compiler.
 - Install into your project's `Plugins/` folder, the qualified consumer layout. Qualify engine-wide installations separately.
+- Blueprint-only project with the plugin in its `Plugins/` folder: in the UE 5.8 test the packaged
+  game did not contain the plugin and reported that module `SpoutPlugin` could not be found. The
+  verified workaround is to add a C++ class to the project before packaging.
 
 Both applications sharing a stream must run on the same GPU. Spout's shared-texture model does
 not span GPUs.
@@ -78,7 +83,8 @@ not span GPUs.
 
 ### Source build
 
-1. Copy `SpoutPlugin` into `MyProject/Plugins/`.
+1. Use a C++ project, the supported source-build workflow (add a C++ class to a Blueprint-only
+   project first), and copy `SpoutPlugin` into `MyProject/Plugins/`.
 2. Set the project RHI to DirectX 12.
 3. Generate Visual Studio project files from the `.uproject`.
 4. Build from Visual Studio or let the editor compile on open.
@@ -92,7 +98,7 @@ Edit > Project Settings > Platforms > Windows > Default RHI > DirectX 12, then r
 
 ### Enable the plugin
 
-The descriptor enables the plugin by default. To confirm: Edit > Plugins, search "Spout Plugin",
+A plugin in the project's `Plugins/` folder is enabled by default. To confirm: Edit > Plugins, search "Spout Plugin",
 make sure it is enabled, and restart if you change it.
 
 ### Verify it loaded
@@ -179,8 +185,20 @@ device and copied into a Spout shared DX11 texture. No CPU readback on send.
 Performance: cost scales with resolution; use a timer when full frame rate is not needed; the
 shared texture and wrap are cached while size and format are stable.
 
-Constraint: no sender-side colour conversion. The colour space is carried by the DXGI format the
-sender advertises, which follows the render target's Force Linear Gamma setting.
+Constraint: no sender-side colour conversion. The pixel bytes and alpha are copied unchanged, and
+every 8-bit source is published as plain `_UNORM`, never `_UNORM_SRGB`, because Spout 2.007's
+OpenGL receivers (such as the Spout 2.007 Demo Receiver) refuse `B8G8R8A8_UNORM_SRGB`.
+Keeping the bytes unchanged does not keep the sRGB format tag: an sRGB render target (Force Linear
+Gamma off) and a Force Linear Gamma render target both publish `_UNORM`, so a receiving
+application cannot tell the source's colour intent from the format. `_UNORM` does not mean the
+bytes are linear: by the Spout convention 8-bit `_UNORM` bytes are gamma-encoded (sRGB), which is
+what an sRGB render target produces and what receivers on Auto expect. A Force Linear Gamma target
+stores linear values, so set its receiver's Color Space to Linear.
+
+Access: each publish takes Spout's cross-process access lock. If a receiver holds the texture,
+the publish waits at most r.Spout.AccessWaitMs (default 2 ms) for it. If it is still busy, that
+frame is skipped, the next one is published once the texture is free, and a throttled
+"shared-texture access was unavailable" warning is logged.
 
 ---
 
@@ -196,8 +214,22 @@ a logged warning while Out Texture keeps updating).
 
 Color Space (advanced pin): how the received bytes are interpreted. Auto follows the format
 convention and is right for almost every sender; Linear turns decoding off for senders that
-publish linear 8-bit data; sRGB forces decoding and is valid for 8-bit frames only. See the
+publish linear 8-bit data; sRGB forces decoding and is valid for 8-bit frames only. An 8-bit
+`_UNORM` format does not say which case applies (this plugin's sender publishes `_UNORM` for sRGB
+and Force Linear Gamma render targets alike), so pick Linear yourself for a linear sender. See the
 Blueprint API Reference for the full contract.
+
+Access: each copy takes Spout's cross-process access lock. If a peer (the sender or another
+receiver) holds the texture, the copy waits at most r.Spout.AccessWaitMs (default 2 ms) for it. If
+it is still busy, the receiver tries again on a later call and a throttled "shared-texture access
+was unavailable" warning is logged; that call copies the sender's newest frame, so a frame the
+sender replaced in the meantime is lost, not queued.
+
+Sampling: the receiver copies at most once per Unreal frame and gets the sender's newest frame;
+Spout does not queue frames. When the sender and Unreal run at the same frame rate, their timing
+drifts in and out of alignment, and near alignment single frames are skipped and the previous one
+is shown for an extra frame, without any access contention. A higher Unreal frame rate reduces
+this but does not guarantee every frame. See Limitations.
 
 Finding senders: use Spout Info to list active names, widths, and heights. Names must match
 exactly. The receiver reconnects automatically when the sender appears or changes size.
@@ -293,10 +325,11 @@ Returns true when the sender exists and a receive was enqueued. Outputs Out Mat 
 Texture Parameter Name defaults to `SpoutTexture` when empty. Validate outputs before use.
 
 Color Space decides how the received bytes are interpreted. Auto (the default) follows the format
-convention: 8-bit frames decode as sRGB, 10-bit and 16-bit float frames stay linear, which matches
-what other Spout applications publish. Linear applies no decoding; use it when the sender
-publishes linear or data values in an 8-bit format, such as a render target created with Force
-Linear Gamma. sRGB forces decoding and is only valid for 8-bit frames; requesting it for a 10-bit
+convention: 8-bit frames (`_UNORM` or `_UNORM_SRGB`) decode as sRGB, 10-bit and 16-bit float
+frames stay linear, which matches what other Spout applications publish. Linear applies no
+decoding; use it when the sender publishes linear or data values in an 8-bit format, such as a
+render target created with Force Linear Gamma, which publishes the same `_UNORM` format as an sRGB
+one. sRGB forces decoding and is only valid for 8-bit frames; requesting it for a 10-bit
 or float frame fails the call with a logged diagnostic rather than being silently ignored.
 
 All consumers of a sender name share one color interpretation. A conflicting request is refused;
@@ -364,7 +397,10 @@ Reads the current maximum sender count.
 Creates a render target at runtime, sets wrap addressing, and initializes its resource. The result
 is **not** rooted: keep a reference to it exactly as you would with Create Render Target 2D, or it
 will be collected. Returns null for invalid dimensions or for a pixel format the plugin cannot
-share (supported: B8G8R8A8, R8G8B8A8, A2B10G10R10, FloatRGBA).
+share (supported: B8G8R8A8, R8G8B8A8, A2B10G10R10, FloatRGBA). Force Linear Gamma decides what an
+8-bit target's bytes contain; the sender publishes plain `_UNORM` either way. True (default)
+stores linear values: set the receiver's Color Space to Linear. False stores sRGB-encoded bytes,
+the Spout convention, which a receiver on Auto reads correctly.
 
 ### Enums
 
@@ -423,8 +459,9 @@ A release archive contains `Binaries` (with `Spout.dll`), `Content`, `Resources`
 
 Releases are built per engine version with `RunUAT BuildPlugin ... -TargetPlatforms=Win64
 -Rocket`. Debug symbols are removed, but `Intermediate/Build` is deliberately **kept**: it carries
-the precompiled UnrealGame Development and Shipping objects and the `.precompiled` manifests that
-let Blueprint-only users package a project without Visual Studio. Every generated archive is then
+the precompiled UnrealGame Development and Shipping objects, generated headers and the
+`.precompiled` manifests that `BuildPlugin` produces. It is not a supported way to package a game
+without Visual Studio. Every generated archive is then
 reopened and content-validated before it is published. The repository `build.ps1` does this for
 UE 5.3 through 5.8.
 
@@ -458,10 +495,30 @@ rebuild.
 - DirectX 12 RHI required; the plugin refuses to initialize otherwise.
 - Both ends must be on the same GPU.
 - Supported formats are BGRA8, RGBA8, RGB10A2 and RGBA16F; color interpretation must match the source.
-- No colour conversion on send; the advertised colour space follows the render target's gamma setting.
+- No colour conversion on send. Every 8-bit source is published as plain `_UNORM` with its bytes
+  unchanged; `_UNORM_SRGB` is never published, because Spout's OpenGL receivers refuse it.
+- The sRGB format tag is not carried: an sRGB render target and a Force Linear Gamma render target
+  both publish `_UNORM`, so receivers cannot tell the source's colour intent from the format.
+  `_UNORM` does not mean linear; by the Spout convention the bytes are sRGB-encoded, and a Force
+  Linear Gamma source needs Color Space = Linear on the receiver.
 - Qualify Capture Source, exposure and output format together; the plugin does not tone-map pixels.
 - One sender per name.
 - Senders and receivers must be called continuously.
+- Receiving samples a stream once per Unreal frame and does not queue frames. At equal frame rates
+  the two clocks drift in and out of alignment; near alignment single frames are skipped and the
+  previous one repeated, with no access contention involved. In 1080p 60 fps testing this lowered
+  delivery to 87 to 89 % of distinct frames in individual 10-second windows, while whole runs
+  delivered about 99 %. r.Spout.AccessWaitMs does not change it; a higher Unreal frame rate reduces
+  it but does not guarantee every frame, because jitter, hitches, stalls and contention can still
+  lose frames.
+- The access wait (r.Spout.AccessWaitMs, default 2 ms) applies to each attempt, not to a frame, so
+  several busy streams add up: in testing, a peer that locked eight 1080p streams added about 13 ms
+  of render-thread waiting per frame. 0 restores zero-wait acquisition only; the plugin's other
+  fixes stay active.
+- A keyed-mutex sender that holds its texture for tens of milliseconds can cause runs of consecutive
+  skipped frames, with or without the access wait. With one 1080p 60 fps keyed test sender holding
+  its texture 20 ms on every tenth frame, delivery was 84 % with up to 14 frames skipped in a row.
+  Qualify keyed senders with their actual workload.
 - Spout Info and Get Sender Info populate only Name, Width, Height, bIsAlive.
 - The descriptor sets IsBetaVersion to false; this does not certify production readiness. Error handling favors visible,
   logged failures over silent recovery.
@@ -469,6 +526,9 @@ rebuild.
 ---
 
 ## 16. Troubleshooting
+
+The plugin logs to the `LogSpoutPlugin` category, so `Project/Saved/Logs/ProjectName.log` is the
+first place to look for any of these.
 
 Plugin does not compile: confirm it is in the project Plugins folder, you are on UE 5.3-5.8 with
 VS 2022, regenerate project files, and do a clean rebuild after engine upgrades.
@@ -492,7 +552,25 @@ Color Space.
 Wrong colors or gamma: adjust render target format and Capture Source; try RGBA8 sRGB first, then
 RGB10A2. On the receiving side, set the Spout Receiver node's Color Space pin: Auto for ordinary
 senders, Linear when the sender publishes linear 8-bit data (for example a Force Linear Gamma
-render target sent from another Unreal instance).
+render target sent from another Unreal instance). The format cannot tell a receiver this, because
+8-bit sources are published as `_UNORM` whatever their gamma; set Linear in external applications
+too when the Unreal source uses Force Linear Gamma.
+
+Spout Demo Receiver shows "No sender detected" for an sRGB render target: fixed in 1.0.0. Earlier
+pre-release builds published 8-bit sRGB render targets as `_UNORM_SRGB`, which Spout 2.007's
+OpenGL receivers refuse; the sender now publishes plain `_UNORM` with unchanged bytes.
+
+Log says "shared-texture access was unavailable": another application still held the shared
+texture after the access wait (r.Spout.AccessWaitMs, default 2 ms). The sender skips that frame and
+publishes the next, and the receiver copies the sender's newest frame on a later call. The line is
+throttled to one per stream every 5 seconds; Get Spout Stream Status counts every miss. The wait
+applies to each attempt on the render thread, not to a frame, so a peer that keeps a texture locked
+costs up to that long on every frame for that stream and several locked streams add up;
+r.Spout.AccessWaitMs 0 never waits (zero-wait acquisition only; other fixes stay active).
+
+Frames occasionally skip or repeat with no access misses: sampling, not contention. The receiver
+reads once per Unreal frame and a sender at the same frame rate drifts in and out of alignment
+with it. r.Spout.AccessWaitMs does not change this; see Limitations.
 
 Stream name mismatch: use the exact external spelling from Spout Info. Local FName keys do not distinguish case.
 
@@ -588,7 +666,15 @@ Default operational limits are 32 active roles, 128 pending commands, 4 pending 
 1024 MiB aggregate image reservations. Console variables under r.Spout.Max control these limits.
 Cancelled commands remain counted until released. Old received textures held by callers remain
 charged until GC/resource release. Caller-owned resources and driver/engine allocations are additional.
-Named and keyed texture access are nonblocking; GPU completion can still stall rendering.
+Named and keyed texture access wait at most r.Spout.AccessWaitMs (default 2 ms, clamped to 0 to 10)
+for a busy peer, per attempt and on the render thread; 0 never waits (zero-wait acquisition only;
+the plugin's other fixes stay active). It is not a per-frame bound: several busy streams can each
+add up to that bound in one frame (about 13 ms per frame with eight locked 1080p streams in
+testing), and Windows scheduling can make a wait last longer than requested (about 16 ms at the
+default Windows timer resolution; Unreal normally requests 1 ms). A texture still busy after the
+wait skips that transfer until a later call. GPU completion can still stall rendering. Receiving
+samples each stream once per Unreal frame and does not queue frames, so frames can be skipped or
+repeated without contention when both sides run at the same frame rate.
 
 Release scripts require PowerShell 7.2 or newer. Release testing installs the exact release ZIP
 into fresh host projects and runs the shipped examples, in addition to native API tests.

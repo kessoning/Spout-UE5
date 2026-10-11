@@ -17,8 +17,9 @@ namespace SpoutFormatPolicy
 		 *
 		 * NativeFormat  - what the protocol or the source resource reports.
 		 * SharedFormat  - what the sender creates its shared texture with. Differs from
-		 *                 NativeFormat only for typeless entries, which carry no interpretation
-		 *                 of their own and are given the one typed view Spout peers expect.
+		 *                 NativeFormat for typeless entries, which carry no interpretation of
+		 *                 their own and are given the one typed view Spout peers expect, and for
+		 *                 the 8-bit _UNORM_SRGB entries, which are shared as _UNORM (see below).
 		 * PixelFormat   - what the receiver samples it as.
 		 * bPrefersSRGB  - what ESpoutColorSpace::Auto resolves to for this row.
 		 * bDeclaresSRGB - whether the DXGI format itself states sRGB (the _UNORM_SRGB variants),
@@ -31,13 +32,16 @@ namespace SpoutFormatPolicy
 		 * known to round-trip it correctly, so widening it is an explicit decision rather than a
 		 * side effect of some other change.
 		 *
-		 * The 8-bit rows carry the whole colour-space question. DXGI *can* state sRGB, and this
-		 * plugin's sender publishes _UNORM_SRGB when the UE source is an sRGB render target, so
-		 * intent survives round-tripping through this plugin. It does not survive every peer:
-		 * most Spout applications publish plain _UNORM for gamma-encoded display output, so Auto
-		 * treats 8-bit _UNORM as sRGB to match them, and a sender that really does publish linear
-		 * 8-bit data is handled by the receiver's explicit Linear override rather than by
-		 * guessing differently.
+		 * The 8-bit rows carry the whole colour-space question. DXGI *can* state sRGB, but the
+		 * sender never publishes _UNORM_SRGB: SpoutGL receivers (Spout 2.007's OpenGL/DX interop
+		 * path, used by the Spout demo applications) check the shared texture's real format
+		 * against a list that has no B8G8R8A8_UNORM_SRGB and refuse the sender. Every 8-bit
+		 * source is therefore shared as _UNORM with its bytes copied unchanged, which is also what
+		 * most Spout applications publish for gamma-encoded display output. The price is that the
+		 * format does not state the source's colour intent: Auto treats 8-bit _UNORM as sRGB to
+		 * match the ecosystem convention, and a sender that really does publish linear 8-bit data
+		 * is handled by the receiver's explicit Linear override rather than by guessing
+		 * differently. _UNORM_SRGB stays accepted on receive, from peers that do publish it.
 		 */
 		struct FFormatEntry
 		{
@@ -54,9 +58,9 @@ namespace SpoutFormatPolicy
 		{
 			// 8-bit color. Gamma-encoded bytes by convention, so Auto decodes as sRGB.
 			{ DXGI_FORMAT_B8G8R8A8_UNORM,       DXGI_FORMAT_B8G8R8A8_UNORM,       PF_B8G8R8A8,     true,  false, true,  false },
-			{ DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,  DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,  PF_B8G8R8A8,     true,  true,  true,  false },
+			{ DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,  DXGI_FORMAT_B8G8R8A8_UNORM,       PF_B8G8R8A8,     true,  true,  true,  false },
 			{ DXGI_FORMAT_R8G8B8A8_UNORM,       DXGI_FORMAT_R8G8B8A8_UNORM,       PF_R8G8B8A8,     true,  false, true,  false },
-			{ DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,  DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,  PF_R8G8B8A8,     true,  true,  true,  false },
+			{ DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,  DXGI_FORMAT_R8G8B8A8_UNORM,       PF_R8G8B8A8,     true,  true,  true,  false },
 
 			// 10-bit and float carry linear/HDR data and must be sampled linearly. UE has no sRGB
 			// view for either, which is why an explicit sRGB request against them is rejected.
@@ -112,13 +116,12 @@ namespace SpoutFormatPolicy
 
 	FSenderFormat ResolveSenderFormat(DXGI_FORMAT NativeFormat, bool bSourceSRGB)
 	{
+		// The table already shares every 8-bit source as _UNORM. The render target's sRGB flag
+		// only records what its bytes are, for diagnostics; it never changes the shared format
+		// (see FSenderFormat::bSourceSRGB for why the tag is not published).
 		FSenderFormat Result = ResolveSenderFormat(NativeFormat);
-		if (Result.SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM || Result.SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
-			Result.SharedFormat = bSourceSRGB ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
-		else if (Result.SharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM || Result.SharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
-			Result.SharedFormat = bSourceSRGB ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
-		Result.DeclaredColorSpace = Result.SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || Result.SharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
-			? ESpoutColorSpace::SRGB : ESpoutColorSpace::Linear;
+		const bool bEightBit = Result.SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM || Result.SharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM;
+		Result.bSourceSRGB = Result.bSourceSRGB || (bEightBit && bSourceSRGB);
 		return Result;
 	}
 
@@ -138,11 +141,10 @@ namespace SpoutFormatPolicy
 		{
 			Result.Support = Entry->bTypeless ? ESupport::MappedTyped : ESupport::Supported;
 			Result.SharedFormat = Entry->SharedFormat;
-			// What the shared texture announces, not what the bytes conventionally mean. Only the
-			// _UNORM_SRGB rows carry sRGB in the format, and a typeless source maps to a _UNORM
-			// variant, so it announces Linear even where the receiver's Auto convention will
-			// decode it as sRGB. Reported here so the send path can say which it published.
-			Result.DeclaredColorSpace = Entry->bDeclaresSRGB ? ESpoutColorSpace::SRGB : ESpoutColorSpace::Linear;
+			// What the source format itself states about its bytes. Only the _UNORM_SRGB rows say
+			// sRGB; a typeless or plain _UNORM source states nothing. Either way the share is
+			// _UNORM, so this is not published.
+			Result.bSourceSRGB = Entry->bDeclaresSRGB;
 			return Result;
 		}
 

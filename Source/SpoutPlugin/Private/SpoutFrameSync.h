@@ -43,14 +43,17 @@
  *   -> FSpoutSharedSender::ResourceMutex        (one entry's shared texture, handle and wraps)
  *   -> FSpoutD3DContext::SpoutMutex             (Spout's process-global sender-name list)
  *   -> FSpoutFrameSync::Mutex                   (this object)
- *   -> the Spout named access mutex             (cross-process, nonblocking try-acquire)
+ *   -> the Spout named access mutex             (cross-process, bounded wait)
  *
  * A path may enter at any level and skip levels; it may never take an outer lock while holding
  * an inner one. Both the send and the receive path take the named access mutex from inside the
- * D3D11 context mutex, never the other way round, so the two cannot invert on each other. The
- * named-mutex attempt does not wait on a busy peer. Once access is acquired, the caller
- * waits for GPU completion before releasing it. This GPU wait can stall the render thread.
- * Keyed resources also use nonblocking acquisition and key zero, matching the Spout protocol.
+ * D3D11 context mutex, never the other way round, so the two cannot invert on each other. An
+ * attempt on a busy peer waits at most r.Spout.AccessWaitMs (default 2 ms, clamped to 0..10,
+ * zero only tries), per attempt, while holding the locks above; Windows scheduling can stretch
+ * the wait. The game thread's status query never takes FSpoutFrameSync::Mutex, so it cannot be
+ * held up by that wait. Once access is acquired, the caller waits for GPU completion before
+ * releasing it. This GPU wait can stall the render thread. Keyed resources use the same bounded
+ * wait and key zero, matching the Spout protocol.
  * Sender installation additionally holds Session::Mutex before the registry/resource locks;
  * it never flushes RHI work or waits for the game thread while holding that mutex.
  *
@@ -62,6 +65,7 @@
 #include "CoreMinimal.h"
 #include "HAL/CriticalSection.h"
 #include "Templates/UniquePtr.h"
+#include <atomic>
 
 /**
  * The Spout synchronisation operations this plugin needs.
@@ -92,12 +96,12 @@ public:
 	virtual void CleanupFrameCount() = 0;
 
 	/**
-	 * Waits for exclusive access to the shared texture.
+	 * Waits up to TimeoutMs for exclusive access to the shared texture; zero only tries.
 	 *
 	 * False means the wait timed out or failed and this process owns nothing, so the matching
 	 * release must NOT be issued.
 	 */
-	virtual bool CheckTextureAccess(void* SharedTexture) = 0;
+	virtual bool CheckTextureAccess(void* SharedTexture, uint32 TimeoutMs) = 0;
 
 	/** Gives back access previously granted by CheckTextureAccess. */
 	virtual bool AllowTextureAccess(void* SharedTexture) = 0;
@@ -234,6 +238,7 @@ public:
 	int32 GetReleaseCount() const;
 	int32 GetFailedAcquireCount() const;
 	int32 GetPublishedFrameCount() const;
+	/** Lock-free; the two values are read separately, not as one atomic snapshot. */
 	void GetStatus(int64& OutFrames, int64& OutAccessMisses) const;
 
 private:
@@ -256,9 +261,11 @@ private:
 
 	int64 AcquireCount = 0;
 	int64 ReleaseCount = 0;
-	int64 FailedAcquireCount = 0;
-	int64 PublishedFrameCount = 0;
-	int64 ConsumedFrameCount = 0;
+	// Written under Mutex; GetStatus reads them without it, because the render thread can hold
+	// Mutex for a whole bounded access wait and the game thread must not queue behind that.
+	std::atomic<int64> FailedAcquireCount{0};
+	std::atomic<int64> PublishedFrameCount{0};
+	std::atomic<int64> ConsumedFrameCount{0};
 };
 
 /**

@@ -48,11 +48,22 @@ runtime default.
 
 ## sRGB and linear notes
 
-- The plugin shares the texture as-is. It applies no colour conversion on the send path; the
-  colour space is carried by the DXGI format the sender advertises, which follows the render
-  target's own Force Linear Gamma setting.
-- Color correctness is therefore controlled by your Capture Source and render target format
-  choices, not by the plugin. The tested combination is Final Color (HDR) in Linear Working
+- The plugin shares the texture as-is. It applies no colour conversion on the send path: the
+  pixel bytes and alpha are copied unchanged. Every 8-bit source (BGRA8 or RGBA8, sRGB or linear,
+  typed or typeless) is published as the plain `_UNORM` format, never `_UNORM_SRGB`, because
+  Spout 2.007's OpenGL receivers, such as the Spout Demo Receiver 2.007.015, refuse
+  `B8G8R8A8_UNORM_SRGB`. RGB10A2 and RGBA16F are published as they are, and are linear.
+- Keeping the bytes unchanged does not keep the sRGB format tag: an sRGB render target (Force
+  Linear Gamma off) and a Force Linear Gamma render target both publish `_UNORM`, so a receiving
+  application cannot tell the source's colour intent from the format. `_UNORM` does not mean the
+  bytes are linear. By the Spout convention 8-bit `_UNORM` bytes are gamma-encoded (sRGB), which
+  is what an sRGB render target produces and what receivers on Auto expect. A Force Linear Gamma
+  target stores linear values, so its receiver must be set to Color Space = Linear (or the
+  receiving application's equivalent).
+- On receive, `_UNORM_SRGB` from other peers is still accepted and decodes as sRGB on Auto, like
+  8-bit `_UNORM`.
+- Color correctness is therefore controlled by your Capture Source, render target format and
+  gamma choices and by the receiver's configuration, not by the plugin. The tested combination is Final Color (HDR) in Linear Working
   Color Space as the SceneCapture2D Capture Source paired with an RGBA8 sRGB render target.
 - If colors look washed out or too dark in the external application, revisit the render target
   format and the SceneCapture2D Capture Source before anything else.

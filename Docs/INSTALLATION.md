@@ -1,10 +1,17 @@
 # Installation
 
 This page covers installing SpoutPlugin into an Unreal Engine 5 project, both from a
-precompiled binary release and from source.
+precompiled binary release and from source, and what packaging a game requires.
 
-SpoutPlugin is a project-local plugin. Install it into your project's `Plugins/` folder,
-not into the engine's plugin folder.
+Three tasks have different requirements:
+
+- **Installing the prebuilt plugin and opening a project in the editor** needs only the archive
+  that matches your exact engine version. No compiler is needed to open a Blueprint-only project
+  with the prebuilt plugin in a matching editor.
+- **Building or modifying the source** needs Visual Studio 2022 with the *Game development with
+  C++* workload, its MSVC toolchain and a Windows SDK supported by your engine version.
+- **Packaging a game that uses the plugin** is supported with the same Visual Studio setup. See
+  [Packaging a game](#packaging-a-game).
 
 ## Requirements
 
@@ -12,7 +19,8 @@ not into the engine's plugin folder.
 - Unreal Engine 5 (5.3 through 5.8).
 - The project must run on the DirectX 12 RHI. The plugin creates a D3D11-on-D3D12 interop
   device and logs `SpoutPlugin requires DX12 RHI.` and stops if the active RHI is not D3D12.
-- For source builds: Visual Studio 2022 with the C++ toolchain and a matching Windows SDK.
+- For source builds and for packaging: Visual Studio 2022 with the C++ workload and toolchain and
+  a Windows SDK supported by your engine version.
 - `Spout.dll` (bundled under `ThirdParty/Spout/lib/amd64/` and staged to the plugin's
   `Binaries/Win64/` at build time).
 
@@ -33,7 +41,9 @@ Prebuilt binaries are distributed through Patreon with free download.
 
 ## Option B - Build from source
 
-1. Copy the `SpoutPlugin` folder into your project's `Plugins/` directory.
+1. Use a C++ project, which is the supported source-build workflow (for a Blueprint-only
+   project, add a C++ class first: Tools > New C++ Class). Copy the `SpoutPlugin` folder into your
+   project's `Plugins/` directory.
 2. Set the project RHI to DirectX 12.
 3. Right-click the `.uproject` and choose Generate Visual Studio project files.
 4. Build the project from Visual Studio or from the Unreal Editor when it prompts to compile.
@@ -55,9 +65,30 @@ manually copy `Spout.dll` elsewhere.
 
 ## Enable the plugin
 
-The plugin descriptor sets `EnabledByDefault: true`, so it is usually active once present.
+A plugin in the project's `Plugins/` folder is enabled by default, so it is usually active once
+present. The descriptor inside the release archives does not set `EnabledByDefault`; if the
+plugin is installed into the engine instead (for example by Fab), enable it for each project.
 To confirm: Edit > Plugins, search for "Spout Plugin", and verify it is enabled. Restart the
 editor if you change the state.
+
+## Packaging a game
+
+The supported packaging workflow uses Visual Studio 2022 with the C++ workload, its MSVC
+toolchain and a supported Windows SDK, even when the prebuilt plugin loads in the editor without
+compiling. Packaging without a compiler is not supported. The game executable has to contain the
+plugin, and the prebuilt editor binaries do not provide that.
+
+- **C++ project, plugin in the project's `Plugins/` folder:** Unreal compiles the plugin from its
+  `Source/` folder and links it into the game. This is the tested configuration (UE 5.8,
+  Development and Shipping). In that test, building the project also rebuilt the plugin's editor
+  binaries from `Source/`, replacing the prebuilt ones from the archive.
+- **Blueprint-only project, plugin in the project's `Plugins/` folder:** in our UE 5.8 test the
+  package used Unreal's prebuilt game executable without the plugin, and the game reported at
+  startup that module `SpoutPlugin` could not be found. Enabling the plugin explicitly in the
+  `.uproject` did not change that. The verified workaround is to add a C++ class to the project
+  (Tools > New C++ Class) and package again.
+- In the packaged game, `Spout.dll` is staged next to the game executable
+  (`<Project>/Binaries/Win64/`). The game must run on the DirectX 12 RHI.
 
 ## Verify the plugin loaded
 

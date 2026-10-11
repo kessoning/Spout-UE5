@@ -14,7 +14,102 @@ from the August preparation.
 
 ### Production-readiness fixes and release testing (September 2026)
 
+#### Documentation (UE 5.8 testing, September 2026)
+- Corrected the 0.0.9 claim that the kept `Intermediate/Build` payload lets Blueprint-only users
+  package a project without Visual Studio. The supported packaging workflow uses Visual Studio
+  with the C++ workload and a supported Windows SDK; packaging without a compiler is not
+  supported. Installing the prebuilt plugin and opening a project in a matching editor needs no
+  compiler.
+- Documented the tested UE 5.8 packaging behaviour instead of general rules. With the plugin in a
+  Blueprint-only project's `Plugins/` folder (dropped in, or enabled explicitly in the
+  `.uproject`), Unreal Build Tool builds no game target, so the package uses the engine's prebuilt
+  game executable without the plugin and the game reports that module `SpoutPlugin` could not be
+  found. Adding a C++ class is the verified workaround. The tested project-folder installs
+  compiled the plugin from `Source/` and did not reuse the archive's precompiled objects. The
+  earlier wording that project plugins are "always recompiled" and that Unreal "only builds"
+  project plugins into C++ projects was replaced by these observations.
+- The installation guide no longer says the release descriptor sets `EnabledByDefault`; the
+  descriptor in the release archives does not, so an engine-level install must be enabled per
+  project.
+- Documented frame sampling (from long-run test diagnostics). A receiver copies at most
+  once per Unreal frame and gets the sender's newest frame; Spout does not queue frames. With the
+  sender and Unreal both at 60 fps on independent clocks, the two drift in and out of alignment, and
+  near alignment single frames are skipped and the previous one is shown again, with no access
+  contention involved. In 1080p 60 fps testing, individual 10-second windows fell to 87 to 89 %
+  distinct-frame delivery while whole runs delivered 98 to 99 %. The limitations distinguish this
+  from access starvation, state that `r.Spout.AccessWaitMs` does not change it, and state that a
+  higher Unreal frame rate reduces it without guaranteeing every frame.
+- Documented that a keyed-mutex sender holding its texture for long periods can cause runs of
+  skipped frames with or without the access wait (tested with one 1080p 60 fps keyed sender holding
+  its texture 20 ms on every tenth frame: 84 % delivery, up to 14 consecutive frames skipped), that
+  a receiver retrying after an access miss copies the sender's newest frame (a replaced frame is
+  lost, not queued), and the measured cumulative cost of the access wait: a peer that locked eight
+  of ten 1080p streams added about 13 ms of render-thread waiting per 16.7 ms frame period.
+
 #### Fixed
+- Interoperability (found in UE 5.8 testing): the sender no longer publishes
+  `_UNORM_SRGB`. Spout 2.007's OpenGL receive path, used by the Spout Demo Receiver 2.007.015 and
+  other SpoutGL applications, checks the shared texture's real format against an allow-list that
+  has no `B8G8R8A8_UNORM_SRGB` (91), so those receivers refused the shipped sender example and every
+  8-bit sRGB render target ("No sender detected"). Every supported 8-bit source (BGRA8 and RGBA8,
+  including sRGB render targets with Force Linear Gamma off, typeless sources and `_UNORM_SRGB`
+  sources) is now shared as `B8G8R8A8_UNORM` (87) or `R8G8B8A8_UNORM` (28), with the pixel bytes
+  and alpha copied unchanged and no colour conversion. This supersedes the fix below that
+  advertised 8-bit sender colour intent from the effective RHI flags. `_UNORM_SRGB` (91/29) is
+  still accepted on receive from peers that publish it; RGB10A2 and RGBA16F are unchanged.
+  Consequence: preserving the encoded bytes does not preserve the sRGB format tag. An sRGB render
+  target and a Force Linear Gamma render target both publish `_UNORM`, so external consumers can no
+  longer infer the source's colour intent from the format. By the Spout convention 8-bit `_UNORM`
+  bytes are gamma-encoded (sRGB), which is what an sRGB render target produces and what receivers on
+  `Auto` expect; a Force Linear Gamma render target stores linear values and needs
+  `Color Space = Linear` on its receiver. Unreal-to-Unreal results are unchanged, because `Auto`
+  already decoded 8-bit `_UNORM` as sRGB. Automation now checks BGRA8 and RGBA8 sources, linear and
+  sRGB, for the `_UNORM` share and unchanged bytes under every receiver colour-space mode; the
+  native pixel peer requires the shared texture's real format as well as the advertised one; the
+  packaged example check keeps the shipped sender target's authored gamma. The documentation states
+  the lost format tag as a limitation.
+- Shared-texture access (found in UE 5.8 long-run testing): each named or keyed
+  access attempt now waits up to `r.Spout.AccessWaitMs` for a peer that holds the texture, instead
+  of only trying once. Default 2 ms, clamped to 0 to 10, read per attempt on the render thread;
+  `0` restores zero-wait acquisition only, not earlier builds as a whole: the keyed release below and
+  the other fixes in this release stay active. The wait ends as soon as the peer releases the
+  texture. With a zero wait, a receiver whose once-per-frame read kept landing inside the sender's
+  short lock window skipped frame after frame whenever the two frame clocks lined up: in 60 fps
+  long-run test diagnostics against an external sender that froze the received image for up to 32
+  consecutive frames (about half a second) and delivered 5 % of frames in the worst second. With
+  the 2 ms wait the same conditions produced no run longer than 2 frames. This changes the
+  documented contract: access attempts are no longer nonblocking. The bound applies to each
+  attempt, not to a frame, so several busy streams can each add up to it in one frame, and Windows
+  scheduling can stretch a timed-out wait (2 to 3 ms at Unreal's 1 ms timer resolution, up to about
+  16 ms at the default Windows resolution). For keyed-mutex textures the wait polls zero-timeout
+  acquires about every 50 microseconds until the bound, instead of passing the timeout to
+  `AcquireSync` (a timed keyed acquire on the plugin's D3D11-on-12 device delivered fewer frames in
+  testing). The receive paths now also submit Unreal's keyed-mutex release as soon as access is
+  given back; it used to wait for the device's next flush, which kept a keyed sender waiting on the
+  GPU. With a keyed sender and no deliberate holds that took skipped transfers from 82 to 0 per
+  minute; in paired runs that alternated the setting, the 2 ms wait delivered 93 % of distinct keyed
+  frames against 85 % with no wait. Ownership, release, timeout, abandoned-mutex handling,
+  cancellation and shutdown are unchanged; `Get Spout Stream Status` no longer takes the stream's
+  frame-sync lock, so the game thread never waits behind a render-thread access wait. New
+  automation covers the setting's default, clamping and invalid values, per-attempt use, the
+  status query during a wait, and a real named mutex (timeout, release during the wait,
+  abandonment); the native tests cover named and keyed contention across processes, a clamped
+  `INFINITE` request and a peer crash during a wait.
+- Diagnostics: the shared-texture access warnings no longer say the plugin "timed out waiting" on
+  an unspecified wait. The sender reports that access was unavailable because a receiver still held
+  the texture after waiting up to the configured `r.Spout.AccessWaitMs`, so the frame was skipped
+  and the next one is published once the texture is free; the receiver reports that a peer (the
+  sender or another receiver) still held it after that wait, so the frame was not read yet and the
+  receiver tries again on its next call, which copies the sender's newest frame (the CPU path says
+  the same). Throttling is unchanged: at most
+  one line per stream every 5 seconds.
+- Render targets: `Create Texture Render Target 2D` no longer loses a draw or clear issued in the
+  frame it creates the target. It ended with a deferred `UpdateResource()` that re-created the
+  resource with a pending clear, which ran at the next scene render and wiped the caller's first
+  draw (found by the UE 5.8 interop matrix: targets cleared on creation published black).
+  The factory now sets its addressing before creating the resource and finishes with an immediate
+  update, as Unreal's own `Create Render Target 2D` does. A new target still starts opaque black.
+  The packaged host smoke run checks that a same-frame clear survives.
 - Restart performance: recycle closed Spout SDK frame-count backends instead of constructing
   one per stream incarnation. Profiling showed that construction cost about 14-15 ms twice per
   close/reopen (receiver entry on the game thread, sender entry on the render thread) and was nearly
@@ -39,7 +134,9 @@ from the August preparation.
   coverage for malformed and misleading results; preserve validation of archived measurements.
 - Retire closed stream generations, defer failed receiver discovery allocation, bound active roles
   and queued work, and account for caller-retained receiver images and resize overlap.
-- Use nonblocking keyed texture access with exact ownership results; preserve the key-zero Spout protocol.
+- Use exact ownership results for keyed texture access; preserve the key-zero Spout protocol. (This
+  entry originally made keyed access nonblocking; access now waits up to `r.Spout.AccessWaitMs`,
+  see above.)
 - Enforce public game-thread affinity, keep final shutdown stopped, latch unsupported RHI and back off
   native connect/registration failures. Add public stream/runtime status and reservation diagnostics.
 - Forward engine-path lists once, require PowerShell 7.2+, bound process termination/log draining and

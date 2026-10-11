@@ -209,6 +209,10 @@ namespace SpoutHostTest
 		// open - holding them here is what keeps a collection between ticks from being mistaken for
 		// a plugin defect.
 		TStrongObjectPtr<UTextureRenderTarget2D> SourceRenderTarget;
+		// Regression probe: a clear issued in the frame the factory creates a target must survive.
+		TStrongObjectPtr<UTextureRenderTarget2D> FactoryProbe;
+		int32 FactoryProbeFrame = 0;
+		bool bFactoryProbeChecked = false;
 		TStrongObjectPtr<UTexture2D> ReceivedTexture;
 		TStrongObjectPtr<UMaterialInstanceDynamic> ReceivedMaterial;
 

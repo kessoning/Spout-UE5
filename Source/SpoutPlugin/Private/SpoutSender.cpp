@@ -388,7 +388,8 @@ namespace
 						// mutex, and holding two of them would make the lock order depend on the
 						// order names happen to be queued in.
 						//
-						// A failed wait means a peer is still reading this texture. Skipping is
+						// The attempt waits at most r.Spout.AccessWaitMs for a peer to finish. A
+						// failed wait means a peer is still reading this texture. Skipping is
 						// the correct response -- overwriting it would tear the frame the peer is
 						// mid-read of -- and the scope owns nothing, so nothing is released.
 						FSpoutTextureAccessScope Access(
@@ -400,9 +401,9 @@ namespace
 							if (Destination.Entry->AccessLogThrottle.ShouldLog())
 							{
 								UE_LOG(LogSpoutPlugin, Warning,
-									TEXT("Spout sender '%s': timed out waiting for shared-texture access; this frame was not published. ")
-									TEXT("A receiver is holding the texture longer than the sender's frame time."),
-									*Destination.Entry->Name.ToString());
+									TEXT("Spout sender '%s': shared-texture access was unavailable because a receiver still held it after waiting up to %u ms (r.Spout.AccessWaitMs), ")
+									TEXT("so this frame was skipped and not published. The next frame is published once the texture is free."),
+									*Destination.Entry->Name.ToString(), SpoutLimits::AccessWaitMs());
 							}
 							continue;
 						}

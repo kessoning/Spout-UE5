@@ -57,10 +57,25 @@ transfer are involved on the send path.
 
 ## Known constraints
 
-- Sender-side colour correction is not applied; the texture is shared as-is. The colour space is
-  communicated through the DXGI format the sender advertises, which follows the render target's
-  Force Linear Gamma setting. Manage colour on the source side (Capture Source, render target
-  format) and pair it with the receiver's Color Space pin.
+- Sender-side colour correction is not applied; the pixel bytes and alpha are shared unchanged.
+  Every 8-bit source is published as the plain `_UNORM` format (`B8G8R8A8_UNORM` or
+  `R8G8B8A8_UNORM`), never `_UNORM_SRGB`, because Spout 2.007's OpenGL receivers, including the
+  Spout Demo Receiver 2.007.015, refuse `B8G8R8A8_UNORM_SRGB`.
+- Keeping the bytes unchanged does not keep the sRGB format tag: an sRGB render target (Force
+  Linear Gamma off) and a Force Linear Gamma render target both publish `_UNORM`, so a receiving
+  application cannot tell the source's colour intent from the format. `_UNORM` does not mean the
+  bytes are linear. By the Spout convention 8-bit `_UNORM` bytes are gamma-encoded (sRGB), which
+  is what an sRGB render target produces and what receivers on Auto expect; a Force Linear Gamma
+  target stores linear values, so set its receiver's Color Space to Linear. Manage colour on the
+  source side (Capture Source, render target format and gamma) and pair it with the receiver's
+  Color Space pin.
+- Each publish takes Spout's cross-process access lock for the shared texture. If a receiver holds
+  the texture, the publish waits at most `r.Spout.AccessWaitMs` (default 2 ms, clamped to 0 to 10)
+  on the render thread for it to finish. If it is still busy after that, the frame is skipped
+  rather than overwritten mid-read, and the next frame is published once the texture is free. The
+  skip is logged as "shared-texture access was unavailable", at most once per stream every 5
+  seconds, and counted in Get Spout Stream Status (`AccessMisses`). The wait applies to each
+  publish, not to a whole frame; see [LIMITATIONS.md](LIMITATIONS.md#performance-and-diagnostics).
 - Windows-only, DirectX 12 RHI required.
 
 See the [Blueprint API Reference](BLUEPRINT_API.md) for the exact Spout Sender and Close Sender

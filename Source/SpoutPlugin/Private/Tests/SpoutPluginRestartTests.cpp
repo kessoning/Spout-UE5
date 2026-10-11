@@ -74,7 +74,7 @@ namespace
 		virtual void CloseAccessMutex() override {}
 		virtual void EnableFrameCount(const ANSICHAR*) override {}
 		virtual void CleanupFrameCount() override {}
-		virtual bool CheckTextureAccess(void*) override { return true; }
+		virtual bool CheckTextureAccess(void*, uint32) override { return true; }
 		virtual bool AllowTextureAccess(void*) override { return true; }
 		virtual void SetNewFrame() override {}
 		virtual bool GetNewFrame() override { return true; }

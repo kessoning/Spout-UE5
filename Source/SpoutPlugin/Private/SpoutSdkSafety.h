@@ -102,21 +102,48 @@ public:
 class FSpoutSafeFrameCount : public spoutFrameCount
 {
 public:
-	bool CheckTextureAccessSafe(ID3D11Texture2D* Texture)
+	/** Upper bound on one access attempt's wait. Callers clamp too; this keeps INFINITE out. */
+	static constexpr DWORD MaxAccessWaitMs = 10;
+
+	// Waits at most TimeoutMs (clamped to MaxAccessWaitMs) for a peer to release the texture;
+	// zero only tries. The wait ends as soon as access is granted. Windows scheduling can make
+	// the elapsed time exceed TimeoutMs.
+	bool CheckTextureAccessSafe(ID3D11Texture2D* Texture, DWORD TimeoutMs)
 	{
+		if (TimeoutMs > MaxAccessWaitMs) TimeoutMs = MaxAccessWaitMs;
 		if (Texture && IsKeyedMutex(Texture))
 		{
 			IDXGIKeyedMutex* Keyed = nullptr;
 			if (FAILED(Texture->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&Keyed))) || !Keyed) return false;
 			// Spout uses key zero for both acquire and release. WAIT_TIMEOUT is a
 			// nonnegative HRESULT, so SUCCEEDED would incorrectly grant ownership.
-			const HRESULT Result = Keyed->AcquireSync(0, 0);
+			// The bound is spent polling zero-timeout acquires rather than passed to AcquireSync:
+			// on the plugin's D3D11-on-12 device (which shares the engine's graphics queue) a timed
+			// keyed acquire can deliver fewer frames than zero-timeout attempts while a peer holds
+			// the texture for long periods.
+			HRESULT Result = Keyed->AcquireSync(0, 0);
+			if (Result == static_cast<HRESULT>(WAIT_TIMEOUT) && TimeoutMs > 0)
+			{
+				LARGE_INTEGER Frequency, Now, Deadline;
+				QueryPerformanceFrequency(&Frequency);
+				QueryPerformanceCounter(&Now);
+				Deadline.QuadPart = Now.QuadPart + Frequency.QuadPart * static_cast<LONGLONG>(TimeoutMs) / 1000;
+				const LONGLONG PollInterval = Frequency.QuadPart / 20000; // about 50 microseconds
+				while (Result == static_cast<HRESULT>(WAIT_TIMEOUT) && Now.QuadPart < Deadline.QuadPart)
+				{
+					const LONGLONG NextPoll = Now.QuadPart + PollInterval;
+					SwitchToThread();
+					do { YieldProcessor(); QueryPerformanceCounter(&Now); } while (Now.QuadPart < NextPoll && Now.QuadPart < Deadline.QuadPart);
+					Result = Keyed->AcquireSync(0, 0);
+					QueryPerformanceCounter(&Now);
+				}
+			}
 			Keyed->Release();
 			return Result == S_OK;
 		}
 		if (!m_hAccessMutex)
 			return false;
-		const DWORD Result = WaitForSingleObject(m_hAccessMutex, 0);
+		const DWORD Result = WaitForSingleObject(m_hAccessMutex, TimeoutMs);
 		if (Result == WAIT_ABANDONED)
 		{
 			// Windows granted ownership, unlike a timeout. Discard this inconsistent

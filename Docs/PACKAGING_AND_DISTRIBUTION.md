@@ -51,9 +51,9 @@ Every release variant must also keep the `Source/` folder (at minimum
 `Source/SpoutPlugin/SpoutPlugin.Build.cs` and `Source/SpoutPlugin/Public`). Unreal Build Tool
 reads the module's `.Build.cs` on every compile and package, even when it uses the prebuilt
 binary, so a source-less zip cannot be compiled or packaged against and fails with
-"Could not find definition for module 'SpoutPlugin'". The prebuilt `Binaries/` still let
-Blueprint-only users with a matching engine skip compilation; do not strip `Source/` to make the
-download smaller.
+"Could not find definition for module 'SpoutPlugin'". The prebuilt `Binaries/` let a
+Blueprint-only project open in a matching editor without compiling; do not strip `Source/` to make
+the download smaller.
 
 ## Building releases (RunUAT)
 
@@ -68,20 +68,54 @@ then strips `.pdb` files and zips a `SpoutPlugin/` folder per version (for examp
 `SpoutPlugin_1.0.0_UE5.7_Win64.zip`). `build.bat` is a one-line launcher for `build.ps1`.
 
 `Intermediate/Build` is kept in the zips on purpose (since 0.0.9). `BuildPlugin` emits
-precompiled `UnrealGame` Development and Shipping objects plus `.precompiled` manifests
-there. When the plugin is installed under `Engine/Plugins/Marketplace/SpoutPlugin/`, those
-let a Blueprint-only project package **without Visual Studio**. Stripping them (as releases
-up to 0.0.8 did) makes no-compiler packaging impossible.
+precompiled `UnrealGame` Development and Shipping objects, generated headers and `.precompiled`
+manifests there, as Unreal's plugin packaging expects. Keeping them is not a supported way to
+package a game without Visual Studio, and the tested project-folder installs did not reuse them
+(see below).
 
 ## Packaging a project that uses the plugin
 
-- **Plugin in `<Project>/Plugins/` (the usual setup):** Unreal Build Tool always recompiles
-  project plugins from source when packaging, so Visual Studio (with the C++ toolchain and a
-  matching Windows SDK) is required. This is a UBT rule, not a plugin choice.
-- **Blueprint-only project, no Visual Studio:** install the plugin into the engine instead,
-  at `Engine/Plugins/Marketplace/SpoutPlugin/`, using a release zip that still contains
-  `Intermediate/` (0.0.9 or later). Packaging then links the shipped precompiled objects.
-  Only Development and Shipping configurations are covered; DebugGame still needs a compiler.
+The supported packaging workflow uses Visual Studio 2022 with the C++ workload, its MSVC
+toolchain and a Windows SDK supported by the engine version, even when the prebuilt editor
+binaries load without compiling. Packaging without a compiler is not supported.
+
+Four different things happen, and only the first one works without a compiler:
+
+- **Loading the prebuilt editor module.** In a matching editor, the archive's
+  `UnrealEditor-SpoutPlugin.dll` loads without compiling (verified on UE 5.8 in a Blueprint-only
+  project).
+- **Linking the game executable.** A packaged Win64 game is monolithic: the plugin module is linked
+  into the game executable. A package that uses the engine's prebuilt `UnrealGame.exe` cannot
+  contain it, whatever the archive ships.
+- **Compiling the plugin source.** In every tested configuration that produced a game containing
+  the plugin from `<Project>/Plugins/`, Unreal compiled the plugin from the shipped `Source/` with
+  MSVC and the Windows SDK.
+- **Reusing precompiled objects.** Those configurations did not reuse the archive's precompiled
+  `UnrealGame` objects. Whether an engine-level install reuses them was not tested for 1.0.0.
+
+What was tested (UE 5.8.2, a pre-release 1.0.0 archive in `<Project>/Plugins/`, Development):
+
+| Project | Plugin enablement | Game build | Packaged game |
+|---|---|---|---|
+| C++ project | release descriptor, dropped in | project target; plugin compiled from `Source/` and linked (Shipping too) | runs, streams work |
+| Blueprint-only | release descriptor, dropped in | none; engine's prebuilt `UnrealGame.exe`; no `Spout.dll` staged | module `SpoutPlugin` could not be found |
+| Blueprint-only | as above plus `{"Name": "SpoutPlugin", "Enabled": true}` in the `.uproject` | none | same failure |
+| Blueprint-only | descriptor edited to `"EnabledByDefault": true` (test copy) | none | same failure |
+| Blueprint-only | descriptor edited to `"EnabledByDefault": false` (test copy) plus the `.uproject` entry | temporary target; plugin compiled from `Source/` with MSVC and linked; `Spout.dll` staged | runs, sender published |
+
+Why: Unreal Build Tool gives a Blueprint-only project its own (temporary) game target only when
+the code plugins the project enables differ from the ones enabled by default
+(`RequiresTempTargetForCodePlugin` in `NativeProjects.cs`). A plugin in `<Project>/Plugins/` counts
+as enabled by default unless its descriptor says `"EnabledByDefault": false`. The release
+descriptor does not set the key, so the plugin is in both sets and no game target is built. The
+last row only demonstrates that mechanism: it changes the shipped descriptor, which 1.0.0 does
+not do, and it still compiles with MSVC. It is not a supported setup.
+
+- **Supported:** a C++ project with the plugin in `<Project>/Plugins/`, packaged with Visual
+  Studio. For a Blueprint-only project, the verified workaround is to add a C++ class (Tools > New
+  C++ Class) and package again.
+- **C++ project, editor:** in the same test, building the C++ project's editor target also rebuilt
+  the plugin's editor binaries from `Source/`, replacing the prebuilt ones from the archive.
 - **Packaged-game runtime:** `Spout.dll` is staged next to the game executable automatically;
   nothing needs to be copied by hand. The packaged game must run on the D3D12 RHI, exactly
   like the editor.

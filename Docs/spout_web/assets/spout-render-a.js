@@ -87,7 +87,7 @@ window.RENDER_A = function () {
     ["DirectX 12 RHI enabled", "The plugin creates a D3D11-on-D3D12 device and will not initialize on any other RHI. It logs \"SpoutPlugin requires DX12 RHI.\" and stops.", "must"],
     ["Spout.dll", "Bundled under ThirdParty/Spout/lib/amd64/ and staged to Binaries/Win64/ at build time.", "must"],
     ["Same GPU on both ends", "Spout's shared-texture model does not span GPUs.", "must"],
-    ["Visual Studio 2022", "With the C++ toolchain and a matching Windows SDK - for source builds only.", "maybe"],
+    ["Visual Studio 2022", "With the C++ workload, toolchain and a supported Windows SDK - for source builds and for packaging a game. Not needed to open a project with the prebuilt plugin in a matching editor.", "maybe"],
     ["Project-local install", "Install into your project's Plugins/ folder, the qualified consumer layout. Qualify engine-wide installations separately.", "must"]
   ];
   out.push(C.section("requirements", `
@@ -148,7 +148,7 @@ window.RENDER_A = function () {
       </div>
 
       <div class="tab-panel" id="t3">
-        <p>The descriptor enables the plugin by default. Confirm in <code>Edit &gt; Plugins</code> by searching "Spout Plugin". Restart the editor if you change the enabled state.</p>
+        <p>A plugin in the project's <code>Plugins/</code> folder is enabled by default. Confirm in <code>Edit &gt; Plugins</code> by searching "Spout Plugin". Restart the editor if you change the enabled state.</p>
         ${C.figure("SP-001")}
       </div>
 
@@ -207,7 +207,9 @@ window.RENDER_A = function () {
       "Cost scales with resolution. Use a timer when full frame rate is not needed.",
       "The shared texture and the interop wrap are cached and reused while size and format are stable.",
       "No CPU readback happens on the send path - it is a GPU-to-GPU copy.",
-      "No sender-side gamma or color correction is applied. Manage color on the source side."
+      "No sender-side gamma or color correction is applied: the bytes are copied unchanged. Every 8-bit source is published as plain _UNORM, never _UNORM_SRGB, because Spout 2.007's OpenGL receivers (such as the Spout Demo Receiver) refuse it.",
+      "The sRGB format tag is therefore not carried: an sRGB render target and a Force Linear Gamma render target both publish _UNORM, and receivers cannot tell them apart from the format. By the Spout convention 8-bit _UNORM bytes are sRGB-encoded, which receivers on Auto expect; a Force Linear Gamma source needs Color Space = Linear on the receiver.",
+      "Each publish takes Spout's cross-process access lock. If a receiver holds the texture, the publish waits at most r.Spout.AccessWaitMs (default 2 ms) for it; if it is still busy, that frame is skipped, the next one is published once the texture is free, and a throttled \"shared-texture access was unavailable\" warning is logged."
     ])}</div>
   `));
 

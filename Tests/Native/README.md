@@ -43,9 +43,13 @@ Production code does not filter the debug queue.
 
 The automation, packaged-host and performance scripts build the peer in an isolated directory and
 pass it automatically. Packaged smoke and performance qualification fail when it is absent.
-The `receive` mode accepts an optional final `srgb` argument to require typed sRGB metadata;
-the default requires UNORM. The native receiver also creates a shader-resource view using that
-advertised format, so incompatible color metadata fails qualification. Patterns include changing alpha and all channel values, while the
+The `receive` mode takes an optional final argument naming the format it requires: `bgra` (or
+`linear`, the default) for `B8G8R8A8_UNORM`, `rgba` for `R8G8B8A8_UNORM`, and `srgb`/`bgra_srgb` or
+`rgba_srgb` for the `_UNORM_SRGB` variants. The plugin shares every 8-bit source as `_UNORM`, so
+qualification uses `bgra` and `rgba`. The peer requires both the advertised format and the shared
+texture's real format to match (exit 18 otherwise), because SpoutGL receivers check the real
+format, and it creates a shader-resource view in that format, so incompatible color metadata fails
+qualification. An unknown format argument exits 17. Patterns include changing alpha and all channel values, while the
 origin alpha remains 255 to distinguish a frame from a newly cleared receiver output.
 
 `Scripts/Test-TrackDDelivery.ps1` takes a provenance-checked packaged executable and native peer.

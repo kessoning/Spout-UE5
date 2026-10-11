@@ -157,18 +157,40 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutP1Color, "SpoutPlugin.P1.SenderColorMetad
 bool FSpoutP1Color::RunTest(const FString&)
 {
 	ExpectWrapDiagnostic(*this);
+	for (EPixelFormat Format : {PF_B8G8R8A8, PF_R8G8B8A8})
 	for (bool Linear : {true, false})
 	{
+		const FString Case = FString::Printf(TEXT("%s %s source"), GetPixelFormatString(Format), Linear ? TEXT("linear") : TEXT("sRGB"));
 		const FName Name(*(TEXT("SpoutP1Color_") + FGuid::NewGuid().ToString(EGuidFormats::Digits)));
-		TStrongObjectPtr<UTextureRenderTarget2D> Source(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(256, 16, PF_B8G8R8A8, Linear));
+		TStrongObjectPtr<UTextureRenderTarget2D> Source(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(256, 16, Format, Linear));
+		TestTrue(Case + TEXT(": created"), Source.IsValid());
+		if (!Source.IsValid()) continue;
 		Upload(Source.Get(), 41); USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
 		auto Entry = FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Sender);
-		TestTrue(TEXT("sender registered"), Entry.IsValid());
-		if (Entry) TestEqual(TEXT("typed sharing format follows effective color intent"), static_cast<int32>(Entry->SharedFormat), static_cast<int32>(Linear ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM_SRGB));
-		UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr;
-		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::Linear);
-		TestTrue(TEXT("color metadata does not transform ramp or alpha bytes"), Texture && Read(Texture->GetResource(), 256, 16) == Pattern(256, 16, 41));
-		USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material); USpoutBPFunctionLibrary::CloseSender(Name); FlushRenderingCommands();
+		TestTrue(Case + TEXT(": sender registered"), Entry.IsValid());
+		// Every 8-bit source is shared as the plain _UNORM format, whatever its gamma: SpoutGL
+		// receivers refuse _UNORM_SRGB. The bytes carry the colour intent, the format does not.
+		const DXGI_FORMAT Unorm = Format == PF_B8G8R8A8 ? DXGI_FORMAT_B8G8R8A8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+		if (Entry) TestEqual(Case + TEXT(": shared as the _UNORM format"), static_cast<int32>(Entry->SharedFormat), static_cast<int32>(Unorm));
+		// The upload wrote FColor (B,G,R,A) bytes. An RGBA8 target stores them in R,G,B,A order, so
+		// reading it back as FColor swaps red and blue; the bytes themselves are unchanged.
+		TArray<FColor> Expected = Pattern(256, 16, 41);
+		if (Format == PF_R8G8B8A8) for (FColor& P : Expected) Swap(P.R, P.B);
+		for (ESpoutColorSpace Mode : {ESpoutColorSpace::Auto, ESpoutColorSpace::Linear, ESpoutColorSpace::SRGB})
+		{
+			const FString ModeCase = Case + TEXT(", receiver ") + UEnum::GetValueAsString(Mode);
+			UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr;
+			const bool bAccepted = USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, Mode);
+			TestTrue(ModeCase + TEXT(": accepted"), bAccepted && Texture);
+			if (Texture)
+			{
+				TestEqual(ModeCase + TEXT(": decode setting follows the colour-space mode"), Texture->SRGB != 0, Mode != ESpoutColorSpace::Linear);
+				TestEqual(ModeCase + TEXT(": pixel format"), static_cast<int32>(Texture->GetPixelFormat()), static_cast<int32>(Format));
+				TestTrue(ModeCase + TEXT(": ramp and alpha bytes unchanged"), Read(Texture->GetResource(), 256, 16) == Expected);
+			}
+			USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material); FlushRenderingCommands();
+		}
+		USpoutBPFunctionLibrary::CloseSender(Name); FlushRenderingCommands();
 	}
 	return true;
 }

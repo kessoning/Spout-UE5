@@ -15,12 +15,23 @@ static unsigned int Pixel(unsigned int X, unsigned int Y, unsigned int Frame)
 	return (((X == 0 && Y == 0) ? 255u : ((X * 3 + Y * 7 + Frame) & 255)) << 24) | (((X * 17 + Frame) & 255) << 16)
 		| (((Y * 29 + Frame) & 255) << 8) | ((X + Y + Frame * 13) & 255);
 }
+// The format a receive run requires, both advertised and as the shared resource's real format.
+// "linear" and "srgb" select the BGRA layout, like "bgra" and "bgra_srgb"; the RGBA variants select the other.
+static DXGI_FORMAT ReceiveFormat(int Argc, char** Argv)
+{
+	const char* Mode = Argc > 4 ? Argv[4] : "linear";
+	if (!std::strcmp(Mode, "linear") || !std::strcmp(Mode, "bgra")) return DXGI_FORMAT_B8G8R8A8_UNORM;
+	if (!std::strcmp(Mode, "srgb") || !std::strcmp(Mode, "bgra_srgb")) return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+	if (!std::strcmp(Mode, "rgba")) return DXGI_FORMAT_R8G8B8A8_UNORM;
+	if (!std::strcmp(Mode, "rgba_srgb")) return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	return DXGI_FORMAT_UNKNOWN;
+}
 int main(int Argc, char** Argv)
 {
 	if (Argc < 4) return 2;
 	const bool Sending = std::strcmp(Argv[1], "send") == 0;
-	const DXGI_FORMAT ExpectedFormat = !Sending && Argc > 4 && std::strcmp(Argv[4], "srgb") == 0
-		? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
+	const DXGI_FORMAT ExpectedFormat = Sending ? DXGI_FORMAT_B8G8R8A8_UNORM : ReceiveFormat(Argc, Argv);
+	if (ExpectedFormat == DXGI_FORMAT_UNKNOWN) return 17;
 	ComPtr<ID3D11Device> Device;
 	ComPtr<ID3D11DeviceContext> Context;
 	if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
@@ -85,6 +96,8 @@ int main(int Argc, char** Argv)
 				if (FAILED(Device->OpenSharedResource(Handle, IID_PPV_ARGS(&Replacement)))) { Sleep(2); continue; }
 				D3D11_TEXTURE2D_DESC Desc = {}; Replacement->GetDesc(&Desc);
 				if (Desc.Width != W || Desc.Height != H || Desc.MipLevels != 1 || Desc.ArraySize != 1 || Desc.SampleDesc.Count != 1) { Sleep(2); continue; }
+				// SpoutGL receivers check the texture's real format, not the advertisement.
+				if (Desc.Format != ExpectedFormat) { Result = 18; break; }
 				// Metadata must describe a view the receiving application can actually create.
 				D3D11_SHADER_RESOURCE_VIEW_DESC ViewDesc = {};
 				ViewDesc.Format = ExpectedFormat;

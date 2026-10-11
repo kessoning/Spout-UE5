@@ -14,6 +14,18 @@ namespace SpoutLimits
 	int64 RetainedBytes();
 	int64 PeakRetainedBytes();
 	int64 RejectedAllocations();
+
+	/** r.Spout.AccessWaitMs default and upper clamp. The maximum stays well under one 60 Hz frame. */
+	constexpr int32 DefaultAccessWaitMs = 2;
+	constexpr int32 MaxAccessWaitMs = 10;
+
+	/**
+	 * Longest wait, in milliseconds, for ONE attempt to take a shared texture's access lock while a
+	 * peer holds it: r.Spout.AccessWaitMs clamped to 0..MaxAccessWaitMs. Zero only tries. Not a
+	 * per-frame budget: every stream's transfer is its own attempt. Callable on any thread; the
+	 * render thread reads its own copy of the setting.
+	 */
+	uint32 AccessWaitMs();
 }
 
 // Lifetime follows the actual retained texture/entry, including old outputs held by callers.

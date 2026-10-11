@@ -1,0 +1,5 @@
+# UnrealBuildTool scans a project plugin's Tests/ folder for *.Target.cs and *.Build.cs files.
+# The host projects in here are standalone test projects (and SpoutHostTest and SpoutBaselineHost
+# both declare SpoutHostTestTarget), so when this repository is cloned or linked into a project's
+# Plugins/ folder their rules would be compiled into that project and break its build.
+# The test scripts stage each host project into its own folder, so they are unaffected by this file.

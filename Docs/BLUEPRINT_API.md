@@ -104,7 +104,8 @@ advanced-display pins (hidden until expanded).
   and the mismatch is logged; the call still succeeds and `OutTexture` still updates. A size
   mismatch is recoverable: the target is resized to the incoming frame automatically. Resizing
   clears the target to its Clear Color; if the transfer in that call is skipped because the
-  sender is busy, the target shows its clear colour until the next successful transfer.
+  sender is still busy after the access wait (`r.Spout.AccessWaitMs`, default 2 ms per attempt),
+  the target shows its clear colour until the next successful transfer.
 - Outputs: `OutMat` (dynamic material instance, created on first call when `InputMaterial` is
   set); `OutTexture` (transient texture updated from the stream).
 - Ownership: `OutMat` and `OutTexture` are **outputs, not ownership**. The received texture
@@ -213,9 +214,17 @@ Blueprint instead of an asset.
   `PF_FloatRGBA`).
 - Ownership: the result is **not** rooted. Keep a reference to it exactly as you would with the
   engine's own Create Render Target 2D node, or it will be garbage collected.
-- `bForceLinearGamma` decides what colour space the sender advertises for 8-bit formats:
-  `true` (default) publishes a plain `_UNORM` format, so set the receiver's Color Space to
-  `Linear`; `false` publishes `_UNORM_SRGB`, which a receiver on `Auto` already reads correctly.
+- `bForceLinearGamma` decides what the render target's 8-bit bytes contain. The sender copies the
+  bytes unchanged and publishes the plain `_UNORM` format either way (it never publishes
+  `_UNORM_SRGB`, which Spout's OpenGL receivers refuse):
+  - `true` (default): the render target stores linear values. A receiver on `Auto` assumes 8-bit
+    `_UNORM` is sRGB-encoded, so set that receiver's Color Space to `Linear`.
+  - `false`: the render target stores sRGB-encoded bytes, the Spout convention for 8-bit video, so
+    a receiver on `Auto` (or another application following the convention) is already correct.
+- Keeping the bytes unchanged does not keep the sRGB format tag: both settings publish plain
+  `_UNORM`, so a receiving application cannot tell the source's colour intent from the format.
+  `_UNORM` does not mean the bytes are linear; the bytes plus the configuration on both ends decide
+  it. 10-bit and float formats are linear in both directions and are unaffected.
 
 ---
 
@@ -241,9 +250,9 @@ How the Spout Receiver node interprets the received bytes.
 
 | Value | Meaning |
 |---|---|
-| `Auto` | Follows the format convention: 8-bit frames decode as sRGB, 10-bit and 16-bit float frames stay linear. Matches what other Spout applications publish; the right answer for almost every sender. |
+| `Auto` | Follows the format convention: 8-bit frames (`_UNORM` or `_UNORM_SRGB`) decode as sRGB, 10-bit and 16-bit float frames stay linear. Matches what other Spout applications publish; the right answer for almost every sender. |
 | `SRGB` | Forces sRGB decoding. Only valid for 8-bit formats; requesting it for a 10-bit or float frame fails the call with a logged diagnostic rather than being silently ignored. |
-| `Linear` | No decoding. Use when the sender publishes linear or data values in an 8-bit format, such as a render target created with Force Linear Gamma. |
+| `Linear` | No decoding. Use when the sender publishes linear or data values in an 8-bit format, such as a render target created with Force Linear Gamma. The format cannot say so: such a sender publishes the same `_UNORM` format as an sRGB one. |
 
 ## Struct: FSenderStruct
 
@@ -269,7 +278,8 @@ fields are available for your own Blueprint use but are not driven by the plugin
 
 All public functions require the game thread. `GetSpoutStreamStatus(Name, Type)` returns the current
 role's active flag, pending commands, accepted queued requests, queue rejections, submitted frames,
-access misses, native-failure count and last native error. An active role can be awaiting its first
+access misses (transfers skipped because a peer held the shared texture; the access check does
+not wait), native-failure count and last native error. An active role can be awaiting its first
 successful transfer; `bHasFrame` means a submitted frame has been recorded, not that a foreign peer
 has displayed it. CPU receive uploads may still be queued when submission is recorded.
 

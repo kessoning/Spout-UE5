@@ -20,6 +20,7 @@
 #include "Engine/GameViewportClient.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "Kismet/KismetRenderingLibrary.h"
 #include "Engine/World.h"
 // MaterialDomain.h and not just Material.h: on UE 5.3 the latter only forward-declares
 // EMaterialDomain, so MD_Surface is undeclared without it.
@@ -495,6 +496,41 @@ namespace SpoutHostTest
 
 	bool FSmokeRunner::StepPrepareSource()
 	{
+		// Regression: a draw issued in the frame CreateTextureRenderTarget2D creates the target must
+		// survive the target's initialisation. A deferred UpdateResource() at the end of the factory
+		// would leave a pending clear that runs at the next scene render and wipes the draw; only
+		// a packaged game that renders frames can show it.
+		if (!bFactoryProbeChecked)
+		{
+			UWorld* World = GetGameWorld();
+			if (!FactoryProbe.IsValid())
+			{
+				FactoryProbe.Reset(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(16, 16, PF_B8G8R8A8, true));
+				if (!FactoryProbe.IsValid() || !World)
+				{
+					FailAndFinish(TEXT("CreateTextureRenderTarget2D returned null for the first-frame draw probe"));
+					return false;
+				}
+				UKismetRenderingLibrary::ClearRenderTarget2D(World, FactoryProbe.Get(), FLinearColor(0.2f, 0.5f, 0.8f, 1.0f));
+				FactoryProbeFrame = StepFrames;
+				return false;
+			}
+			if (StepFrames - FactoryProbeFrame < 10)
+			{
+				return false;
+			}
+			const FColor Pixel = UKismetRenderingLibrary::ReadRenderTargetPixel(World, FactoryProbe.Get(), 8, 8);
+			FReport::Get()->SetField(TEXT("factoryFirstFrameDrawPixel"), FString::Printf(TEXT("%d,%d,%d,%d"), Pixel.R, Pixel.G, Pixel.B, Pixel.A));
+			if (FMath::Abs(Pixel.R - 51) > 1 || FMath::Abs(Pixel.G - 128) > 1 || FMath::Abs(Pixel.B - 204) > 1 || Pixel.A != 255)
+			{
+				FailAndFinish(FString::Printf(TEXT("a clear issued in the frame CreateTextureRenderTarget2D created the target was lost (read %d,%d,%d,%d)"),
+					Pixel.R, Pixel.G, Pixel.B, Pixel.A));
+				return false;
+			}
+			bFactoryProbeChecked = true;
+			FactoryProbe.Reset();
+		}
+
 		if (!EnsureSourceRenderTarget(256, 256))
 		{
 			FailAndFinish(TEXT("CreateTextureRenderTarget2D returned null for a 256x256 B8G8R8A8 target"));

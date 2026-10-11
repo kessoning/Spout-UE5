@@ -56,14 +56,16 @@ namespace SpoutFormatPolicy
 		/** DXGI format to create the shared texture with. Only meaningful when IsUsable(). */
 		DXGI_FORMAT SharedFormat = DXGI_FORMAT_UNKNOWN;
 		/**
-		 * The colour space the shared format announces to peers.
+		 * Whether the source states that its 8-bit bytes are sRGB-encoded: a _UNORM_SRGB source
+		 * format, or a UE render target with its sRGB flag set. Diagnostic only.
 		 *
-		 * SRGB only for the _UNORM_SRGB variants, which say so in the format itself. Everything
-		 * else is Linear as far as the *protocol* is concerned; whether an 8-bit _UNORM feed
-		 * actually carries gamma-encoded bytes is a convention, not something the format states,
-		 * and that is exactly why the receiver has an override.
+		 * The shared texture does not carry this. Every 8-bit source is shared as the _UNORM
+		 * variant with its bytes unchanged, because SpoutGL receivers (the Spout demo applications
+		 * among them) refuse _UNORM_SRGB textures. A _UNORM share therefore says nothing about
+		 * whether the bytes are linear: by the Spout convention 8-bit bytes are gamma-encoded, and
+		 * a receiver learns otherwise only from its own configuration (Color Space = Linear here).
 		 */
-		ESpoutColorSpace DeclaredColorSpace = ESpoutColorSpace::Linear;
+		bool bSourceSRGB = false;
 
 		bool IsUsable() const
 		{

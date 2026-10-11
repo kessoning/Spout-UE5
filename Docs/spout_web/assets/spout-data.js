@@ -121,13 +121,14 @@ SPOUT.api = [
   },
   {
     name: "Spout Receiver", cat: "receiver", ret: "bool",
-    sig: "bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr)",
+    sig: "bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr, ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto)",
     purpose: "Receives a stream. OptionalOutputRenderTarget is an advanced-display pin. Returns true when the sender exists and a receive was enqueued. Outputs Out Mat and Out Texture. Texture Parameter Name defaults to SpoutTexture when empty. Validate outputs before use.",
     inputs: [
       ["SpoutName", "FName — must match the sender exactly, including case."],
       ["InputMaterial", "UMaterialInterface* — optional base material; leave empty for raw texture only."],
       ["TextureParameterName", "FName — texture parameter to bind. Defaults to SpoutTexture when empty."],
-      ["OptionalOutputRenderTarget", "UTextureRenderTarget2D* — advanced pin; the frame is also copied into it if provided."]
+      ["OptionalOutputRenderTarget", "UTextureRenderTarget2D* — advanced pin; the frame is also copied into it if provided."],
+      ["ColorSpace", "ESpoutColorSpace — advanced pin. Auto (default) decodes 8-bit frames as sRGB, the Spout convention; Linear skips decoding (use it for a sender whose 8-bit bytes are linear, such as a Force Linear Gamma render target); sRGB forces decoding and is only valid for 8-bit frames. The format cannot tell you which applies: senders publish 8-bit video as plain _UNORM."]
     ],
     returns: "true when the sender exists and a receive was enqueued. Branch on this.",
     when: "Every frame on Event Tick, or on a timer. Validate Out Mat / Out Texture before using them - the sender may not be running yet.",
@@ -176,7 +177,7 @@ SPOUT.api = [
       ["Width", "int32 = 1024 — render target width."],
       ["Height", "int32 = 768 — render target height."],
       ["Format", "EPixelFormat = PF_B8G8R8A8 — pixel format. Supported: B8G8R8A8, R8G8B8A8, A2B10G10R10, FloatRGBA."],
-      ["bForceLinearGamma", "bool = true — true publishes a plain _UNORM format (pair with Color Space = Linear on the receiver); false publishes _UNORM_SRGB."]
+      ["bForceLinearGamma", "bool = true — decides what an 8-bit target's bytes contain; the sender publishes plain _UNORM either way. true stores linear values (set Color Space = Linear on the receiver); false stores sRGB-encoded bytes, the Spout convention, which a receiver on Auto reads correctly."]
     ],
     returns: "The new UTextureRenderTarget2D, or null for invalid dimensions or an unsupported pixel format. Not rooted.",
     when: "To make a render target in Blueprint at runtime instead of authoring an asset."
@@ -209,7 +210,10 @@ SPOUT.troubleshooting = [
   { symptom: "Sender not visible externally", fix: "Confirm DirectX 12; confirm the sender is called continuously; one sender per name; for GameViewport the window must be actively rendering and not minimized." },
   { symptom: "Receiver returns invalid output", fix: "Exact name match; check the return value; validate outputs; the texture parameter name must match the material." },
   { symptom: "Black texture from SceneCapture2D", fix: "Set Capture Source to Final Color (HDR) in Linear Working Color Space. Capture Source, exposure and output format must be qualified together." },
-  { symptom: "Wrong colors or gamma", fix: "Adjust render target format and Capture Source; try RGBA8 sRGB first, then RGB10A2." },
+  { symptom: "Wrong colors or gamma", fix: "Adjust render target format and Capture Source; try RGBA8 sRGB first, then RGB10A2. 8-bit sources are published as _UNORM whatever their gamma, so set Color Space = Linear on the receiver (Unreal or external) for a Force Linear Gamma source." },
+  { symptom: "Spout Demo Receiver: \"No sender detected\" for an sRGB render target", fix: "Fixed in 1.0.0. Earlier release candidates published 8-bit sRGB render targets as _UNORM_SRGB, which Spout 2.007's OpenGL receivers refuse; the sender now publishes plain _UNORM with unchanged bytes." },
+  { symptom: "Log: \"shared-texture access was unavailable\"", fix: "Another application still held the shared texture after the access wait (r.Spout.AccessWaitMs, default 2 ms). The sender skips that frame and publishes the next; the receiver copies the sender's newest frame on a later call. Throttled to one line per stream every 5 seconds; Get Spout Stream Status counts every miss. The wait applies to each attempt on the render thread, not to a frame, so several locked streams add up; r.Spout.AccessWaitMs 0 never waits (zero-wait acquisition only; other fixes stay active)." },
+  { symptom: "Frames skip or repeat, no access misses", fix: "Sampling, not contention: the receiver reads once per Unreal frame and a sender at the same frame rate drifts in and out of alignment with it. r.Spout.AccessWaitMs does not change this; a higher Unreal frame rate reduces it but does not guarantee every frame. See Limitations." },
   { symptom: "Stream name mismatch", fix: "Use the exact external name from Spout Info. Local FName keys do not distinguish case." },
   { symptom: "Multiple senders conflict", fix: "Use unique, stable names per stream. Only one sender can own a name at a time." },
   { symptom: "Performance drops", fix: "Keep the GPU receiver at its default; reduce resolution or update rate; prefer timers over Tick." },
@@ -230,10 +234,14 @@ SPOUT.limitations = [
   "DirectX 12 RHI required; the plugin refuses to initialize otherwise.",
   "Both ends must be on the same GPU.",
   "Supported formats are BGRA8, RGBA8, RGB10A2 and RGBA16F; color interpretation must match the source.",
-  "No colour conversion on send; the advertised colour space follows the render target's Force Linear Gamma setting.",
+  "No colour conversion on send. Every 8-bit source is published as plain _UNORM with its bytes unchanged; _UNORM_SRGB is never published, because Spout's OpenGL receivers refuse it.",
+  "The sRGB format tag is not carried: an sRGB render target and a Force Linear Gamma render target both publish _UNORM, so receivers cannot tell the source's colour intent from the format. _UNORM does not mean linear; by the Spout convention the bytes are sRGB-encoded, and a Force Linear Gamma source needs Color Space = Linear on the receiver.",
   "Final Color (HDR) in Linear Working Color Space is a starting point; qualify Capture Source, exposure and output format together.",
   "One sender per name.",
   "Senders and receivers must be called continuously.",
+  "Receiving samples a stream once per Unreal frame and does not queue frames. At equal frame rates the two clocks drift in and out of alignment; near alignment single frames are skipped and the previous one repeated, with no access contention involved. In 1080p 60 fps testing this lowered delivery to 87 to 89 % of distinct frames in individual 10-second windows, while whole runs delivered about 99 %. r.Spout.AccessWaitMs does not change it; a higher Unreal frame rate reduces it but does not guarantee every frame, because jitter, hitches, stalls and contention can still lose frames.",
+  "The access wait (r.Spout.AccessWaitMs, default 2 ms) applies to each attempt, not to a frame, so several busy streams add up: in testing, a peer that locked eight 1080p streams added about 13 ms of render-thread waiting per frame. 0 restores zero-wait acquisition only; the plugin's other fixes stay active.",
+  "A keyed-mutex sender that holds its texture for tens of milliseconds can cause runs of consecutive skipped frames, with or without the access wait. With one 1080p 60 fps keyed test sender holding its texture 20 ms on every tenth frame, delivery was 84 % with up to 14 frames skipped in a row. Qualify keyed senders with their actual workload.",
   "Spout Info and Get Sender Info populate only Name, Width, Height, bIsAlive.",
   "The descriptor sets IsBetaVersion to false; qualification is still required. Native failures are reported and transient connection failures retry with backoff."
 ];

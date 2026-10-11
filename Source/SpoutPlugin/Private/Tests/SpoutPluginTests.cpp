@@ -267,13 +267,14 @@ bool FSpoutFormatPolicySupportedTest::RunTest(const FString& Parameters)
 		bool bExpectedSRGB;
 	};
 
-	// Every format the policy claims to support directly.
+	// Every format the policy claims to support directly. 8-bit _UNORM_SRGB sources are shared as
+	// _UNORM with unchanged bytes (SpoutGL receivers refuse _UNORM_SRGB), and are still received.
 	const FCase Cases[] =
 	{
 		{ DXGI_FORMAT_R8G8B8A8_UNORM,      DXGI_FORMAT_R8G8B8A8_UNORM,      PF_R8G8B8A8,    true  },
-		{ DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, PF_R8G8B8A8,    true  },
+		{ DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM,      PF_R8G8B8A8,    true  },
 		{ DXGI_FORMAT_B8G8R8A8_UNORM,      DXGI_FORMAT_B8G8R8A8_UNORM,      PF_B8G8R8A8,    true  },
-		{ DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, PF_B8G8R8A8,    true  },
+		{ DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,      PF_B8G8R8A8,    true  },
 		{ DXGI_FORMAT_R10G10B10A2_UNORM,   DXGI_FORMAT_R10G10B10A2_UNORM,   PF_A2B10G10R10, false },
 		{ DXGI_FORMAT_R16G16B16A16_FLOAT,  DXGI_FORMAT_R16G16B16A16_FLOAT,  PF_FloatRGBA,   false },
 	};
@@ -2436,6 +2437,8 @@ namespace SpoutPluginTests
 
 		FString LastName;
 		void* LastTexture = nullptr;
+		/** The wait the last check was asked for; MAX_uint32 until the first check. */
+		uint32 LastTimeoutMs = MAX_uint32;
 
 		/** True while the fake believes this process owns the mutex. */
 		bool bHeld = false;
@@ -2460,10 +2463,11 @@ namespace SpoutPluginTests
 
 		virtual void CleanupFrameCount() override { ++CleanupCountCalls; }
 
-		virtual bool CheckTextureAccess(void* SharedTexture) override
+		virtual bool CheckTextureAccess(void* SharedTexture, uint32 TimeoutMs) override
 		{
 			++CheckCalls;
 			LastTexture = SharedTexture;
+			LastTimeoutMs = TimeoutMs;
 			if (bRefuseAccess)
 			{
 				return false;
@@ -3242,23 +3246,52 @@ bool FSpoutColorSpaceAutoTest::RunTest(const FString& Parameters)
 		TestTrue(*(Label + TEXT(": Auto gives the documented decode setting")), bSRGB == Case.bExpectSRGB);
 	}
 
-	// The sender's declaration is the format's own statement, not the convention: only the
-	// _UNORM_SRGB variants say sRGB. That distinction is the whole reason the receiver has an
-	// override for 8-bit _UNORM.
-	TestTrue(TEXT("BGRA8 sRGB declares its colour space"),
-		ResolveSenderFormat(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB).DeclaredColorSpace == ESpoutColorSpace::SRGB);
-	TestTrue(TEXT("plain BGRA8 declares linear even though Auto decodes it as sRGB"),
-		ResolveSenderFormat(DXGI_FORMAT_B8G8R8A8_UNORM).DeclaredColorSpace == ESpoutColorSpace::Linear);
-	TestTrue(TEXT("RGBA16F declares linear"),
-		ResolveSenderFormat(DXGI_FORMAT_R16G16B16A16_FLOAT).DeclaredColorSpace == ESpoutColorSpace::Linear);
+	// The sender never publishes _UNORM_SRGB: every 8-bit source is shared as _UNORM with its
+	// bytes unchanged. What the source states about its encoding is kept for diagnostics only and
+	// is not published, which is the whole reason the receiver has an override for 8-bit _UNORM.
+	TestTrue(TEXT("BGRA8 sRGB source is shared as plain BGRA8"),
+		ResolveSenderFormat(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB).SharedFormat == DXGI_FORMAT_B8G8R8A8_UNORM);
+	TestTrue(TEXT("and still records that its bytes are sRGB-encoded"),
+		ResolveSenderFormat(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB).bSourceSRGB);
+	TestFalse(TEXT("plain BGRA8 states no encoding even though Auto decodes it as sRGB"),
+		ResolveSenderFormat(DXGI_FORMAT_B8G8R8A8_UNORM).bSourceSRGB);
+	TestFalse(TEXT("RGBA16F states no sRGB encoding"),
+		ResolveSenderFormat(DXGI_FORMAT_R16G16B16A16_FLOAT).bSourceSRGB);
 
-	// A typeless source states nothing, so it maps to the _UNORM view and declares linear.
-	TestTrue(TEXT("typeless BGRA8 declares linear"),
-		ResolveSenderFormat(DXGI_FORMAT_B8G8R8A8_TYPELESS).DeclaredColorSpace == ESpoutColorSpace::Linear);
+	// A typeless source states nothing, so it maps to the _UNORM view and records no encoding.
+	TestFalse(TEXT("typeless BGRA8 states no encoding"),
+		ResolveSenderFormat(DXGI_FORMAT_B8G8R8A8_TYPELESS).bSourceSRGB);
 	TestFalse(TEXT("and the receiver does not treat it as a declared sRGB format"),
 		ResolveReceiverFormat(static_cast<uint32>(DXGI_FORMAT_B8G8R8A8_TYPELESS)).bFormatDeclaresSRGB);
 	TestTrue(TEXT("while Auto still applies the 8-bit convention to it"),
 		ResolveReceiverFormat(static_cast<uint32>(DXGI_FORMAT_B8G8R8A8_TYPELESS)).bPrefersSRGB);
+
+	// The send path passes the render target's sRGB flag. It must never change the shared format:
+	// UE allocates sRGB targets as typeless, and every 8-bit source is shared as _UNORM.
+	struct FSendCase { DXGI_FORMAT Native; DXGI_FORMAT Shared; bool bNativeSRGB; };
+	const FSendCase SendCases[] =
+	{
+		{ DXGI_FORMAT_B8G8R8A8_TYPELESS,    DXGI_FORMAT_B8G8R8A8_UNORM,     false },
+		{ DXGI_FORMAT_B8G8R8A8_UNORM,       DXGI_FORMAT_B8G8R8A8_UNORM,     false },
+		{ DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,  DXGI_FORMAT_B8G8R8A8_UNORM,     true  },
+		{ DXGI_FORMAT_R8G8B8A8_TYPELESS,    DXGI_FORMAT_R8G8B8A8_UNORM,     false },
+		{ DXGI_FORMAT_R8G8B8A8_UNORM,       DXGI_FORMAT_R8G8B8A8_UNORM,     false },
+		{ DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,  DXGI_FORMAT_R8G8B8A8_UNORM,     true  },
+		{ DXGI_FORMAT_R10G10B10A2_TYPELESS, DXGI_FORMAT_R10G10B10A2_UNORM,  false },
+		{ DXGI_FORMAT_R16G16B16A16_FLOAT,   DXGI_FORMAT_R16G16B16A16_FLOAT, false },
+	};
+	for (const FSendCase& Case : SendCases)
+	{
+		const bool bEightBit = Case.Shared == DXGI_FORMAT_B8G8R8A8_UNORM || Case.Shared == DXGI_FORMAT_R8G8B8A8_UNORM;
+		for (bool bSourceSRGB : {false, true})
+		{
+			const FString Label = FString::Printf(TEXT("%s with source sRGB flag %d"), *DescribeDxgiFormat(static_cast<uint32>(Case.Native)), bSourceSRGB ? 1 : 0);
+			const FSenderFormat Result = ResolveSenderFormat(Case.Native, bSourceSRGB);
+			TestTrue(*(Label + TEXT(" is usable")), Result.IsUsable());
+			TestEqual(*(Label + TEXT(" shared format")), static_cast<int32>(Result.SharedFormat), static_cast<int32>(Case.Shared));
+			TestEqual(*(Label + TEXT(" records the source encoding")), Result.bSourceSRGB, Case.bNativeSRGB || (bEightBit && bSourceSRGB));
+		}
+	}
 
 	return true;
 }

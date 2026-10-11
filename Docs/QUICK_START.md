@@ -23,7 +23,10 @@ must be called while the game window is actively rendering and not minimized.
 ## 2. Send a render target
 
 1. Create a `TextureRenderTarget2D` asset (RGBA8 sRGB is the recommended format), or call the
-   Create Texture Render Target 2D node at runtime.
+   Create Texture Render Target 2D node at runtime. That node defaults to Force Linear Gamma =
+   true, which stores linear values; the stream's format cannot say so, so either set the
+   receiver's Color Space to Linear or turn Force Linear Gamma off. See
+   [colour space](SENDER.md#known-constraints).
 2. Place a `SceneCapture2D` actor in the level.
 3. Assign the render target to the SceneCapture2D Texture Target.
 4. Set the SceneCapture2D Capture Source to **Final Color (HDR) in Linear Working Color Space**.

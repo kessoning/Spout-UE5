@@ -73,14 +73,16 @@ The packaged game stages files differently from the editor, so check these in or
 
 ## Packaging the project fails
 
-- **Plugin in the project's `Plugins/` folder:** Unreal always recompiles project plugins from
-  source when packaging, so Visual Studio 2022 with the C++ toolchain and a matching Windows
-  SDK must be installed. This is an Unreal Build Tool rule and applies even when prebuilt
-  `Binaries/` are present.
-- **No Visual Studio (Blueprint-only project):** install the plugin into the engine at
-  `Engine/Plugins/Marketplace/SpoutPlugin/` using a 0.0.9+ release zip (which keeps the
-  precompiled `Intermediate/` folder). Development and Shipping packaging then works without
-  a compiler; DebugGame still requires one.
+- **Package with Visual Studio:** the supported packaging workflow uses Visual Studio 2022 with
+  the C++ workload, its MSVC toolchain and a Windows SDK supported by your engine version. The
+  prebuilt editor binaries only remove the need to compile when opening a project in a matching
+  editor.
+- **Packaged game says module `SpoutPlugin` could not be found:** check whether the plugin is in
+  the `Plugins/` folder of a Blueprint-only project. In that setup our UE 5.8 test packaged
+  Unreal's prebuilt game executable without the plugin, also with the plugin enabled explicitly in
+  the `.uproject`. The verified workaround is to add a C++ class to the project (Tools > New C++
+  Class) and package again, so Unreal compiles the plugin from its `Source/` folder into the
+  game.
 - **Packaging for a non-Windows platform:** update to 0.0.9+, which marks the plugin Win64-only
   (`SupportedTargetPlatforms`) so other platforms skip it instead of failing the cook on its
   example content.
@@ -94,6 +96,62 @@ The packaged game stages files differently from the editor, so check these in or
 - For the GameViewport source, make sure the game window is actively rendering and not
   minimized.
 - Look for `SpoutDX11on12 Initialized.` in the log to confirm the interop device came up.
+
+## Spout Demo Receiver shows "No sender detected" for an sRGB render target
+
+Fixed in 1.0.0. Earlier 1.0.0 pre-release builds published 8-bit sRGB render targets (Force
+Linear Gamma off), including the shipped sender example, as `B8G8R8A8_UNORM_SRGB`. Spout 2.007's
+OpenGL receive path, used by the Spout Demo Receiver 2.007.015 and other SpoutGL applications,
+checks the shared texture's real format against a list that does not include that format, so it
+refused the sender. The sender now publishes every 8-bit source as plain `_UNORM` with the bytes
+unchanged.
+
+If you still see it: confirm you are running the final 1.0.0 archive, then work through
+[Sender does not appear in the external application](#sender-does-not-appear-in-the-external-application).
+Because the format no longer carries the sRGB tag, see [Wrong colors or gamma](#wrong-colors-or-gamma)
+if the picture appears but its colours look off.
+
+## Log says "shared-texture access was unavailable"
+
+Sender: `Spout sender '<name>': shared-texture access was unavailable because a receiver still held
+it after waiting up to 2 ms (r.Spout.AccessWaitMs), so this frame was skipped and not published.`
+Receiver: `Spout receiver '<name>': shared-texture access was unavailable because a peer (the sender
+or another receiver) still held it after waiting up to 2 ms (r.Spout.AccessWaitMs), so this frame
+was not read yet.` (the CPU receive path says `... unavailable on the CPU path ...`). The number is
+the current setting.
+
+- This is not an error. Spout guards each shared texture with a cross-process access lock. The
+  plugin waits at most `r.Spout.AccessWaitMs` (default 2 ms) for another application to release
+  it. When the texture is still held after that, the sender skips that frame and publishes the next
+  one once the texture is free; the receiver tries again on a later call and copies the sender's
+  newest frame then, so a frame the sender replaced in the meantime is lost, not queued.
+- The wait applies to each access attempt, not to a frame, and runs on the render thread. A peer
+  that keeps the texture locked (a stalled or paused application, for example) costs up to that
+  long on every frame for that stream, and several locked streams add up: in testing, a peer that
+  locked eight 1080p streams added about 13 ms of waiting per frame. `r.Spout.AccessWaitMs 0` never
+  waits and skips more frames when both applications run at the same frame rate. It restores
+  zero-wait acquisition only, not earlier builds as a whole; the plugin's other fixes stay active.
+- The line is throttled to at most one per stream every 5 seconds, so it does not show how often it
+  happens. `Get Spout Stream Status` counts every skip in `AccessMisses`.
+- Occasional misses are normal when two applications share a texture. If `AccessMisses` climbs
+  steadily and frames are visibly dropped, the peer is holding the texture for a large part of each
+  frame: check its load and frame rate, and reduce resolution or update rate on either side.
+- A keyed-mutex sender that holds its texture for tens of milliseconds can cause runs of skipped
+  frames with or without the wait. See
+  [LIMITATIONS.md](LIMITATIONS.md#performance-and-diagnostics).
+
+## Received frames occasionally skip or repeat, with no access misses
+
+- The receiver samples the stream once per Unreal frame and gets the sender's newest frame; Spout
+  does not queue frames. When the sender and Unreal run at the same frame rate, their timing
+  drifts in and out of alignment. Near alignment, single frames are skipped and the previous frame
+  is shown for one extra frame, while `AccessMisses` stays flat. In 60 fps testing this lowered
+  delivery to 87 to 89 % of frames in individual 10-second stretches; whole runs stayed near 99 %.
+- `r.Spout.AccessWaitMs` does not affect this. Running Unreal at a higher frame rate than the
+  sender reduces it, but no frame rate guarantees every frame: scheduling jitter, frame hitches and
+  contention can still lose frames.
+- If `AccessMisses` rises with the skipped frames, or the picture freezes for several frames, the
+  cause is access contention instead; see the section above.
 
 ## Receiver returns an invalid texture or material
 
@@ -114,6 +172,14 @@ The packaged game stages files differently from the editor, so check these in or
   SceneCapture2D Capture Source. The tested combination is Final Color (HDR) in Linear Working
   Color Space with an RGBA8 sRGB render target.
 - Try RGBA8 sRGB first; if you see banding, try RGB10A2.
+- The shared format does not say whether 8-bit bytes are sRGB or linear: the sender publishes
+  plain `_UNORM` for both, so receivers follow the Spout convention that 8-bit bytes are
+  gamma-encoded (sRGB). If the source render target uses Force Linear Gamma (the default of
+  Create Texture Render Target 2D), its bytes are linear: set the receiving Spout Receiver node's
+  Color Space to Linear, or the equivalent setting in the external application, or turn Force
+  Linear Gamma off on the source.
+- When Unreal receives from another application, Auto is right for ordinary senders; use Linear
+  when that sender publishes linear 8-bit data.
 
 ## Stream name mismatch
 

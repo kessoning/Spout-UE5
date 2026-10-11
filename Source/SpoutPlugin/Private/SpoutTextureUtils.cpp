@@ -107,11 +107,15 @@ namespace SpoutTextureUtils
 		// Do NOT AddToRoot here: the Blueprint caller receives and stores the return value, whose
 		// reference keeps it alive (mirrors UKismetRenderingLibrary::CreateRenderTarget2D). Rooting
 		// it would make every created render target a permanent GC root that is never reclaimed.
-		// Create a render target for GPU-side writes before sharing via Spout.
-		RenderTarget->InitCustomFormat(Width, Height, Format, bForceLinearGamma);
+		// Create a render target for GPU-side writes before sharing via Spout. Addressing is set before
+		// the resource exists, and creation ends with an immediate update, as the engine's own
+		// UKismetRenderingLibrary::CreateRenderTarget2D does. A trailing deferred UpdateResource()
+		// would re-create the resource with a pending clear that runs at the next scene render, silently
+		// wiping anything the caller drew into the target in the frame it was created.
 		RenderTarget->AddressX = TextureAddress::TA_Wrap;
 		RenderTarget->AddressY = TextureAddress::TA_Wrap;
-		RenderTarget->UpdateResource();
+		RenderTarget->InitCustomFormat(Width, Height, Format, bForceLinearGamma);
+		RenderTarget->UpdateResourceImmediate(true);
 		return RenderTarget;
 	}
 }

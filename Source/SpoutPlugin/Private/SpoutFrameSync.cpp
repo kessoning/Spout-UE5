@@ -13,6 +13,7 @@
 #include "SpoutFrameSync.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
+#include "SpoutLimits.h"
 #include "SpoutModule.h"
 
 #if PLATFORM_WINDOWS
@@ -61,9 +62,9 @@ namespace
 			FrameCount.CleanupFrameCount();
 		}
 
-		virtual bool CheckTextureAccess(void* SharedTexture) override
+		virtual bool CheckTextureAccess(void* SharedTexture, uint32 TimeoutMs) override
 		{
-			return FrameCount.CheckTextureAccessSafe(static_cast<ID3D11Texture2D*>(SharedTexture));
+			return FrameCount.CheckTextureAccessSafe(static_cast<ID3D11Texture2D*>(SharedTexture), TimeoutMs);
 		}
 
 		virtual bool AllowTextureAccess(void* SharedTexture) override
@@ -93,6 +94,9 @@ namespace
 	FCriticalSection GFrameSyncBackendPoolMutex;
 	TArray<TUniquePtr<ISpoutFrameSyncBackend>> GFrameSyncBackendPool;
 	constexpr int32 GFrameSyncBackendPoolCapacity = 64;
+
+	static_assert(static_cast<DWORD>(SpoutLimits::MaxAccessWaitMs) == FSpoutSafeFrameCount::MaxAccessWaitMs,
+		"The setting's clamp and the SDK adapter's clamp must agree.");
 #endif
 }
 
@@ -368,21 +372,19 @@ int32 FSpoutFrameSync::GetReleaseCount() const
 
 int32 FSpoutFrameSync::GetFailedAcquireCount() const
 {
-	FScopeLock Lock(&Mutex);
-	return static_cast<int32>(FMath::Min<int64>(FailedAcquireCount, MAX_int32));
+	return static_cast<int32>(FMath::Min<int64>(FailedAcquireCount.load(), MAX_int32));
 }
 
 int32 FSpoutFrameSync::GetPublishedFrameCount() const
 {
-	FScopeLock Lock(&Mutex);
-	return static_cast<int32>(FMath::Min<int64>(PublishedFrameCount, MAX_int32));
+	return static_cast<int32>(FMath::Min<int64>(PublishedFrameCount.load(), MAX_int32));
 }
 
 void FSpoutFrameSync::GetStatus(int64& OutFrames, int64& OutAccessMisses) const
 {
-	FScopeLock Lock(&Mutex);
-	OutFrames = PublishedFrameCount + ConsumedFrameCount;
-	OutAccessMisses = FailedAcquireCount;
+	// No lock: the render thread holds Mutex for the whole of a bounded access wait.
+	OutFrames = PublishedFrameCount.load() + ConsumedFrameCount.load();
+	OutAccessMisses = FailedAcquireCount.load();
 }
 
 bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
@@ -400,7 +402,21 @@ bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
 		return false;
 	}
 
-	if (!Backend || !bOpen || !Backend->CheckTextureAccess(SharedTexture))
+	if (!Backend || !bOpen)
+	{
+		++FailedAcquireCount;
+		return false;
+	}
+
+	// Resolved per attempt, so a changed setting applies from the next transfer. The wait is
+	// bounded by the clamp and ends as soon as the peer releases; Close cannot run meanwhile,
+	// because it takes Mutex and teardown flushes rendering commands first anyway.
+	bool bGranted = false;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AccessWait);
+		bGranted = Backend->CheckTextureAccess(SharedTexture, SpoutLimits::AccessWaitMs());
+	}
+	if (!bGranted)
 	{
 		// The wait timed out or failed: this process owns nothing. Not calling AllowTextureAccess
 		// here is the point -- the SDK's own AllowAccess() releases whenever a handle exists, so

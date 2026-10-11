@@ -47,6 +47,44 @@ Where to set the CVar:
 The value is read once per receive call on the game thread, so changes take effect on the next
 call with no restart needed.
 
+## Colour space
+
+The Color Space pin (advanced) decides how the received bytes are read. **Auto** decodes 8-bit
+frames as sRGB, whether the sender publishes `_UNORM` or `_UNORM_SRGB`, and keeps 10-bit and
+16-bit float frames linear. **Linear** applies no decoding. **sRGB** forces decoding and is only
+valid for 8-bit frames. See [ESpoutColorSpace](BLUEPRINT_API.md#espoutcolorspace).
+
+An 8-bit `_UNORM` format does not say whether the bytes are sRGB-encoded or linear. This plugin's
+own sender publishes `_UNORM` for both sRGB and Force Linear Gamma render targets, so the format
+cannot tell the receiver which one it is. Auto follows the Spout convention that 8-bit bytes are
+gamma-encoded, which is correct for an sRGB source. For a sender that publishes linear 8-bit data,
+such as a Force Linear Gamma render target, set Color Space to Linear.
+
+## Shared-texture access
+
+Each copy takes Spout's cross-process access lock for the shared texture, so a frame is never read
+while the sender is midway through writing it. If a peer (the sender or another receiver) holds the
+texture, the copy waits at most `r.Spout.AccessWaitMs` (default 2 ms, clamped to 0 to 10) for it,
+on the render thread, and goes ahead as soon as the peer lets go. If the texture is still busy
+after that, the frame is not read yet: the receiver tries again on a later call and copies the
+sender's newest frame then, so a frame the sender replaced in the meantime is lost, not queued. The
+log says "shared-texture access was unavailable", at most once per stream every 5 seconds, and Get
+Spout Stream Status counts each miss in `AccessMisses`. The wait applies to each copy attempt, not
+to a whole frame, so several busy streams add up; Windows scheduling can make it last longer than
+requested. `r.Spout.AccessWaitMs 0` restores zero-wait acquisition only; the plugin's other fixes
+stay active. See [LIMITATIONS.md](LIMITATIONS.md#performance-and-diagnostics).
+
+## Frame sampling
+
+The receiver copies at most once per Unreal frame and each copy gets the sender's newest frame;
+Spout does not queue frames. A frame the sender replaces before the next copy is never received,
+even when access is never contended. When the sender and Unreal run at the same frame rate, their
+timing drifts in and out of alignment, and near alignment single frames are skipped and the previous
+frame is shown for one extra Unreal frame (in 60 fps testing, 87 to 89 % of frames in individual
+10-second windows, about 99 % over whole runs). Running Unreal faster than the sender reduces this
+but does not guarantee every frame. Keyed-mutex senders that hold their texture for long periods
+can also cause runs of skipped frames. See [LIMITATIONS.md](LIMITATIONS.md#performance-and-diagnostics).
+
 ## Materials
 
 To drive a material from the received stream:

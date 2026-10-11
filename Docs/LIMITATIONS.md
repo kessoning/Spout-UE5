@@ -18,8 +18,19 @@ accepted work, not proof that a foreign application displayed a frame.
 - GPU and CPU receiver paths accept BGRA8, RGBA8, RGB10A2 and RGBA16F, including supported
   typeless aliases. Sources must be single-mip, single-sample 2D textures. Other layouts are refused.
 - No tone mapping, exposure correction, gamut conversion or pixel gamma conversion is performed.
-  Sender 8-bit sRGB metadata follows the actual source RHI resource; RGB10A2 and RGBA16F are linear.
-  Receiver Auto follows the format policy, and explicit sRGB is refused for 10-bit/float formats.
+  The sender publishes every 8-bit source as plain `_UNORM` (`B8G8R8A8_UNORM` or `R8G8B8A8_UNORM`)
+  with its bytes and alpha unchanged, and never publishes `_UNORM_SRGB`, which Spout 2.007's
+  OpenGL receivers (the Spout Demo Receiver 2.007.015 among them) refuse. RGB10A2 and RGBA16F are
+  linear. Receiver Auto follows the format policy, `_UNORM_SRGB` from other peers is still
+  accepted on receive, and explicit sRGB is refused for 10-bit/float formats.
+- The sRGB format tag is not published. Keeping the bytes unchanged does not keep the tag: an sRGB
+  render target (Force Linear Gamma off) and a Force Linear Gamma render target both publish
+  `_UNORM`, so external consumers cannot infer the source's colour intent from the format.
+  `_UNORM` does not mean the bytes are linear. The bytes plus the configuration on both ends decide
+  it: by the Spout convention 8-bit `_UNORM` bytes are gamma-encoded (sRGB), which is what an sRGB
+  render target produces and what receivers on Auto expect; a Force Linear Gamma target stores
+  linear values, and its receiver must be set to Color Space = Linear (or the receiving
+  application's equivalent).
 - Consumers of one open receiver name share one color interpretation. Close that receiver before
   changing it. Consumers requiring different interpretation must convert downstream themselves.
 - SceneCapture output depends on Capture Source, exposure, post-processing, alpha and render-target
@@ -59,6 +70,11 @@ and release unused outputs before increasing limits.
 | r.Spout.MaxFrameMiB | 128 | Uncompressed bytes per frame |
 | r.Spout.MaxRetainedMiB | 1024 | Aggregate estimated retained image reservations |
 
+`r.Spout.AccessWaitMs` (default 2, clamped to 0 to 10) is not an admission limit: it is the longest
+time, in milliseconds, one shared-texture access attempt waits for a peer. It is not a per-frame
+bound. See [Performance and diagnostics](#performance-and-diagnostics). A change applies from the
+next attempt.
+
 Viewport requests coalesce by name until presentation. Estimates reserve three image equivalents per
 received output (CPU mip plus GPU recreation overlap), two per sender resource, four per receiver native state (shared/staging/upload/cache
 allowance), and two per attached optional target. Replaced output textures retain their reservation
@@ -88,12 +104,73 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
 
 ## Performance and diagnostics
 
-- Named and keyed texture-access attempts are nonblocking. A busy peer causes a skipped transfer;
-  the next call retries. A pending receiver frame is retained until a copy succeeds. If the skipped
-  transfer is on the call that resizes an optional render target, that target shows its Clear
-  Color until the next successful transfer; a replaced received texture starts transparent.
+- Named and keyed texture-access attempts wait for a bounded time. When a peer holds the shared
+  texture, each attempt waits at most `r.Spout.AccessWaitMs` (default 2 ms, clamped to 0 to 10) and
+  ends as soon as the peer releases it. The wait runs on the render thread. The bound applies to
+  each attempt, not to a frame: every sender publish and every receiver copy that finds its texture
+  busy is a separate attempt, so several busy streams can each add up to the bound in the same
+  frame, and a peer that keeps a texture locked costs up to the bound on every frame for that
+  stream.
+- `r.Spout.AccessWaitMs 0` restores zero-wait acquisition only: each attempt tries once and a busy
+  texture skips that transfer at once. It does not restore earlier builds as a whole; other changes,
+  such as the immediate release of keyed-mutex textures and publishing 8-bit sources as `_UNORM`,
+  stay active.
+- The cumulative cost of the wait is material. In testing (UE 5.8 packaged, 60 fps, default 2 ms),
+  a peer that kept eight of ten open 1080p streams (four received, four sent) locked for 30 seconds
+  added up to about 13 ms of render-thread waiting per 16.7 ms frame period (99th percentile; at
+  most 16 ms), which lowered the frame rate to about 59 fps on average, with 21 ms frames at the
+  99th percentile and 24 ms at most, until the peer let go. With brief holds of 1.5 ms per frame on
+  the same eight streams, no transfer was skipped and the frame rate stayed at 60 fps, but
+  render-thread time at the 99th percentile rose from 6.4 to 7.9 ms. Allow for the number of streams
+  a stalled peer could hold, or lower the setting.
+- Windows scheduling can make an attempt last longer than requested. In testing, a timed-out 2 ms
+  named-mutex attempt took 1.8 to 3.2 ms at the 1 ms timer resolution Unreal requests at startup,
+  and about 10 to 16 ms in a process running at the default Windows timer resolution (about
+  15.6 ms). A minimised packaged game kept the short waits in testing (at most 2.9 ms), but Windows
+  11 does not guarantee a raised timer resolution to a hidden or minimised window. Keyed-mutex
+  attempts poll against a high-resolution clock and ended at 2.0 ms in testing, but can still be
+  delayed by thread scheduling. A wait that the peer ends by releasing the texture is not affected.
+- If the peer still holds the texture when the wait ends, the transfer is skipped and the next call
+  retries. A sender skips that frame and publishes the next one once the texture is free. A
+  receiver keeps the new frame pending and copies on a later call, but it copies whatever the
+  sender has published by then: Spout keeps one texture per sender, so a frame the sender replaces
+  in the meantime is lost, not queued. Each skip is logged as "shared-texture access was
+  unavailable", throttled to one line per stream every 5 seconds, and counted in Get Spout Stream
+  Status. If the skipped transfer is on the call that resizes an optional render target, that
+  target shows its Clear Color until the next successful transfer; a replaced received texture
+  starts transparent.
+- Receiving samples a stream; it does not queue frames. A receiver copies at most once per Unreal
+  frame and each copy gets the sender's newest frame, so a frame that is replaced before the next
+  copy is never received. This sampling loss is different from access starvation: no transfer is
+  skipped, `AccessMisses` does not count it, and `r.Spout.AccessWaitMs` does not change it. When
+  the sender and Unreal run at the same frame rate on independent clocks, their timing drifts in
+  and out of alignment. While Unreal's copy lands within about a millisecond of the sender's
+  publish, the two can swap order from one frame to the next: single frames are skipped and the
+  previous frame is shown for one extra Unreal frame (a repeated frame, not a freeze). In testing
+  (UE 5.8 packaged, 1080p, sender and Unreal both at 60 fps), alignment lowered distinct-frame
+  delivery to 87 to 89 % in individual 10-second windows, with at most one access miss and at most
+  two consecutive skipped frames in each of those windows, while whole runs of one to five minutes
+  delivered 98 to 99 %. Access starvation looks different: `AccessMisses` rises with the losses, and
+  without a wait a stream can stall for many frames (with `r.Spout.AccessWaitMs 0` and a sender
+  holding its texture an extra 1.5 ms per frame, one test showed the same frame for 7.4 seconds).
+  Running Unreal at a higher frame rate than the sender reduces sampling losses but does not
+  guarantee that every frame is received: scheduling jitter, frame hitches, render-thread stalls and
+  access contention can still lose frames, and Spout has no per-frame acknowledgement.
+- A keyed-mutex sender (one that shares its texture with a DXGI keyed mutex instead of Spout's
+  named access mutex) that holds its texture for long periods can cause runs of consecutive skipped
+  frames, with or without the access wait. Unreal's receive path acquires keyed textures through
+  its D3D11-on-12 device, which shares the engine's graphics queue, so a long keyed hold also delays
+  Unreal's own GPU work on that texture. Tested scope: one 1080p 60 fps keyed sender (a native test
+  application) received by a UE 5.8 packaged game at 60 fps. Holding the texture 20 ms on every
+  tenth frame delivered 84 % of distinct frames at the default wait, with up to 14 consecutive
+  frames skipped, in a 60-second run; a run alternating the setting every 5 seconds delivered 89 %
+  at 2 ms and 83 % at 0, with up to 22 consecutive frames skipped at 0. The same holds from a
+  named-mutex sender lost one frame per hold (90 %). Without deliberate holds, or with 1.5 ms holds,
+  keyed delivery was 99.8 to 100 % in 60-second runs, while one 180-second run without holds that
+  alternated the setting delivered 93 % at 2 ms and 85 % at 0. Qualify a keyed sender with its
+  actual workload.
 - Once access is acquired, GPU completion is required before handing the shared resource back.
-  This can stall the render thread. Zero-wait peer acquisition does not imply nonblocking GPU work.
+  This can stall the render thread, independently of the access wait.
 - When frame counting reports no new frame, the receiver avoids another upstream copy. Discovery,
   bookkeeping and render-command processing still have cost; a new/recreated destination may need
   a local copy of the cached frame. Without peer frame counting, each request copies conservatively.

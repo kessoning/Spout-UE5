@@ -45,6 +45,7 @@
 // GetTransientPackage() (UPackage*) implicitly converts to UObject* in
 // non-Editor / non-unity builds where SharedPCH.UnrealEd doesn't apply.
 #include "UObject/Package.h"
+#include "Misc/ScopeExit.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -403,19 +404,28 @@ namespace
 
 				if (ToAcquire.Num() > 0)
 				{
-					// Take the sender's cross-process access mutex around the read. A failed wait
-					// means the sender is mid-write, and reading anyway would produce a torn
-					// frame. The scope owns nothing on failure, so nothing is released, and the
-					// frame stays pending for the next call.
+					// A keyed-mutex texture's release (ReleaseSync) is recorded on this D3D11-on-12
+					// context and reaches the sender only when the context is flushed; the wrap
+					// scope's flush below runs before it. Submit it as soon as access is given back,
+					// not at this device's next flush, which could lock the sender out for a frame.
+					D3D11_TEXTURE2D_DESC SharedDesc = {};
+					SharedTexture->GetDesc(&SharedDesc);
+					const bool bKeyedShared = (SharedDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) != 0;
+					ON_SCOPE_EXIT { if (bKeyedShared) ImmediateContext->Flush(); };
+
+					// Take the sender's cross-process access mutex around the read, waiting at most
+					// r.Spout.AccessWaitMs. A failed wait means the sender is mid-write, and
+					// reading anyway would produce a torn frame. The scope owns nothing on failure,
+					// so nothing is released, and the frame stays pending for the next call.
 					FSpoutTextureAccessScope Access(Receiver->FrameSync, SharedTexture.Get());
 					if (!Access.IsAcquired())
 					{
 						if (Receiver->AccessLogThrottle.ShouldLog())
 						{
 							UE_LOG(LogSpoutPlugin, Warning,
-								TEXT("Spout receiver '%s': timed out waiting for shared-texture access; this frame was not read. ")
-								TEXT("It stays pending and is picked up on a later frame."),
-								*Receiver->Name.ToString());
+								TEXT("Spout receiver '%s': shared-texture access was unavailable because a peer (the sender or another receiver) still held it after waiting up to %u ms (r.Spout.AccessWaitMs), ")
+								TEXT("so this frame was not read yet. The frame stays pending and is read on a later frame."),
+								*Receiver->Name.ToString(), SpoutLimits::AccessWaitMs());
 						}
 					}
 					else
@@ -504,15 +514,20 @@ namespace
 
 		{
 			// Hold access until the GPU has finished reading the shared texture into
-			// staging. Mapping and UE upload happen afterwards using only local data.
+			// staging. Mapping and UE upload happen afterwards using only local data. A keyed
+			// release is submitted right after it is recorded, as on the GPU path.
+			D3D11_TEXTURE2D_DESC SharedDesc = {};
+			SharedTexture->GetDesc(&SharedDesc);
+			const bool bKeyedShared = (SharedDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) != 0;
+			ON_SCOPE_EXIT { if (bKeyedShared) ImmediateContext->Flush(); };
 			FSpoutTextureAccessScope Access(Receiver->FrameSync, SharedTexture.Get());
 			if (!Access.IsAcquired())
 			{
 				if (Receiver->AccessLogThrottle.ShouldLog())
 				{
 					UE_LOG(LogSpoutPlugin, Warning,
-						TEXT("Spout receiver '%s': timed out waiting for shared-texture access on the CPU path; this frame was not read."),
-						*Receiver->Name.ToString());
+						TEXT("Spout receiver '%s': shared-texture access was unavailable on the CPU path because a peer (the sender or another receiver) still held it after waiting up to %u ms (r.Spout.AccessWaitMs), so this frame was not read yet."),
+						*Receiver->Name.ToString(), SpoutLimits::AccessWaitMs());
 				}
 				return;
 			}

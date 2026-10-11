@@ -39,8 +39,9 @@ enum class ESpoutSendTextureFrom : uint8
  *
  * Spout carries a DXGI format and nothing else, so the format field is the only colour-space
  * channel the protocol has. DXGI distinguishes _UNORM_SRGB from _UNORM, but the wider Spout
- * ecosystem publishes plain 8-bit _UNORM for ordinary gamma-encoded display output, so the format
- * alone is not always enough. This enum is the override for the case where it is not.
+ * ecosystem, this plugin's sender included, publishes plain 8-bit _UNORM for gamma-encoded
+ * display output, so an 8-bit _UNORM format does not mean the bytes are linear. The format alone
+ * is not always enough; this enum is the override for the case where it is not.
  */
 UENUM(BlueprintType)
 enum class ESpoutColorSpace : uint8
@@ -176,7 +177,8 @@ public:
 
 	/**
 	 * Sends a texture to Spout asynchronously via the render thread.
-	 * Call on the game thread. GPU copies and completion waits run on the render thread;
+	 * Call on the game thread. GPU copies, completion waits and the bounded wait for a peer that
+	 * holds the shared texture (r.Spout.AccessWaitMs per attempt) run on the render thread;
 	 * queueing or closing a stream can wait for an in-progress native installation.
 	 * Sources must have one mip, one array slice and one sample; disable Auto Generate Mips.
 	 *
@@ -215,7 +217,8 @@ public:
 	 * the game thread and nothing was queued.
 	 * Call on the game thread. Opening the native handle and validating its actual
 	 * descriptor happen later on the render thread; an incompatible or vanished
-	 * source is skipped and logged even when this call returned true.
+	 * source is skipped and logged even when this call returned true. The copy waits at most
+	 * r.Spout.AccessWaitMs per attempt for a sender that is still writing, also on the render thread.
 	 *
 	 * OutMat and OutTexture are outputs, not ownership. The received texture belongs to the plugin,
 	 * which keeps it alive for as long as the receiver is open and releases it on Close Receiver or
@@ -340,17 +343,18 @@ public:
 	 * (supported: B8G8R8A8, R8G8B8A8, A2B10G10R10, FloatRGBA). The returned object is NOT rooted;
 	 * keep a reference to it, exactly as with Create Render Target 2D.
 	 *
-	 * bForceLinearGamma decides what colour space the sender advertises for 8-bit formats, and it
-	 * is the one place a gamma shift can be introduced:
-	 *   - true (default): the render target is linear and the sender publishes a plain _UNORM
-	 *     format. A receiver on Auto assumes 8-bit _UNORM is sRGB, so set that receiver's Color
-	 *     Space to Linear to see the values you sent.
-	 *   - false: the render target is sRGB and the sender publishes _UNORM_SRGB, which states the
-	 *     colour space in the format itself, so a receiver on Auto is already correct.
+	 * bForceLinearGamma decides what the render target's 8-bit bytes contain, and it is the one
+	 * place a gamma shift can be introduced. The sender copies the bytes unchanged and publishes
+	 * the plain _UNORM format either way, so receivers cannot tell the two apart from the format:
+	 *   - true (default): the render target stores linear values. A receiver on Auto assumes
+	 *     8-bit _UNORM is sRGB-encoded, so set that receiver's Color Space to Linear to see the
+	 *     values you sent.
+	 *   - false: the render target stores sRGB-encoded bytes, the Spout convention for 8-bit
+	 *     video, so a receiver on Auto (or any application following the convention) is correct.
 	 * 10-bit and float formats are linear in both directions and are unaffected.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Spout",
-		meta = (ToolTip = "Creates a Spout-compatible render target. Returns null for invalid sizes or unsupported pixel formats. Keep a reference: the result is not rooted. Force Linear Gamma publishes a linear _UNORM format - pair it with Color Space = Linear on the receiver."))
+		meta = (ToolTip = "Creates a Spout-compatible render target. Returns null for invalid sizes or unsupported pixel formats. Keep a reference: the result is not rooted. 8-bit targets are published as _UNORM either way. With Force Linear Gamma on, the bytes are linear: set Color Space = Linear on the receiver. With it off, the bytes are sRGB-encoded, which receivers on Auto expect."))
 	static UTextureRenderTarget2D* CreateTextureRenderTarget2D(int32 Width = 1024, int32 Height = 768, EPixelFormat Format = EPixelFormat::PF_B8G8R8A8, bool bForceLinearGamma = true);
 
 	/** Reads the current Spout sender limit. Max is set to 0 when it cannot be read. */

@@ -6,6 +6,75 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ## SEPTEMBER 2026 UPDATES
 
+The biggest find from my final hands-on test: pictures sent from Unreal with the normal sRGB colour
+setting didn't show up at all in the Spout demo receiver. It just said "No sender detected", even
+for the example sender that comes with the plugin. It turns out the Spout demo apps, and other apps
+built on the same part of Spout, only accept a fixed list of picture types, and the label I was
+putting on Unreal's sRGB pictures wasn't on that list. The plugin now sends them with the plain
+label instead, and the picture itself is exactly the same, pixel for pixel. My Unreal outputs now
+show up in the Spout demo receiver, and other apps built the same way should accept them too (the
+demo receiver is the one I've actually tested so far).
+
+There's one trade-off worth knowing about. The stream used to carry a little tag saying "these
+colours are sRGB", and now it doesn't, because that tag is exactly what those apps were refusing.
+For most setups nothing changes, since apps already assume that's what they're getting. But if your
+render target uses Force Linear Gamma (which is switched on by default in the Create Texture Render
+Target 2D node), its colours are stored differently, and the receiving app can no longer tell. So
+you have to tell it yourself: in Unreal, set the receiver's Color Space to Linear, or pick the
+matching option in the other app. Or just switch Force Linear Gamma off on the sending side.
+Unreal to Unreal looks exactly the same as before.
+
+Then my long test run turned up something that looked like random stutter. When Unreal and the
+other app both run at 60 frames a second, their timing slowly drifts, and every so often it lines
+up so that Unreal keeps asking for the shared picture at the exact moment the other app is busy
+writing it. The plugin used to give up instantly when that happened, so it could miss frame after
+frame. In my tests the received picture froze for up to about half a second. Now the plugin waits a
+tiny moment (2 milliseconds by default) for the other app to finish, and in the same test the worst
+hiccup dropped to a couple of frames. If you ever want it to never wait, set r.Spout.AccessWaitMs
+to 0. That only switches off the waiting, though: all the other fixes in this update stay on. The
+wait can't go above 10 milliseconds, and it only happens when the other app is actually busy with
+the picture. One thing to know: the 2 milliseconds is per stream, not per frame. If you have lots
+of streams and another app keeps them all locked up, those little waits add up. In my test, an app
+that held eight streams at once added about 13 milliseconds of waiting to every frame, which is a
+big chunk of a 60 fps frame, and Unreal's frame times went up until the other app let go.
+
+I also rewrote the warning messages that go with this. The log used to say it had "timed out
+waiting", which made it sound like the plugin was stuck. The message now says plainly that the
+other app still had the picture after the short wait, so the frame was skipped (or, when receiving,
+the plugin tries again next time and grabs whatever picture is newest by then), and that the next
+one goes through as soon as it's free.
+
+There's one thing the wait can't fix, and I've written it up as a known limitation. The receiver
+looks at the incoming stream once per Unreal frame and grabs whatever picture is newest. Spout
+doesn't keep a queue, so if the other app swaps in two new pictures between two of Unreal's looks,
+one of them is never seen. When both sides run at 60 frames a second, their timing drifts, and
+every now and then it lines up almost exactly. During that stretch the odd frame gets skipped and
+the one before it shows twice. Nothing freezes and nobody is fighting over the picture, so the wait
+setting makes no difference. In my tests, in a 10 second stretch like that about 87 to 89 out of
+every 100 frames made it through, while whole runs of a few minutes still got about 99. Running
+Unreal faster than the other app makes it rarer, but I can't promise every single frame, because a
+hiccup on either side can still drop one.
+
+One more: some apps protect the shared picture with a different kind of lock than the Spout demo
+apps use. If one of those holds on to the picture for a long time, Unreal can miss several frames
+in a row, wait or no wait. In my test, an app that held the picture for 20 milliseconds on every
+tenth frame got about 84 out of 100 frames across, with up to 14 missed in a row. If you use an app
+like that, test it with your real setup.
+
+While testing the fix I found one more small bug. If you made a render target with the plugin's
+Create Texture Render Target 2D node and drew into it straight away, in that same frame, the
+drawing could vanish, because the plugin finished setting the target up a moment later and wiped
+it clean. That's fixed now: whatever you draw right after creating it stays there, just like with
+Unreal's own render target node.
+
+A correction from my final hands-on test: I used to say the downloads let you package a game
+without Visual Studio. That was wrong, and I've fixed the docs. You can install the prebuilt plugin
+and open your project in the editor without a compiler, but packaging a game needs Visual Studio
+with the C++ tools, and that's the setup I support. One gotcha I hit: with the plugin in the
+Plugins folder of a Blueprint-only project, my test game got packaged without the plugin and
+complained at startup that it couldn't find it. Adding any C++ class to the project and packaging
+again fixed it, so that's the workaround I recommend for now.
+
 While running the final checks, one test launch out of roughly 180 reported broken pictures from the
 example receiver. I dug into it, and it was the test being too strict, not the plugin sending bad
 pictures. When the incoming picture changes size, the plugin resizes your output picture, and if the
