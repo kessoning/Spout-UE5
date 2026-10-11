@@ -75,6 +75,39 @@ time, in milliseconds, one shared-texture access attempt waits for a peer. It is
 bound. See [Performance and diagnostics](#performance-and-diagnostics). A change applies from the
 next attempt.
 
+### Experimental receive settings (off by default)
+
+These four settings are experimental. They are off by default and they are not part of the
+qualified behaviour of this release. With both `r.Spout.FrameWaitMs` and `r.Spout.FrameCountRecheck`
+at 0 none of the operations below runs, and a receiver behaves as described elsewhere in this
+document. That was checked by counting those operations in a run with both at 0, not by a
+side-by-side performance comparison with the previous build.
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| r.Spout.FrameCountRecheck | 0 | 1: read the sender's frame notification again while texture access is held, and copy on a receive call that found nothing new when the sender published since the previous call |
+| r.Spout.FrameWaitMs | 0 | Longest time, in milliseconds (0 to 4), one receive call waits for the sender's next frame when it found none and the sender's publication history says one is due. Implies the recheck |
+| r.Spout.FrameWaitBudgetMs | 1 | Total new-frame wait per render frame across all receivers, in milliseconds (0 to 4) |
+| r.Spout.FrameWaitPollUs | 150 | Interval between polls inside a wait, in microseconds (50 to 1000) |
+
+What they do and do not do:
+
+- The wait runs on the render thread, before any texture access is taken, and keeps that thread
+  busy while it waits. It is only attempted for a sender that publishes a Spout frame count and
+  whose recent publications were regular enough to predict. A source slower than Unreal's own frame
+  rate is not waited for.
+- They use Spout's public frame-count calls only. The frame count is treated as a notification that
+  something was published, never as the identity of an image: another receiver reading the same
+  sender lowers the count for an instant, so two equal counts do not prove two equal images.
+- Three quantities are kept apart. A *notification* is the sender's count having moved. A *copy* is
+  a transfer that completed. A *delivery* is a copy counted in `Frames` and handed to materials and
+  output targets. Every completed copy is a delivery, with these settings on or off. With the
+  recheck on, a copy can be made without a notification, and such a copy can repeat the image that
+  was already delivered; it is still counted as a delivery, because telling a repeat from a new
+  image would mean trusting a count.
+- A receiver still samples a single shared texture that the sender overwrites. These settings do
+  not make receiving lossless between independent clocks, and they do not remove latency.
+
 Viewport requests coalesce by name until presentation. Estimates reserve three image equivalents per
 received output (CPU mip plus GPU recreation overlap), two per sender resource, four per receiver native state (shared/staging/upload/cache
 allowance), and two per attached optional target. Replaced output textures retain their reservation

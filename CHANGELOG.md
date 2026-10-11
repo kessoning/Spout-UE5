@@ -14,6 +14,34 @@ from the August preparation.
 
 ### Production-readiness fixes and release testing (September 2026)
 
+#### Experimental receive settings (October 2026, off by default, not yet qualified)
+- Added four experimental console variables for the receive path: `r.Spout.FrameCountRecheck`,
+  `r.Spout.FrameWaitMs`, `r.Spout.FrameWaitBudgetMs` and `r.Spout.FrameWaitPollUs`. All are off by
+  default. With `r.Spout.FrameWaitMs` and `r.Spout.FrameCountRecheck` at 0 none of the added
+  operations runs: a receive call reads the sender's frame notification once, copies when a frame is
+  pending, and clears the pending frame only when the copy completed. A baseline run with the
+  settings at their defaults recorded no read under access, no wait and no copy without a
+  notification. No matched comparison with the previous build was made, so this is not a claim of
+  identical performance.
+- With the recheck on, the notification is read again while texture access is held, so a frame
+  published between the read and the access is not reported new again after its image was already
+  copied; and a receive call that found nothing new still copies when the sender published since
+  the previous call. With the wait on, a receive call that found nothing new may wait up to the
+  configured bound, on the render thread and before any access is taken, for a publication its
+  history predicts.
+- Only Spout's public frame-count calls are used (`GetNewFrame`, `GetSenderFrame`,
+  `IsFrameCountEnabled`). The count is a notification and never an image identity. Every completed
+  copy remains a delivery; a pending frame survives a refused access, a failed copy, a failed
+  completion wait and a retry, and is dropped only by closing the stream.
+- The GPU and CPU receive paths now share one check stage. The pending frame is cleared at one
+  completion point per path: on the GPU path after the copy's GPU completion while access is still
+  held, on the CPU path after access was released and the map and the upload succeeded.
+- Measurement instrumentation is compiled only into measurement builds (a marker file that no
+  release contains); a release build contains none of it.
+- New engine-free native tests (`Tests/Native/SpoutNotificationTests.cpp`) drive the notification
+  state, the publication predictor and the bundled SDK's public calls without Unreal, including
+  beside another receiver reading the same sender.
+
 #### Documentation (UE 5.8 testing, September 2026)
 - Corrected the 0.0.9 claim that the kept `Intermediate/Build` payload lets Blueprint-only users
   package a project without Visual Studio. The supported packaging workflow uses Visual Studio

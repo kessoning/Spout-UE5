@@ -4,6 +4,32 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ---
 
+## OCTOBER 2026 UPDATES
+
+This month is all groundwork. The new pieces stay switched off unless you turn them on.
+
+I've been chasing the last bit of stutter you can get when Unreal and the other app both run at the
+same frame rate. Their timing drifts, and every now and then Unreal asks for the picture a hair
+before the other app has finished the next one, so you see the same frame twice and then one gets
+skipped. I added a few experimental switches that try to help with exactly that: Unreal can wait a
+very short moment for a frame that is about to arrive, and it double-checks what the other app has
+published at the moment it actually grabs the picture.
+
+They are all switched off by default, and with them off none of the new waiting or double-checking
+runs. I checked that by counting, in a test run, how often the new steps happened: zero. I haven't
+done a side-by-side speed comparison with last month's version, so I won't promise it's identical,
+only that the new parts stay out of the way. I'm still measuring whether they really help and what
+they cost. If you like to experiment, the switches are listed in the limitations document, with
+honest notes about what they can and can't do.
+They don't make frame delivery perfect and they don't remove delay. Two apps on separate clocks
+sharing one picture will always miss a frame now and then.
+
+I also tidied up how the plugin decides that a frame has really arrived. A frame only counts once
+the copy has actually finished, and if anything goes wrong on the way (the other app is busy, the
+copy fails), the plugin simply tries again on the next frame instead of forgetting about it.
+
+---
+
 ## SEPTEMBER 2026 UPDATES
 
 The biggest find from my final hands-on test: pictures sent from Unreal with the normal sRGB colour
