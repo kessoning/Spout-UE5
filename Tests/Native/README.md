@@ -30,6 +30,15 @@ so a skipped SDK part is never read as a pass. Its `INFO` lines report how often
 receiver's read made the count look one low; those figures depend on the machine and are not
 judged.
 
+`SpoutSlotPoolTests` compiles `SpoutSlotPool.h`, the engine-free bookkeeping of the experimental
+asynchronous receive stream, with no GPU and no Spout library. It checks every transition of the
+slot pool against expectations written by hand, including a publication replaced before it was
+read, no free slot, a refused access and a completion that timed out; then what starts a worker
+transfer, with and without a usable frame count; then three long seeded sequences of worker and
+reader steps against a read fence that completes late, checked after every step against the rules
+and against an account of where every publication went. It says nothing about the graphics calls
+the plugin makes around this bookkeeping.
+
 `D3D11On12WrapProbe` isolates Windows' optional-metadata diagnostic (ID 916).
 On the qualification machine it prints HRESULT 0 and a valid wrapper together
 with that diagnostic, without Unreal or Spout loaded. Its exit code tests the
