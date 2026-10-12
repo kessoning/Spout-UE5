@@ -412,6 +412,26 @@ static void PredictorTests()
 		const double LastQ = FeedRegular(Q, 10.0, 2 * Period, 100, 45);
 		Check(Q.Predict(LastQ + 2 * Period - 0.0003, 0.001).Decision == EDecision::Wait, "predictor: the same source read at its own rate is waited for");
 	}
+	{
+		// The 1 ms limit of the wait and of its shared budget. A publication predicted 0.8 ms ahead (its window
+		// is about 0.50 to 1.05 ms away) is out of reach of a 0.3 ms grant, which is what is left of the budget
+		// when other streams used 0.7 ms, and within reach of the whole 1 ms. The automation tests run the same
+		// two cases through the wait loop, primed the same way.
+		FPublishPredictor P;
+		const double Now = 50.0;
+		const int Publications = FTuning::MinPublications + 10;
+		const double Last = Now + 0.0008 - Period;
+		FeedRegular(P, Last - Publications * Period, Period, 1000 - Publications, Publications + 1);
+		const FPrediction Short = P.Predict(Now, 0.0003), Full = P.Predict(Now, 0.001);
+		Check(Short.Decision == EDecision::NotImminent, "predictor: a window 0.8 ms ahead is out of reach of a 0.3 ms grant");
+		Check(Full.Decision == EDecision::Wait, "predictor: and within reach of the 1 ms limit");
+		Check(Full.EarliestSeconds > Now + 0.0003 && Full.EarliestSeconds < Now + 0.0008 && Full.LatestSeconds > Now + 0.0008 && Full.LatestSeconds < Now + 0.0013,
+			"predictor: that window lies between 0.3 and 1.3 ms ahead");
+		// A publication 0.3 ms ahead, as the abort and publication cases prime it, is waited for with the 1 ms limit.
+		FPublishPredictor Near;
+		FeedRegular(Near, Now + 0.0003 - Period - Publications * Period, Period, 1000 - Publications, Publications + 1);
+		Check(Near.Predict(Now, 0.001).Decision == EDecision::Wait, "predictor: a publication 0.3 ms ahead is waited for with the 1 ms limit");
+	}
 }
 
 // ------------------------------------------------------------------------------------------------

@@ -24,6 +24,10 @@ honest notes about what they can and can't do.
 They don't make frame delivery perfect and they don't remove delay. Two apps on separate clocks
 sharing one picture will always miss a frame now and then.
 
+One safety rail went in with them: that short wait can never be longer than a thousandth of a second
+per frame, whatever number you type into the setting. I still have to run this last change through
+the full set of tests, so treat it as freshly added.
+
 I also tidied up how the plugin decides that a frame has really arrived. A frame only counts once
 the copy has actually finished, and if anything goes wrong on the way (the other app is busy, the
 copy fails), the plugin simply tries again on the next frame instead of forgetting about it.

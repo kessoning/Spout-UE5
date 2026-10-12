@@ -86,12 +86,15 @@ side-by-side performance comparison with the previous build.
 | Variable | Default | Purpose |
 | --- | ---: | --- |
 | r.Spout.FrameCountRecheck | 0 | 1: read the sender's frame notification again while texture access is held, and copy on a receive call that found nothing new when the sender published since the previous call |
-| r.Spout.FrameWaitMs | 0 | Longest time, in milliseconds (0 to 4), one receive call waits for the sender's next frame when it found none and the sender's publication history says one is due. Implies the recheck |
-| r.Spout.FrameWaitBudgetMs | 1 | Total new-frame wait per render frame across all receivers, in milliseconds (0 to 4) |
+| r.Spout.FrameWaitMs | 0 | Longest time, in milliseconds (0 to 1), one receive call waits for the sender's next frame when it found none and the sender's publication history says one is due. Implies the recheck |
+| r.Spout.FrameWaitBudgetMs | 1 | Total new-frame wait per render frame across all receivers, in milliseconds (0 to 1) |
 | r.Spout.FrameWaitPollUs | 150 | Interval between polls inside a wait, in microseconds (50 to 1000) |
 
 What they do and do not do:
 
+- One millisecond is the limit of both the wait of one receive call and the wait of all receivers
+  together in one render frame, in every build configuration. A larger value of either setting is
+  read as one millisecond.
 - The wait runs on the render thread, before any texture access is taken, and keeps that thread
   busy while it waits. It is only attempted for a sender that publishes a Spout frame count and
   whose recent publications were regular enough to predict. A source slower than Unreal's own frame

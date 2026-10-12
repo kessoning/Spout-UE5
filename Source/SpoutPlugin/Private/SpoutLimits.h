@@ -32,8 +32,13 @@ namespace SpoutLimits
 	// They are separate from the access wait above: that one waits for a peer to RELEASE the
 	// texture, these concern a sender's next PUBLICATION. ----
 
-	/** Upper clamp of r.Spout.FrameWaitMs and r.Spout.FrameWaitBudgetMs, milliseconds. */
-	constexpr float MaxFrameWaitMs = 4.0f;
+	/**
+	 * Upper clamp of r.Spout.FrameWaitMs and of r.Spout.FrameWaitBudgetMs, milliseconds: one receive
+	 * call waits at most one millisecond, and all receivers together at most one millisecond per
+	 * render frame. The same in every build configuration. A larger value of either setting is read
+	 * as this limit.
+	 */
+	constexpr float MaxFrameWaitMs = 1.0f;
 	/** Default of r.Spout.FrameWaitBudgetMs, milliseconds. */
 	constexpr float DefaultFrameWaitBudgetMs = 1.0f;
 	/** r.Spout.FrameWaitPollUs default and clamps, microseconds. */

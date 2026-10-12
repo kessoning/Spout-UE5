@@ -390,6 +390,17 @@ namespace
 		Sync->SetClockForTests(TFunction<double()>());
 		return Sync;
 	}
+
+	/**
+	 * Puts the sync on a clock that advances one microsecond each time it is read. A wait on it takes
+	 * the same course however the test thread is scheduled, so a decision that depends on a few tenths
+	 * of a millisecond can be tested inside the 1 ms limit.
+	 */
+	void UseSteppingClock(FSpoutFrameSync& Sync)
+	{
+		TSharedRef<double> Clock = MakeShared<double>(2000.0);
+		Sync.SetClockForTests([Clock]() { *Clock += 0.000001; return *Clock; });
+	}
 }
 
 
@@ -410,8 +421,13 @@ bool FSpoutFrameWaitSettings::RunTest(const FString&)
 	TestFalse(TEXT("and the recheck with it"), SpoutLimits::FrameCountRecheck());
 	if ((Wait.Variable->GetFlags() & ECVF_SetByMask) == ECVF_SetByConstructor) AddInfo(TEXT("r.Spout.FrameWaitMs was untouched before this test: its default is off."));
 
+	// The limit is one millisecond, for the wait of one receive call and for the budget of one render
+	// frame. A setting above it is read as the limit, in every build configuration.
+	TestEqual(TEXT("the limit of both settings is 1 ms"), SpoutLimits::MaxFrameWaitMs, 1.0f);
+	TestEqual(TEXT("the budget's default is the limit"), SpoutLimits::DefaultFrameWaitBudgetMs, 1.0f);
 	struct FCase { const TCHAR* Text; double ExpectedMs; };
-	const FCase Cases[] = { { TEXT("1"), 1.0 }, { TEXT("0.5"), 0.5 }, { TEXT("4"), 4.0 }, { TEXT("5"), 4.0 }, { TEXT("1000"), 4.0 }, { TEXT("-1"), 0.0 }, { TEXT("-1000"), 0.0 } };
+	const FCase Cases[] = { { TEXT("1"), 1.0 }, { TEXT("0.5"), 0.5 }, { TEXT("0.25"), 0.25 }, { TEXT("1.001"), 1.0 }, { TEXT("2"), 1.0 }, { TEXT("4"), 1.0 },
+		{ TEXT("1000"), 1.0 }, { TEXT("-1"), 0.0 }, { TEXT("-1000"), 0.0 } };
 	for (const FCase& Case : Cases)
 	{
 		Wait.Set(Case.Text);
@@ -423,8 +439,10 @@ bool FSpoutFrameWaitSettings::RunTest(const FString&)
 	for (const TCHAR* Text : Odd)
 	{
 		Wait.Set(Text);
-		const double Ms = SpoutLimits::FrameWaitSeconds() * 1000.0;
-		TestTrue(FString::Printf(TEXT("'%s' stays within 0..4 ms"), Text), Ms >= 0.0 && Ms <= 4.0);
+		Budget.Set(Text);
+		const double Ms = SpoutLimits::FrameWaitSeconds() * 1000.0, BudgetMs = SpoutLimits::FrameWaitBudgetSeconds() * 1000.0;
+		TestTrue(FString::Printf(TEXT("'%s' stays within 0..1 ms"), Text), Ms >= 0.0 && Ms <= 1.0);
+		TestTrue(FString::Printf(TEXT("budget '%s' stays within 0..1 ms"), Text), BudgetMs >= 0.0 && BudgetMs <= 1.0);
 	}
 
 	Wait.Set(TEXT("1"));
@@ -1432,31 +1450,37 @@ bool FSpoutFrameWaitLoop::RunTest(const FString&)
 		}
 	}
 
-	// The bound decides: a window 3.2 ms ahead is out of reach of 0.3 ms and within reach of 3 ms.
+	// The bound decides: a window 0.8 ms ahead (about 0.50 to 1.05 ms) is out of reach of 0.3 ms and
+	// within reach of the 1 ms limit. On the stepping clock, so that a delay of the test thread
+	// cannot move the window against the read.
 	{
 		FSpoutSdkCountModelBackend* Fake = nullptr;
 		TUniquePtr<FSpoutFrameSync> Sync = MakeWaitingSync(Fake, "SpoutFrameWaitBound");
+		UseSteppingClock(*Sync);
 		FSpoutFrameWaitReport Report;
-		Sync->PrimePredictorForTests(T, 0.0032, Fake->SdkCountNow());
+		Sync->PrimePredictorForTests(T, 0.0008, Fake->SdkCountNow());
 		const int32 Queries = Fake->NewFrameQueries;
 		TestFalse(TEXT("a 0.3 ms bound does not reach the window"), Sync->WaitForPublication(0.0003, 0.00015, Never, Report));
 		TestEqual(TEXT("decision: not imminent"), int32(Report.Decision), int32(EDecision::NotImminent));
 		TestEqual(TEXT("a declined wait does not read the count at all"), Fake->NewFrameQueries, Queries);
 		TestFalse(TEXT("and is not a wait that was made"), Report.WasWaitMade());
-		Sync->PrimePredictorForTests(T, 0.0032, Fake->SdkCountNow());
+		Sync->PrimePredictorForTests(T, 0.0008, Fake->SdkCountNow());
 		Fake->PublishAtQuery = Fake->NewFrameQueries + 3;
-		TestTrue(TEXT("a 3 ms bound reaches enough of the window: waited and published"), Sync->WaitForPublication(0.003, 0.00015, Never, Report));
+		TestTrue(TEXT("the 1 ms limit reaches enough of the window: waited and published"), Sync->WaitForPublication(0.001, 0.00015, Never, Report));
 		TestEqual(TEXT("decision: wait"), int32(Report.Decision), int32(EDecision::Wait));
+		TestEqual(TEXT("outcome: published"), int32(Report.Outcome), int32(EOutcome::Published));
+		TestEqual(TEXT("at the third poll, 0.45 ms into the wait"), Report.Polls, 3);
 	}
 
 	// Aborted: the stream was cancelled. Not a wasted wait: the next call may wait again.
 	{
 		FSpoutSdkCountModelBackend* Fake = nullptr;
 		TUniquePtr<FSpoutFrameSync> Sync = MakeWaitingSync(Fake, "SpoutFrameWaitAbort");
+		UseSteppingClock(*Sync);     // the third abort check comes 0.45 ms into a 1 ms wait whatever the scheduler does
 		Sync->PrimePredictorForTests(T, 0.0003, Fake->SdkCountNow());
 		FSpoutFrameWaitReport Report;
 		int32 AbortChecks = 0;
-		TestFalse(TEXT("an aborted wait leaves nothing pending"), Sync->WaitForPublication(0.003, 0.00015, [&AbortChecks]() { return ++AbortChecks >= 3; }, Report));
+		TestFalse(TEXT("an aborted wait leaves nothing pending"), Sync->WaitForPublication(0.001, 0.00015, [&AbortChecks]() { return ++AbortChecks >= 3; }, Report));
 		TestEqual(TEXT("outcome: aborted"), int32(Report.Outcome), int32(EOutcome::Aborted));
 		TestEqual(TEXT("it polled twice before the abort"), Report.Polls, 2);
 		TestEqual(TEXT("an abort is not counted as a wasted wait"), Report.PredictorWastedWaits, int64(0));
@@ -1629,30 +1653,48 @@ bool FSpoutFrameWaitBudgetedWait::RunTest(const FString&)
 	SpoutFrameWait::RunBudgetedWait(0.001, FrameB, Stub, Report, Before, After);
 	TestTrue(TEXT("the next render frame grants the whole 1 ms again"), Grants.Num() == 3 && FMath::IsNearlyEqual(Grants[2], 0.001, 1e-9));
 
-	// With the real loop: what is left of the budget is the bound the rule sees. A 4 ms budget and a window
-	// about 3 ms ahead, so that a delay of the test thread up to about 2.5 ms cannot change a decision (the
-	// budget setting is the test's; the plugin's default stays 1 ms).
+	// Settings above the limit change nothing: the request and the budget are both read as 1 ms, so two
+	// streams still share one millisecond per render frame.
+	const uint64 FrameE = MAX_uint64 - 13;
 	Budget.Set(TEXT("4"));
-	Wait.Set(TEXT("3"));
+	Wait.Set(TEXT("4"));
+	TestTrue(TEXT("a wait setting of 4 ms asks for 1 ms"), FMath::IsNearlyEqual(SpoutLimits::FrameWaitSeconds(), 0.001, 1e-9));
+	TestTrue(TEXT("a budget setting of 4 ms is a budget of 1 ms"), FMath::IsNearlyEqual(SpoutLimits::FrameWaitBudgetSeconds(), 0.001, 1e-9));
+	Grants.Reset();
+	UseSeconds = 0.0006;
+	SpoutFrameWait::RunBudgetedWait(SpoutLimits::FrameWaitSeconds(), FrameE, Stub, Report, Before, After);
+	TestTrue(TEXT("above the limit, first stream: granted 1 ms, not 4"), Grants.Num() == 1 && FMath::IsNearlyEqual(Grants[0], 0.001, 1e-9));
+	SpoutFrameWait::RunBudgetedWait(SpoutLimits::FrameWaitSeconds(), FrameE, Stub, Report, Before, After);
+	TestTrue(TEXT("above the limit, second stream: granted the 0.4 ms left of 1 ms"), Grants.Num() == 2 && FMath::IsNearlyEqual(Grants[1], 0.0004, 1e-6));
+	TestFalse(TEXT("above the limit, third stream: the 1 ms is spent"), SpoutFrameWait::RunBudgetedWait(SpoutLimits::FrameWaitSeconds(), FrameE, Stub, Report, Before, After));
+	TestEqual(TEXT("above the limit, third stream: decision budget exhausted"), int32(Report.Decision), int32(EDecision::BudgetExhausted));
+
+	// With the real loop: what is left of the budget is the bound the rule sees. Everything inside the
+	// 1 ms limit: a budget of 1 ms and a window about 0.8 ms ahead (0.50 to 1.05 ms), on the stepping
+	// clock so that a delay of the test thread cannot change a decision.
+	Budget.Set(TEXT("1"));
+	Wait.Set(TEXT("1"));
 	const double T = 1.0 / 60.0;
 	auto Never = []() { return false; };
 	FSpoutSdkCountModelBackend* Fake = nullptr;
 	TUniquePtr<FSpoutFrameSync> Sync = MakeWaitingSync(Fake, "SpoutFrameWaitBudgeted");
+	UseSteppingClock(*Sync);
 	FSpoutFrameSync* Raw = Sync.Get();
 	auto Real = [Raw, &Never](double GrantedSeconds, FSpoutFrameWaitReport& R) { return Raw->WaitForPublication(GrantedSeconds, 0.00015, Never, R); };
 
-	SpoutFrameWait::ChargeFrameBudget(0.0037, FrameC); // other streams already waited 3.7 ms in this frame
-	Sync->PrimePredictorForTests(T, 0.0032, Fake->SdkCountNow()); // window about [now + 2.90, now + 3.45] ms
-	TestFalse(TEXT("0.3 ms left: no frame"), SpoutFrameWait::RunBudgetedWait(0.003, FrameC, Real, Report, Before, After));
+	SpoutFrameWait::ChargeFrameBudget(0.0007, FrameC); // other streams already waited 0.7 ms in this frame
+	Sync->PrimePredictorForTests(T, 0.0008, Fake->SdkCountNow());
+	TestFalse(TEXT("0.3 ms left: no frame"), SpoutFrameWait::RunBudgetedWait(SpoutLimits::FrameWaitSeconds(), FrameC, Real, Report, Before, After));
 	TestTrue(TEXT("0.3 ms left: the loop was given 0.3 ms"), FMath::IsNearlyEqual(Report.BoundSeconds, 0.0003, 1e-6));
 	TestEqual(TEXT("0.3 ms left: the window is out of reach, refused"), int32(Report.Decision), int32(EDecision::NotImminent));
 	TestTrue(TEXT("0.3 ms left: nothing more charged"), FMath::IsNearlyEqual(Before, After, 1e-12));
 
-	Sync->PrimePredictorForTests(T, 0.0032, Fake->SdkCountNow());
+	Sync->PrimePredictorForTests(T, 0.0008, Fake->SdkCountNow());
 	Fake->PublishAtQuery = Fake->NewFrameQueries + 3;
-	TestTrue(TEXT("a fresh frame: the full 3 ms grant reaches the window, waited and published"), SpoutFrameWait::RunBudgetedWait(0.003, FrameD, Real, Report, Before, After));
-	TestTrue(TEXT("a fresh frame: the loop was given the whole 3 ms"), FMath::IsNearlyEqual(Report.BoundSeconds, 0.003, 1e-6));
+	TestTrue(TEXT("a fresh frame: the full 1 ms grant reaches the window, waited and published"), SpoutFrameWait::RunBudgetedWait(SpoutLimits::FrameWaitSeconds(), FrameD, Real, Report, Before, After));
+	TestTrue(TEXT("a fresh frame: the loop was given the whole 1 ms"), FMath::IsNearlyEqual(Report.BoundSeconds, 0.001, 1e-6));
 	TestEqual(TEXT("a fresh frame: decision wait"), int32(Report.Decision), int32(EDecision::Wait));
+	TestEqual(TEXT("a fresh frame: outcome published"), int32(Report.Outcome), int32(EOutcome::Published));
 	TestTrue(TEXT("a fresh frame: the wait was charged, and no more than it could take"), After > Before && After - Before < 0.05);
 	return true;
 }

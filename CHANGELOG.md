@@ -29,6 +29,11 @@ from the August preparation.
   the previous call. With the wait on, a receive call that found nothing new may wait up to the
   configured bound, on the render thread and before any access is taken, for a publication its
   history predicts.
+- The wait of one receive call and the wait budget of one render frame are each limited to 1 ms
+  (`SpoutLimits::MaxFrameWaitMs`), in every build configuration. A larger value of
+  `r.Spout.FrameWaitMs` or `r.Spout.FrameWaitBudgetMs` is read as 1 ms. This limit was added after
+  the baseline run, which used 1 ms settings on the commit before it; the limit is
+  checked statically and its build and tests in Unreal are still to be run.
 - Only Spout's public frame-count calls are used (`GetNewFrame`, `GetSenderFrame`,
   `IsFrameCountEnabled`). The count is a notification and never an image identity. Every completed
   copy remains a delivery; a pending frame survives a refused access, a failed copy, a failed

@@ -22,19 +22,19 @@ namespace
 		ECVF_RenderThreadSafe);
 	// Experimental, off by default, read on the render thread.
 	TAutoConsoleVariable<float> GSpoutFrameWaitMs(TEXT("r.Spout.FrameWaitMs"), 0.0f,
-		TEXT("Experimental. 0 (default): off. Otherwise the longest time in milliseconds, clamped to 0..4, that one receive call waits for the sender's next frame ")
+		TEXT("Experimental. 0 (default): off. Otherwise the longest time in milliseconds, clamped to 0..1, that one receive call waits for the sender's next frame ")
 		TEXT("when it found none and the sender's own publication history says the next one is due within that time. ")
 		TEXT("Runs on the render thread before any texture access is taken, so it never holds the sender's access lock, and it keeps that thread busy while it waits."),
 		ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> GSpoutFrameWaitBudgetMs(TEXT("r.Spout.FrameWaitBudgetMs"), SpoutLimits::DefaultFrameWaitBudgetMs,
-		TEXT("Experimental. Total time in milliseconds, clamped to 0..4, that all receivers together may spend in the new-frame wait within one render frame."),
+		TEXT("Experimental. Total time in milliseconds, clamped to 0..1, that all receivers together may spend in the new-frame wait within one render frame."),
 		ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> GSpoutFrameWaitPollUs(TEXT("r.Spout.FrameWaitPollUs"), SpoutLimits::DefaultFrameWaitPollUs,
 		TEXT("Experimental. Interval in microseconds, clamped to 50..1000, between frame-count polls inside a new-frame wait."),
 		ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> GSpoutFrameCountRecheck(TEXT("r.Spout.FrameCountRecheck"), 0,
 		TEXT("Experimental. 1: the sender's frame notification is read again while the texture access lock is held, and a receive call that found nothing new still copies ")
-		TEXT("when the sender published since the previous call. 0 (default): unchanged behaviour. Always on while r.Spout.FrameWaitMs is above 0."),
+		TEXT("when the sender published since the previous call. 0 (default): off. Always on while r.Spout.FrameWaitMs is above 0."),
 		ECVF_RenderThreadSafe);
 	FCriticalSection GSpoutLimitBudgetMutex;
 	int64 GSpoutLimitReserved = 0, GSpoutLimitPeak = 0, GSpoutLimitRejected = 0;
