@@ -40,16 +40,17 @@ namespace
 		ECVF_Default);
 
 	// The column line; FormatRecord writes one field per name, in this order. The first 47 columns
-	// are those of instrumentVersion 5; version 6 appends two.
+	// are those of instrumentVersion 5; version 6 appends two, version 7 seven more.
 	const TCHAR* const GColumns =
 		TEXT("kind,stream,frameRT,tDetect,newFrame,senderFrame,pending,tDrain0,tDrain1,tWrap0,tWrap1,tAccess0,tAcquire,acquired,tCopyRec,tGpuDone,tPublish,tRelease,tRestore,gpuT0,gpuT1,gpuFreq,gpuDisjoint,hr,")
 		TEXT("waitDecision,waitOutcome,tWait0,tWait1,waitPolls,waitBoundUs,predLoUs,predHiUs,periodUs,countAfterWait,countUnderAccess,budgetBeforeUs,budgetAfterUs,flags,predSuspensions,predWastedWaits,predJitterUs,")
 		TEXT("ackBefore,delivered,receivedBefore,receivedAfter,frameRequests,syncOpens,")
-		TEXT("completed,newUnderAccess");
+		TEXT("completed,newUnderAccess,")
+		TEXT("slot,sequence,generation,writtenValue,readValue,slotReadValue,asyncOutcome");
 
 	FString FormatRecord(const SpoutInstrument::FRecord& R)
 	{
-		return FString::Printf(TEXT("%c,%d,%llu,%llu,%d,%lld,%d,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,0x%08x,%d,%d,%llu,%llu,%d,%.1f,%.1f,%.1f,%.1f,%lld,%lld,%.1f,%.1f,%d,%lld,%lld,%.1f,%lld,%d,%llu,%llu,%lld,%lld,%d,%d\n"),
+		return FString::Printf(TEXT("%c,%d,%llu,%llu,%d,%lld,%d,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,0x%08x,%d,%d,%llu,%llu,%d,%.1f,%.1f,%.1f,%.1f,%lld,%lld,%.1f,%.1f,%d,%lld,%lld,%.1f,%lld,%d,%llu,%llu,%lld,%lld,%d,%d,%d,%lld,%lld,%lld,%lld,%lld,%d\n"),
 			R.Kind, R.Stream, R.FrameRT, R.TDetect, R.NewFrame, R.SenderFrame, R.Pending,
 			R.TDrain0, R.TDrain1, R.TWrap0, R.TWrap1, R.TAccess0, R.TAcquire, R.Acquired,
 			R.TCopyRec, R.TGpuDone, R.TPublish, R.TRelease, R.TRestore,
@@ -57,7 +58,8 @@ namespace
 			R.WaitDecision, R.WaitOutcome, R.TWait0, R.TWait1, R.WaitPolls, R.WaitBoundUs, R.PredLoUs, R.PredHiUs, R.PeriodUs,
 			R.CountAfterWait, R.CountUnderAccess, R.BudgetBeforeUs, R.BudgetAfterUs, R.Flags, R.PredSuspensions, R.PredWastedWaits, R.PredJitterUs,
 			R.AckBefore, R.Delivered, R.ReceivedBefore, R.ReceivedAfter, R.FrameRequests, R.SyncOpens,
-			R.Completed, R.NewUnderAccess);
+			R.Completed, R.NewUnderAccess,
+			R.Slot, R.Sequence, R.Generation, R.WrittenValue, R.ReadValue, R.SlotReadValue, R.AsyncOutcome);
 	}
 
 	/** Buffers rows on the producing thread and writes them from its own thread every 250 ms. */

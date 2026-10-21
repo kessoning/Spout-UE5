@@ -7,6 +7,7 @@
 #include "SpoutReceiverOwnership.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutD3DContext.h"
+#include "SpoutTestExpectations.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/Texture2D.h"
 #include "Materials/Material.h"
@@ -38,10 +39,10 @@
 #define P1_FLAGS (EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::EngineFilter)
 namespace
 {
+	// Only the legacy wrap path may see id 916; elsewhere it is neither required nor excused (SpoutTestExpectations.h).
 	void ExpectWrapDiagnostic(FAutomationTestBase& Test)
 	{
-		if (FParse::Param(FCommandLine::Get(), TEXT("d3ddebug")))
-			Test.AddExpectedError(TEXT("ID3D12CompatibilityDevice::ReflectSharedProperties: Resource provided was not shared by D3D11, or with a D3D11 desc."), EAutomationExpectedErrorFlags::Contains, 0);
+		SpoutTestExpectations::ExpectLegacyWrapDiagnostic(Test);
 	}
 	TArray<FColor> Pattern(int32 W, int32 H, int32 Sequence)
 	{

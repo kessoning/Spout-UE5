@@ -38,6 +38,7 @@
 #include "Engine/Texture.h"
 #include "TextureResource.h"
 #include "Engine/TextureRenderTarget.h"
+#include "Misc/ScopeExit.h"
 
 // UE 5.8 changed FSlateRenderer::OnBackBufferReadyToPresent()'s second delegate parameter from
 // const FTextureRHIRef& to ISlateViewportProvider& (the back buffer is fetched from the provider).
@@ -200,12 +201,176 @@ namespace
 	};
 #endif
 
+	/**
+	 * The send on the shared-slot path (SpoutSharedSlot.h), used when the process latched it. Nothing of
+	 * Unreal's is wrapped for D3D11 and the D3D11-on-12 device is not used.
+	 *
+	 * Unreal's queue copies the source into the source's slot and signals the filled fence; the existing submission
+	 * call puts that on the GPU; the render thread waits, bounded and holding no access, until it is done. Then, one
+	 * name at a time and under that name's access, the native device copies the slot into the name's shared texture
+	 * and the render thread waits until that copy has finished (or a device was removed) before the frame is
+	 * announced and access released: completion precedes announcement and mutex release, as on the wrap path. A
+	 * timed-out fill publishes nothing this frame; its copy still runs and the next fill is ordered behind it on the
+	 * same queue.
+	 *
+	 * SlotHolder and RefusedFor belong to the source: the viewport sender's own, or the first destination's entry for
+	 * a render target (a render-target send always has exactly one name).
+	 */
+	void SendThroughSharedSlot(
+		TConstArrayView<FSpoutSendDestination> Destinations,
+		const FTextureRHIRef& SourceRHI,
+		bool bIsViewport,
+		FRHICommandListImmediate& RHICmdList,
+		const SpoutRHIState::FCopyBracket& Bracket,
+		DXGI_FORMAT SharedFormat,
+		TUniquePtr<FSpoutSlotSend>* SlotHolder,
+		FSpoutSlotSend::FIdentity* RefusedFor)
+	{
+		FSpoutGpuRetirement::Get().Poll();
+		FSpoutSharedSender& First = *Destinations[0].Entry;
+		if (!SlotHolder || !RefusedFor)
+		{
+			SlotHolder = &First.SlotSend;
+			RefusedFor = &First.SlotSendRefusedFor;
+		}
+		FSpoutSlotSend::FIdentity Identity;
+		Identity.Width = static_cast<uint32>(SourceRHI->GetDesc().Extent.X);
+		Identity.Height = static_cast<uint32>(SourceRHI->GetDesc().Extent.Y);
+		Identity.Format = SharedFormat;
+		Identity.PixelFormat = SourceRHI->GetFormat();
+		if (*SlotHolder && (*SlotHolder)->GetIdentity() != Identity)
+		{
+			// Retired with its outstanding work, never dropped.
+			SlotHolder->Reset();
+		}
+		if (!*SlotHolder)
+		{
+			if (*RefusedFor == Identity)
+			{
+				return;
+			}
+			const FString What = bIsViewport ? FString(TEXT("viewport sender")) : FString::Printf(TEXT("sender '%s'"), *First.Name.ToString());
+			FString Why;
+			*SlotHolder = FSpoutSlotSend::Create(What, Identity, Why);
+			if (!*SlotHolder)
+			{
+				*RefusedFor = Identity;
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout %s: the shared-slot send could not start for %ux%u %s (%s). Nothing is published until the source's size or format changes."),
+					*What, Identity.Width, Identity.Height, *SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(SharedFormat)), *Why);
+				return;
+			}
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout %s: publishing through the shared-slot path (%ux%u %s)."),
+				*What, Identity.Width, Identity.Height, *SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(SharedFormat)));
+		}
+		FSpoutSlotSend& Slot = **SlotHolder;
+		if (Slot.HasFailed() || !Slot.CanWrite())
+		{
+			// Stopped for this size and format (logged once when it stopped), or a native copy out of the slot is
+			// not proven finished: nothing is queued into the slot.
+			return;
+		}
+
+		SPOUT_INSTRUMENT(
+			const bool bInstrument = SpoutInstrument::IsEnabled();
+			uint64 TDrain0 = 0, TDrain1 = 0;
+			TArray<SpoutInstrument::FRecord, TInlineAllocator<4>> Records;
+			if (bInstrument) SpoutInstrument::Calibrate(FSpoutD3DContext::Get().GetD3D12CommandQueue());
+		)
+		SpoutSlotRules::EWait Filled = SpoutSlotRules::EWait::TimedOut;
+		{
+			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendSlotFill);
+			const uint64 FillValue = Slot.QueueFill(RHICmdList, SourceRHI, Bracket.EntryBefore, Bracket.CopyAccess, Bracket.ExitAfter);
+			SPOUT_INSTRUMENT(if (bInstrument) TDrain0 = SpoutInstrument::Now();)
+			SubmitSpoutInteropTransitions(RHICmdList);
+			Filled = Slot.WaitFilled(FillValue);
+			SPOUT_INSTRUMENT(if (bInstrument) TDrain1 = SpoutInstrument::Now();)
+		}
+		if (Filled != SpoutSlotRules::EWait::Reached)
+		{
+			if (Filled == SpoutSlotRules::EWait::TimedOut && First.AccessLogThrottle.ShouldLog())
+			{
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout: the copy into the send slot did not finish within %u ms; this frame was not published. The next frame is."),
+					FSpoutSlotSend::FilledTimeoutMs);
+			}
+			return;
+		}
+
+		for (const FSpoutSendDestination& Destination : Destinations)
+		{
+			SPOUT_INSTRUMENT(
+				FSendRecordScope RecScope(bInstrument, Records);
+				SpoutInstrument::FRecord& Rec = RecScope.Rec;
+				if (bInstrument)
+				{
+					if (Destination.Entry->InstrumentId < 0) Destination.Entry->InstrumentId = SpoutInstrument::RegisterStream(Destination.Entry->Name, bIsViewport ? TEXT("SV") : TEXT("S"));
+					Rec.Kind = TEXT('S');
+					Rec.Stream = Destination.Entry->InstrumentId;
+					Rec.FrameRT = GFrameCounterRenderThread;
+					Rec.TDrain0 = TDrain0; Rec.TDrain1 = TDrain1;
+					Rec.TAccess0 = SpoutInstrument::Now();
+				}
+			)
+			ESpoutSlotCopy Result = ESpoutSlotCopy::NotStarted;
+			{
+				FSpoutTextureAccessScope Access(Destination.Entry->FrameSync, Destination.SharedTexture.GetReference());
+				SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = SpoutInstrument::Now(); Rec.Acquired = Access.IsAcquired() ? 1 : 0; })
+				if (!Access.IsAcquired())
+				{
+					if (Destination.Entry->AccessLogThrottle.ShouldLog())
+					{
+						UE_LOG(LogSpoutPlugin, Warning,
+							TEXT("Spout sender '%s': shared-texture access was unavailable because a receiver still held it after waiting up to %u ms (r.Spout.AccessWaitMs), ")
+							TEXT("so this frame was skipped and not published. The next frame is published once the texture is free."),
+							*Destination.Entry->Name.ToString(), SpoutLimits::AccessWaitMs());
+					}
+					continue;
+				}
+				Result = Slot.DrainInto(Destination.SharedTexture.GetReference());
+				SPOUT_INSTRUMENT(if (bInstrument) { Rec.TCopyRec = SpoutInstrument::Now(); Rec.TGpuDone = Rec.TCopyRec; Rec.Hr = static_cast<int32>(Result); })
+				if (Result == ESpoutSlotCopy::Completed)
+				{
+					TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendPublishFrame);
+					Destination.Entry->FrameSync.PublishFrame();
+					++Destination.Entry->SlotTransfers;
+					SPOUT_INSTRUMENT(if (bInstrument) { Rec.TPublish = SpoutInstrument::Now(); Rec.SenderFrame = Destination.Entry->FrameSync.GetLastObservedSenderFrame(); })
+				}
+				else if (Result == ESpoutSlotCopy::SignalFailed && Slot.GetOutstanding().GetProof() != SpoutSlotRules::EProof::Proven)
+				{
+					// The texture may still be written: it is retired, never released, when it is replaced.
+					FScopeLock SenderLock(&Destination.Entry->ResourceMutex);
+					Destination.Entry->bSharedTextureWriteUnproven = true;
+				}
+			}
+			// Access has been given back. A keyed texture's release reaches peers when the native context is flushed.
+			D3D11_TEXTURE2D_DESC SharedDesc = {};
+			Destination.SharedTexture->GetDesc(&SharedDesc);
+			if ((SharedDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) != 0)
+			{
+				Slot.FlushKeyedRelease();
+			}
+			if (Result != ESpoutSlotCopy::Completed)
+			{
+				// The slot stopped (failed signal or removal): nothing more can be drained from it this frame.
+				break;
+			}
+		}
+		SPOUT_INSTRUMENT(
+			if (bInstrument)
+			{
+				const uint64 TRestore = SpoutInstrument::Now();
+				for (SpoutInstrument::FRecord& R : Records) { R.TRestore = TRestore; SpoutInstrument::Push(R); }
+			}
+		)
+	}
+
 	void SendTextureOnRenderThread(
 		TConstArrayView<FSpoutStreamToken> Tokens,
 		const FTextureRHIRef& SourceRHI,
 		bool bIsViewport,
 		FRHICommandListImmediate& RHICmdList,
-		FSpoutWrapCache* SourceWrapCache)
+		FSpoutWrapCache* SourceWrapCache,
+		TUniquePtr<FSpoutSlotSend>* SourceSlot,
+		FSpoutSlotSend::FIdentity* SourceSlotRefusedFor)
 	{
 		if (Tokens.Num() == 0 || !SourceRHI.IsValid())
 		{
@@ -382,6 +547,13 @@ namespace
 			bIsViewport
 				? SpoutRHIState::EResourceRole::ViewportBackBuffer
 				: SpoutRHIState::EResourceRole::SenderRenderTarget);
+
+		// Latched once per process (r.Spout.SharedSlotInterop): the shared-slot path wraps nothing of Unreal's.
+		if (SpoutInterop::IsSharedSlot())
+		{
+			SendThroughSharedSlot(Destinations, SourceRHI, bIsViewport, RHICmdList, Bracket, Format, SourceSlot, SourceSlotRefusedFor);
+			return;
+		}
 
 		SPOUT_INSTRUMENT(
 			const bool bInstrument = SpoutInstrument::IsEnabled();
@@ -658,10 +830,19 @@ namespace
 		/** Releases the cached back-buffer wraps. Must run after the render-command flush. */
 		void ReleaseNativeResources()
 		{
-			// The cache is otherwise touched only on the render thread under this mutex.
-			FSpoutD3DContext& Context = FSpoutD3DContext::Get();
-			FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
-			BackBufferWrapCache.Reset();
+			{
+				// The cache is otherwise touched only on the render thread under this mutex.
+				FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+				FScopeLock D3DLock(&Context.GetD3D11ContextMutex());
+				BackBufferWrapCache.Reset();
+			}
+			{
+				// Retired with its outstanding GPU work, never dropped (SpoutSharedSlot.h).
+				FScopeLock SlotLock(&ViewportSlotMutex);
+				ViewportSlot.Reset();
+				ViewportSlotRefusedFor = FSpoutSlotSend::FIdentity();
+			}
+			FSpoutGpuRetirement::Get().Poll();
 		}
 
 		/**
@@ -854,13 +1035,19 @@ namespace
 								const bool bInstrumentViewport = SpoutInstrument::IsEnabled();
 								const uint64 TViewport0 = bInstrumentViewport ? SpoutInstrument::Now() : 0;
 							)
-							SendTextureOnRenderThread(
-								TokensToSend,
-								BackBufferCopy,
-								true,
-								RHICmdList,
-								&BackBufferWrapCache
-							);
+							{
+								// The viewport's slot is used here and released by ReleaseNativeResources.
+								FScopeLock SlotLock(&ViewportSlotMutex);
+								SendTextureOnRenderThread(
+									TokensToSend,
+									BackBufferCopy,
+									true,
+									RHICmdList,
+									&BackBufferWrapCache,
+									&ViewportSlot,
+									&ViewportSlotRefusedFor
+								);
+							}
 							SPOUT_INSTRUMENT(
 								const uint64 TViewport1 = bInstrumentViewport ? SpoutInstrument::Now() : 0;
 								uint64 TViewport2 = TViewport1;
@@ -876,8 +1063,12 @@ namespace
 							// drained, before the command returns. Costs one CreateWrappedResource
 							// per present plus this flush (the copy itself was already flushed by
 							// the acquire scope); the render-target send path keeps its per-sender
-							// caches and is unaffected.
-							InvalidateBackBufferWraps();
+							// caches and is unaffected. The shared-slot path holds no back buffer
+							// at all, so it has nothing to drop.
+							if (!SpoutInterop::IsSharedSlot())
+							{
+								InvalidateBackBufferWraps();
+							}
 							SPOUT_INSTRUMENT(if (bInstrumentViewport) TViewport2 = SpoutInstrument::Now();)
 #endif
 							SPOUT_INSTRUMENT(
@@ -976,6 +1167,12 @@ namespace
 		bool bDelegateRegistered = false;
 		// Wraps of the swap chain's back buffers. Render-thread only, under the D3D11 context mutex.
 		FSpoutWrapCache BackBufferWrapCache;
+		// The shared-slot path's slot for the viewport source, and the source identity it was last refused for.
+		// Used by the send command and released by ReleaseNativeResources, both under ViewportSlotMutex. Holds no
+		// back buffer: the back buffer is only the source of an RHI copy into it.
+		FCriticalSection ViewportSlotMutex;
+		TUniquePtr<FSpoutSlotSend> ViewportSlot;
+		FSpoutSlotSend::FIdentity ViewportSlotRefusedFor;
 	};
 
 	/**
@@ -1043,6 +1240,12 @@ namespace
 				Sender.Registration.Invalidate(Backend);
 			}
 
+			if (Sender.bSharedTextureWriteUnproven)
+			{
+				// A native copy into it was never proven finished: only the native device's removal may release it.
+				SpoutRetireUnprovenTexture(MoveTemp(Sender.SharedTexture), FString::Printf(TEXT("the shared texture of sender '%s'"), *Sender.Name.ToString()));
+				Sender.bSharedTextureWriteUnproven = false;
+			}
 			Sender.SharedTexture.Reset();
 			Sender.SharedHandle = nullptr;
 			Sender.CachedWrappedResource.Reset();
@@ -1052,7 +1255,11 @@ namespace
 			Sender.SharedFormat = Format;
 
 			spoutDirectX* SpoutDX = Context.GetSpoutDirectX();
-			ID3D11Device* D3D11Device = Context.GetD3D11Device();
+			// The shared-slot path creates the texture peers open on its native device, where its copies run; the wrap
+			// path creates it on the D3D11-on-12 device. Either way it is an ordinary D3D11 shared texture to a peer.
+			ID3D11Device* D3D11Device = SpoutInterop::IsSharedSlot()
+				? static_cast<ID3D11Device*>(FSpoutAsyncDevice::Get().GetDevice())
+				: Context.GetD3D11Device();
 			if (!SpoutDX || !D3D11Device)
 			{
 				if (Sender.RegistrationLogThrottle.ShouldLog())
@@ -1072,6 +1279,13 @@ namespace
 			bool bCreated = false;
 			{
 				TRACE_CPUPROFILER_EVENT_SCOPE(Spout_CreateSharedDX11Texture);
+				// The SDK is given the device only, and its source is not in this repository: whether it touches the
+				// device's immediate context is not known. The shared-slot path's native context is also used by the
+				// asynchronous receive's worker, so the call is made under that context's lock (entry lock first, then
+				// the context lock: the documented order, SpoutSharedSlot.h).
+				FCriticalSection* NativeContextMutex = SpoutInterop::IsSharedSlot() ? &FSpoutAsyncDevice::Get().GetContextMutex() : nullptr;
+				if (NativeContextMutex) NativeContextMutex->Lock();
+				ON_SCOPE_EXIT { if (NativeContextMutex) NativeContextMutex->Unlock(); };
 				bCreated = SpoutDX->CreateSharedDX11Texture(
 					D3D11Device,
 					Width,
@@ -1241,6 +1455,8 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 				SourceRHI,
 				SendSource.bIsViewport,
 				RHICmdList,
+				nullptr,
+				nullptr,
 				nullptr
 			);
 		});

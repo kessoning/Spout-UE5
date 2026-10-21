@@ -33,6 +33,25 @@
  *   delivered, receivedBefore/After, frameRequests, syncOpens   the downstream delivery of this call
  *   completed  1 when the transfer reached its completion point (FSpoutFrameSync::CompleteTransfer)
  *   newUnderAccess  what the read under access answered: -1 not read, 0 nothing new, 1 new
+ *
+ * Version 7 adds the asynchronous receive (r.Spout.AsyncReceive) and seven columns for it:
+ *   kind W     one row per worker transfer attempt, on the worker thread: tDetect the start of the attempt,
+ *              tAccess0/tAcquire/acquired the Spout access, tCopyRec after the copy and the written-fence signal
+ *              were recorded, tGpuDone when the copy was seen complete (or given up), tRelease after access was
+ *              given back, tRestore after the slot was published or the write abandoned, completed 1 when published
+ *   kind A     one row per render-thread receive call of an asynchronous stream: tDetect the start of the call,
+ *              tRestore its end (the copy out of the slot is queued, not waited for), tAcquire the worker's access
+ *              time of the transfer this frame consumed, completed and delivered 1 when it consumed
+ *   kind F     a measurement thread saw the read fence advance: tDetect when, readValue the value reached. The copy
+ *              Unreal queued for that read value had completed on Unreal's queue by then (an upper bound of when,
+ *              late by that thread's wake-up)
+ *   slot, sequence, writtenValue   the slot, the publication's sequence number and the written-fence value of the copy
+ *   generation the stream object the row belongs to: a number no other stream object of the process has. Sequence
+ *              numbers, fence values and slots are counted per generation
+ *   readValue  W: the read fence's completed value when the slot was picked; A: the read-fence value queued
+ *   slotReadValue  W: the read value recorded on the slot when it was picked (it must not exceed readValue)
+ *   asyncOutcome   W: 0 published, 1 access refused, 2 copy failed, 3 completion timed out, 4 no free slot,
+ *              5 not published for another reason; A: 0 consumed, 1 nothing new, 2 dropped (another generation)
  */
 #pragma once
 
@@ -61,7 +80,7 @@
 
 namespace SpoutInstrument
 {
-	constexpr int32 Version = 6;
+	constexpr int32 Version = 7;
 
 	/** r.Spout.Instrument != 0. Safe on any thread. */
 	bool IsEnabled();
@@ -77,7 +96,7 @@ namespace SpoutInstrument
 
 	struct FRecord
 	{
-		TCHAR Kind = TEXT('?');   // R receive call (GPU path), C receive call (CPU path), S send destination, V viewport send command
+		TCHAR Kind = TEXT('?');   // R receive call (GPU path), C receive call (CPU path), S send destination, V viewport send command, W worker transfer, A asynchronous receive call, F read fence seen advanced
 		int32 Stream = -1;        // id from RegisterStream; -2 for the viewport command
 		uint64 FrameRT = 0;       // GFrameCounterRenderThread when the record started
 		uint64 TDetect = 0;
@@ -113,6 +132,13 @@ namespace SpoutInstrument
 		int64 SyncOpens = -1;         // opens so far (cumulative)
 		int32 Completed = 0;          // version 6: the transfer reached its completion point
 		int32 NewUnderAccess = -1;    // version 6: the read under access; -1 not read
+		int32 Slot = -1;              // version 7, asynchronous receive: see the head of this file
+		int64 Sequence = -1;
+		int64 Generation = -1;
+		int64 WrittenValue = -1;
+		int64 ReadValue = -1;
+		int64 SlotReadValue = -1;
+		int32 AsyncOutcome = -1;
 	};
 
 	/** The CSV's column line (no #meta line, no newline), and one row exactly as the writer formats it. */

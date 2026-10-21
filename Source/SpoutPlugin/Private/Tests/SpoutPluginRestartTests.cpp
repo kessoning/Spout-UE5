@@ -12,6 +12,7 @@
 #include "SpoutFrameSync.h"
 #include "SpoutModule.h"
 #include "SpoutSenderRegistry.h"
+#include "SpoutTestExpectations.h"
 #include "Containers/StringConv.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -171,10 +172,8 @@ bool FSpoutRestartPool::RunTest(const FString&)
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRestartPixels, "SpoutPlugin.Restart.SameNameRestartRecyclesBackendsAndDeliversPixels", SPOUT_RESTART_FLAGS)
 bool FSpoutRestartPixels::RunTest(const FString&)
 {
-	if (FParse::Param(FCommandLine::Get(), TEXT("d3ddebug")))
-	{
-		AddExpectedError(TEXT("ID3D12CompatibilityDevice::ReflectSharedProperties: Resource provided was not shared by D3D11, or with a D3D11 desc."), EAutomationExpectedErrorFlags::Contains, 0);
-	}
+	// Only the legacy wrap path may see id 916; elsewhere it is neither required nor excused (SpoutTestExpectations.h).
+	SpoutTestExpectations::ExpectLegacyWrapDiagnostic(*this);
 	FSpoutD3DContext::Get().InitializeIfNeeded();
 	if (!TestTrue(TEXT("real interop device available"), FSpoutD3DContext::Get().IsSpoutAvailable())) return false;
 

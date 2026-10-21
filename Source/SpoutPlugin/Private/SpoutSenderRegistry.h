@@ -12,6 +12,9 @@
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutFormatPolicy.h"
 #include "SpoutFrameSync.h"
+#include "SpoutAsyncReceive.h"
+#include "SpoutSharedSlot.h"
+#include "SpoutGpuCompletion.h"
 #include "SpoutLogThrottle.h"
 #include "SpoutSenderRegistration.h"
 #include "SpoutLimits.h"
@@ -107,12 +110,47 @@ public:
 	/** Measurement builds: the stream id registered with SpoutInstrument, or -1 until first used. */
 	int32 InstrumentId = -1;
 
+	/**
+	 * Receiver role only, experimental (r.Spout.AsyncReceive, off by default): the asynchronous
+	 * receive of this stream at its current sender identity, or null while the stream uses the
+	 * synchronous path. Created, used and replaced on the render thread; destroyed there or by
+	 * ReleaseResources. While it exists it is the only user of FrameSync's access and notification
+	 * calls, and its worker thread is the only thread that takes Spout access for this stream.
+	 * AsyncRefusedFor is the identity the asynchronous path was last refused for, so a refusal is
+	 * logged once and not retried on every frame.
+	 */
+	TUniquePtr<FSpoutAsyncStream> Async;
+	FSpoutAsyncStream::FIdentity AsyncRefusedFor;
+
+	/**
+	 * The shared-slot path (SpoutSharedSlot.h), when the process latched it. Render thread only, apart from
+	 * ReleaseResources, which runs when no render command holds the entry any more. Replacing or resetting one of these
+	 * hands its objects to FSpoutGpuRetirement with their outstanding work: they are never released directly.
+	 *   SlotReceive  receiver role: the slots at the current sender identity
+	 *   SlotSend     sender role, render-target source: the slot the source is copied into (the viewport's slot is
+	 *                held by the viewport sender)
+	 * The RefusedFor identities keep a refusal from being retried, and logged, on every frame.
+	 */
+	TUniquePtr<FSpoutSlotReceive> SlotReceive;
+	FSpoutSlotReceive::FIdentity SlotReceiveRefusedFor;
+	TUniquePtr<FSpoutSlotSend> SlotSend;
+	FSpoutSlotSend::FIdentity SlotSendRefusedFor;
+	/**
+	 * Sender role, shared-slot path: a native copy into SharedTexture could not be proven finished (its signal and the
+	 * event query after it both failed). The texture is then retired, never released, when it is replaced.
+	 */
+	bool bSharedTextureWriteUnproven = false;
+	/** Transfers this entry completed through the shared-slot path. Diagnostics and tests. */
+	std::atomic<int64> SlotTransfers{0};
+
 	// Shared DX11 texture exposed to other Spout clients (senders only).
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> SharedTexture;
 	HANDLE SharedHandle = nullptr;
 
 	// CPU-readable staging texture for receiver readback.
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> StagingTexture;
+	// CPU readback completion belongs to the latched receiver device, not the legacy bridge.
+	FSpoutGpuCompletion CpuCompletion;
 
 	// Render-thread-owned completed image and per-destination delivery generations.
 	// Weak UObject keys do not keep optional targets alive; the last resource is

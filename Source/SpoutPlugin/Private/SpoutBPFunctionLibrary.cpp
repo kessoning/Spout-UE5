@@ -90,6 +90,10 @@ void USpoutBPFunctionLibrary::EnsureSpoutInitialized()
 	// Public entry points and UObject work are game-thread only.
 	if (!FSpoutSession::Get().IsRunning()) return;
 	FSpoutD3DContext::Get().InitializeIfNeeded();
+	// The interop path is latched at the first initialization; a later setting change is reported, not applied.
+	SpoutInterop::NoteSettingChange();
+	// Retired shared-slot objects whose GPU work has finished are released here as well as on the render thread.
+	FSpoutGpuRetirement::Get().Poll();
 }
 
 void USpoutBPFunctionLibrary::CloseAllStreams()

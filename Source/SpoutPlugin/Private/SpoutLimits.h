@@ -63,6 +63,30 @@ namespace SpoutLimits
 	 * history is kept: r.Spout.FrameCountRecheck != 0, and always when the frame wait is enabled.
 	 */
 	bool FrameCountRecheck();
+
+	/**
+	 * Whether a receive stream may use the asynchronous path: r.Spout.AsyncReceive != 0. An internal,
+	 * experimental switch, off by default. With it off the worker, its device and
+	 * its slots are never created. Read on every receive call, so turning it off returns a stream to
+	 * the synchronous path at its next call. A stream on the asynchronous path makes no publication
+	 * wait: r.Spout.FrameWaitMs applies to the synchronous path only.
+	 */
+	bool AsyncReceive();
+
+	/**
+	 * r.Spout.AsyncReceive.GpuPriority, clamped to -7..7. A diagnostic of the asynchronous receive, 0 by default:
+	 * the GPU scheduling priority asked for the worker's device relative to the process's other
+	 * devices (IDXGIDevice::SetGPUThreadPriority). With 0 the call is not made. Read once, when the
+	 * worker's device is created.
+	 */
+	int32 AsyncReceiveGpuPriority();
+
+	/**
+	 * r.Spout.SharedSlotInterop != 0 (default 1): the sender and the synchronous receiver use the shared-slot path
+	 * (SpoutSharedSlot.h) instead of wrapping Unreal's resources for D3D11. Read ONCE per process, at the first interop
+	 * initialization (SpoutInterop::LatchOnce); a later change has no effect until the process restarts.
+	 */
+	bool SharedSlotInteropRequested();
 }
 
 // Lifetime follows the actual retained texture/entry, including old outputs held by callers.

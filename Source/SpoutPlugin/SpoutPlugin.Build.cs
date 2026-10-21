@@ -67,6 +67,17 @@ public class SpoutPlugin : ModuleRules
         }
         PrivateDefinitions.Add("SPOUT_WITH_INSTRUMENT=" + (bInstrument ? "1" : "0"));
 
+        // D3D diagnostic builds only, by the same rule as the instrumentation marker above (a marker file in the plugin's
+        // root, outside every hashed directory). Without it SPOUT_WITH_D3D_DIAG is 0 and the diagnostic code in
+        // SpoutDebugCapture.cpp and every SPOUT_D3D_DIAG_TRANSITION(...) statement compile to nothing.
+        string d3dDiagMarker = Path.Combine(ModulePath, "SpoutD3DDiag.enable");
+        bool bD3DDiag = File.Exists(d3dDiagMarker);
+        if (bD3DDiag)
+        {
+            ExternalDependencies.Add(d3dDiagMarker);
+        }
+        PrivateDefinitions.Add("SPOUT_WITH_D3D_DIAG=" + (bD3DDiag ? "1" : "0"));
+
         // Public include paths are consumed by downstream modules; keep Spout headers
         // private so they do not pull <d3d11.h>/<Windows.h> into every consumer.
         PublicIncludePaths.AddRange(new string[] {

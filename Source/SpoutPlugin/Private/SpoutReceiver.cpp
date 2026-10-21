@@ -6,18 +6,19 @@
  * Implements the Spout receiver flow.
  *
  * Two paths are supported, controlled by CVar r.Spout.GPUReceiver:
- *   - GPU path (default, CVar=1): opens the external sender's shared DX11 texture and
- *     copies it directly into the UE RHI destination via D3D11-on-12 wrapping.
- *     No CPU readback, no staging texture map.
- *   - CPU path (CVar=0): fallback — copies into a D3D11 STAGING texture, maps it,
- *     uploads via RHIUpdateTexture2D straight from the mapped pointer. Kept for
- *     debugging.
+ *   - GPU path (default, CVar=1): copies through native shared slots, or through
+ *     D3D11-on-12 wrapping when the legacy wrap path is selected. No CPU readback.
+ *   - CPU path (CVar=0): copies into a D3D11 STAGING texture, maps it and uploads
+ *     through the RHI. It uses the native device in shared-slot mode and the
+ *     D3D11-on-12 device on the legacy wrap path.
  */
 #include "SpoutReceiver.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "SpoutLimits.h"
 #include "SpoutInstrument.h"
 #include "SpoutFrameWait.h"
+#include "SpoutAsyncReceive.h"
+#include "SpoutDebugCapture.h"
 #include "Materials/MaterialInterface.h"
 #include "SpoutD3DContext.h"
 #include "SpoutD3DUtils.h"
@@ -56,19 +57,42 @@ namespace
 #if WITH_DEV_AUTOMATION_TESTS
 	TAtomic<bool> GFailNextCpuReadback{false};
 #endif
-	void CopyReceivedFrame(FRHICommandListImmediate& Cmd, FRHITexture* Source, FRHITexture* Destination)
+	void CopyReceivedFrame(FRHICommandListImmediate& Cmd, FRHITexture* Source, FRHITexture* Destination, bool bAfterCpuUpload = false)
 	{
 		if (Source == Destination) return;
-		Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+		// UE merges adjacent transitions of the same resource. An upload flushes prior
+		// barriers, then leaves the source's CopyDest -> SRV restoration pending. Consume
+		// that first; otherwise keep a fresh destination's RTV -> SRV restoration adjacent.
+		if (bAfterCpuUpload)
+		{
+			SPOUT_D3D_DIAG_TRANSITION("receive.restore.uploaded-source.to-copysrc", Source, ERHIAccess::Unknown, ERHIAccess::CopySrc);
+			Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+		}
+		SPOUT_D3D_DIAG_TRANSITION("receive.restore.destination.to-copydest", Destination, ERHIAccess::Unknown, ERHIAccess::CopyDest);
 		Cmd.Transition(FRHITransitionInfo(Destination, ERHIAccess::Unknown, ERHIAccess::CopyDest));
+		if (!bAfterCpuUpload)
+		{
+			SPOUT_D3D_DIAG_TRANSITION("receive.restore.source.to-copysrc", Source, ERHIAccess::Unknown, ERHIAccess::CopySrc);
+			Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+		}
 		Cmd.CopyTexture(Source, Destination, FRHICopyTextureInfo());
+		SPOUT_D3D_DIAG_TRANSITION("receive.restore.source.to-srv", Source, ERHIAccess::CopySrc, ERHIAccess::SRVMask);
 		Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+		SPOUT_D3D_DIAG_TRANSITION("receive.restore.destination.to-srv", Destination, ERHIAccess::CopyDest, ERHIAccess::SRVMask);
 		Cmd.Transition(FRHITransitionInfo(Destination, ERHIAccess::CopyDest, ERHIAccess::SRVMask));
+	}
+
+	ID3D11Device* ReceiverDevice(FSpoutD3DContext& Context)
+	{
+		// The CPU fallback of the shared-slot path shares the native device too. Creating a staging
+		// texture through D3D11-on-12 otherwise creates a D3D12 readback buffer and emits
+		// warning 1328. The legacy wrap path keeps its original device.
+		return SpoutInterop::IsSharedSlot() ? FSpoutAsyncDevice::Get().GetDevice() : Context.GetD3D11Device();
 	}
 	static TAutoConsoleVariable<int32> CVarSpoutGPUReceiver(
 		TEXT("r.Spout.GPUReceiver"),
 		1,
-		TEXT("Spout receiver path: 1 = GPU-direct via D3D11-on-12 (H2A, default), 0 = legacy CPU readback (H2B)."),
+		TEXT("Spout receiver path: 1 = GPU copy (default), 0 = CPU readback. Uses the latched interop mode."),
 		ECVF_Default);
 
 	bool QuerySenderInfo(const ANSICHAR* Utf8Name, unsigned int& OutWidth, unsigned int& OutHeight, HANDLE& OutHandle, unsigned long& OutFormat)
@@ -132,7 +156,9 @@ namespace
 		HRESULT hr = E_FAIL;
 		{
 			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_OpenSharedResource);
-			hr = Context.GetD3D11Device()->OpenSharedResource(
+			ID3D11Device* Device = ReceiverDevice(Context);
+			if (!Device) return false;
+			hr = Device->OpenSharedResource(
 				SharedHandle,
 				IID_PPV_ARGS(NewSharedTexture.GetAddressOf())
 			);
@@ -170,6 +196,11 @@ namespace
 		Receiver.Width = Width;
 		Receiver.Height = Height;
 		Receiver.SharedHandle = SharedHandle;
+		// A new sender identity is a new generation: the asynchronous receive of the old one ends
+		// here, its worker stopped, before anything of the new one is installed.
+		Receiver.Async.Reset();
+		// Likewise the shared-slot receive of the old identity: retired with its outstanding GPU work, not dropped.
+		Receiver.SlotReceive.Reset();
 		// SharedTexture is owned by this receiver; the sender owns the underlying resource.
 		Receiver.SharedTexture = MoveTemp(NewSharedTexture);
 		// Invalidate caches tied to previous geometry/handle.
@@ -243,7 +274,9 @@ namespace
 
 			// Staging texture is owned by the receiver and recreated on size changes.
 			ComPtr<ID3D11Texture2D> NewStaging;
-			HRESULT hr = Context.GetD3D11Device()->CreateTexture2D(&Desc, nullptr, NewStaging.GetAddressOf());
+			ID3D11Device* Device = ReceiverDevice(Context);
+			if (!Device) return false;
+			HRESULT hr = Device->CreateTexture2D(&Desc, nullptr, NewStaging.GetAddressOf());
 			if (FAILED(hr))
 			{
 				Receiver.NativeFailure(hr);
@@ -369,6 +402,254 @@ namespace
 	}
 #endif
 
+	/**
+	 * The experimental asynchronous path (r.Spout.AsyncReceive, off by default). Returns false when
+	 * this call is to use the synchronous path: the setting is off, a precondition failed, or the
+	 * stream's worker failed. With the setting off nothing here is created and the cost is one
+	 * console-variable read.
+	 *
+	 * On this path the render thread takes no Spout access and waits for no GPU work. It takes the
+	 * newest image the worker completed, when there is one, and queues its copy into the same
+	 * Unreal texture the synchronous path fills. That copy is the delivery.
+	 */
+	bool ReceiveOnRenderThread_Async(FSpoutSharedSender& Receiver, FRHITexture* Destination, EPixelFormat PixelFormat, FRHICommandListImmediate& RHICmdList)
+	{
+		check(IsInRenderingThread());
+		if (!SpoutLimits::AsyncReceive())
+		{
+			if (Receiver.Async)
+			{
+				// Turned off while a stream was on it: back to the synchronous path, from the current image.
+				Receiver.Async.Reset();
+				Receiver.FrameSync.RequestCurrentFrame();
+			}
+			return false;
+		}
+		FSpoutAsyncStream::FIdentity Identity;
+		{
+			FScopeLock ReceiverLock(&Receiver.ResourceMutex);
+			Identity.SharedHandle = Receiver.SharedHandle;
+			Identity.Width = Receiver.Width;
+			Identity.Height = Receiver.Height;
+			Identity.Format = Receiver.SharedFormat;
+		}
+		if (Receiver.Async && (Receiver.Async->HasFailed() || Receiver.Async->GetIdentity() != Identity))
+		{
+			if (Receiver.Async->HasFailed())
+			{
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': the asynchronous receive stopped (%s); the stream uses the synchronous path."),
+					*Receiver.Name.ToString(), *Receiver.Async->GetFailure());
+				Receiver.AsyncRefusedFor = Identity;
+			}
+			Receiver.Async.Reset();
+			Receiver.FrameSync.RequestCurrentFrame();
+		}
+		if (!Receiver.Async)
+		{
+			if (Receiver.AsyncRefusedFor == Identity)
+			{
+				return false; // refused once for this identity: no retry on every frame
+			}
+			// Measurement builds: the id the worker's rows carry. -1 otherwise, and then unused.
+			int32 MeasurementStream = -1;
+			SPOUT_INSTRUMENT(
+				if (Receiver.InstrumentId < 0) Receiver.InstrumentId = SpoutInstrument::RegisterStream(Receiver.Name, TEXT("R"));
+				MeasurementStream = Receiver.InstrumentId;
+			)
+			FString Why;
+			Receiver.Async = FSpoutAsyncStream::Create(Receiver.Name, MeasurementStream, Receiver.FrameSync, Identity, PixelFormat, Why);
+			if (!Receiver.Async)
+			{
+				Receiver.AsyncRefusedFor = Identity;
+				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': the asynchronous receive is not used (%s); the stream uses the synchronous path."),
+					*Receiver.Name.ToString(), *Why);
+				return false;
+			}
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': asynchronous receive started (experimental)."), *Receiver.Name.ToString());
+		}
+		if (Receiver.Async->ConsumeOnRenderThread(RHICmdList, Destination, Receiver.ReceivedFrameNumber))
+		{
+			++Receiver.ReceivedFrameNumber;
+		}
+		return true;
+	}
+
+	/**
+	 * The synchronous GPU receive on the shared-slot path (SpoutSharedSlot.h), used when the process latched
+	 * it. Nothing of Unreal's is wrapped for D3D11 and the D3D11-on-12 device is not used.
+	 *
+	 * The same contract as the wrap path below: one check stage before any lock or access; the copy under the peer's
+	 * access; the notification read again under access when the recheck is on; the frame completed only once the
+	 * copy finished, while access is still held; the received-frame number moved only on a delivered completion.
+	 * What differs is where the copy goes. The native device copies the peer's texture into a plugin-owned slot and
+	 * the render thread waits, bounded, for that copy only. Then Unreal's queue is given the copy slot -> destination,
+	 * ordered behind the slot's written fence, and signals the read fence after it. A slot is written again only
+	 * once its read finished. A copy that timed out is never published; its frame stays pending.
+	 *
+	 * Only the primary destination is filled here: the caller passes no render target, and fills output render
+	 * targets from the delivered frame with RHI copies.
+	 */
+	void ReceiveOnRenderThread_SharedSlot(
+		TSharedPtr<FSpoutSharedSender> Receiver,
+		TRefCountPtr<FRHITexture> DestTextureRHI,
+		FRHICommandListImmediate& RHICmdList,
+		const FSpoutStreamToken& Token)
+	{
+		if (!DestTextureRHI.IsValid())
+		{
+			return;
+		}
+		FSpoutGpuRetirement::Get().Poll();
+
+		FSpoutSlotReceive::FIdentity Identity;
+		{
+			FScopeLock ReceiverLock(&Receiver->ResourceMutex);
+			if (!Receiver->SharedTexture)
+			{
+				return;
+			}
+			Identity.SharedHandle = Receiver->SharedHandle;
+			Identity.Width = Receiver->Width;
+			Identity.Height = Receiver->Height;
+			Identity.Format = Receiver->SharedFormat;
+		}
+		if (Receiver->SlotReceive && Receiver->SlotReceive->GetIdentity() != Identity)
+		{
+			// Retired with its outstanding work, never dropped.
+			Receiver->SlotReceive.Reset();
+		}
+		if (!Receiver->SlotReceive)
+		{
+			if (Receiver->SlotReceiveRefusedFor == Identity)
+			{
+				return;
+			}
+			FString Why;
+			Receiver->SlotReceive = FSpoutSlotReceive::Create(Receiver->Name, Identity, DestTextureRHI->GetFormat(), Why);
+			if (!Receiver->SlotReceive)
+			{
+				Receiver->SlotReceiveRefusedFor = Identity;
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': the shared-slot receive could not start for this sender identity (%s). Nothing is received until the sender's size, format or handle changes."),
+					*Receiver->Name.ToString(), *Why);
+				return;
+			}
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': receiving through the shared-slot path (%ux%u, generation %llu)."),
+				*Receiver->Name.ToString(), Identity.Width, Identity.Height, Receiver->SlotReceive->GetGeneration());
+		}
+		FSpoutSlotReceive& Slots = *Receiver->SlotReceive;
+		if (Slots.HasFailed())
+		{
+			// Stopped for this identity (logged once when it stopped). Its objects are retired when the identity changes.
+			return;
+		}
+
+		const bool bRecheckNotification = SpoutLimits::FrameCountRecheck();
+		SPOUT_INSTRUMENT(
+			const bool bInstrument = SpoutInstrument::IsEnabled();
+			SpoutInstrument::FRecord Rec;
+			if (bInstrument)
+			{
+				BeginReceiveRecord(Rec, *Receiver, TEXT('R'));
+			}
+		)
+		FSpoutReceiveCheck Check;
+		const bool bTransfer = SpoutFrameWait::CheckForNewFrame(Receiver->FrameSync,
+			[&](bool bNewFrameAtRead)
+			{
+				SPOUT_INSTRUMENT(
+					if (bInstrument)
+					{
+						Rec.NewFrame = bNewFrameAtRead ? 1 : 0;
+						Rec.SenderFrame = Receiver->FrameSync.GetLastObservedSenderFrame();
+						Rec.Flags |= (SpoutLimits::FrameWaitSeconds() > 0.0 ? 1 : 0) | (bRecheckNotification ? 2 : 0);
+					}
+				)
+			},
+			[&](FSpoutFrameWaitReport& Report, double& BudgetBeforeSeconds, double& BudgetAfterSeconds)
+			{
+				return TryWaitForPublication(*Receiver, Token, Report, BudgetBeforeSeconds, BudgetAfterSeconds);
+			},
+			Check);
+		SPOUT_INSTRUMENT(if (bInstrument) RecordReceiveCheck(Rec, Check);)
+		if (!bTransfer)
+		{
+			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TRestore = SpoutInstrument::Now(); FinishReceiveRecord(Rec, *Receiver); })
+			return;
+		}
+		SPOUT_INSTRUMENT(ON_SCOPE_EXIT { if (bInstrument) FinishReceiveRecord(Rec, *Receiver); };)
+
+		// No slot whose last read finished: the frame stays pending and is taken on a later call.
+		const int32 Slot = Slots.BeginWrite();
+		if (Slot < 0)
+		{
+			SPOUT_INSTRUMENT(if (bInstrument) Rec.TRestore = SpoutInstrument::Now();)
+			return;
+		}
+
+		const SpoutRHIState::FCopyBracket TextureBracket =
+			SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::ReceiverTexture);
+		{
+			// The peer's cross-process access, at most r.Spout.AccessWaitMs to take; a failed wait leaves the frame
+			// pending. Once taken it is held until the copy is proven finished (or the native device is removed), even
+			// when the copy is late and its frame discarded: the peer may not write while the read still runs.
+			SPOUT_INSTRUMENT(if (bInstrument) Rec.TAccess0 = SpoutInstrument::Now();)
+			FSpoutTextureAccessScope Access(Receiver->FrameSync, Slots.GetNativeSource());
+			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = SpoutInstrument::Now(); Rec.Acquired = Access.IsAcquired() ? 1 : 0; })
+			if (!Access.IsAcquired())
+			{
+				Slots.Abandon(Slot, SpoutAsync::EAbandon::AccessRefused);
+				if (Receiver->AccessLogThrottle.ShouldLog())
+				{
+					UE_LOG(LogSpoutPlugin, Warning,
+						TEXT("Spout receiver '%s': shared-texture access was unavailable because a peer (the sender or another receiver) still held it after waiting up to %u ms (r.Spout.AccessWaitMs), ")
+						TEXT("so this frame was not read yet. The frame stays pending and is read on a later frame."),
+						*Receiver->Name.ToString(), SpoutLimits::AccessWaitMs());
+				}
+			}
+			else
+			{
+				// Experimental: the notification read again while access is held (see the wrap path).
+				if (bRecheckNotification)
+				{
+					Receiver->FrameSync.ObserveNotificationUnderAccess();
+					SPOUT_INSTRUMENT(if (bInstrument) RecordUnderAccess(Rec, *Receiver);)
+				}
+
+				uint64 WrittenValue = 0;
+				const ESpoutSlotCopy CopyResult = Slots.CopyAndWait(Slot, WrittenValue);
+				SPOUT_INSTRUMENT(if (bInstrument) { Rec.TCopyRec = SpoutInstrument::Now(); Rec.TGpuDone = Rec.TCopyRec; Rec.Hr = static_cast<int32>(CopyResult); })
+				if (CopyResult == ESpoutSlotCopy::Completed)
+				{
+					// The frame is complete in the slot and access is still held. Its copy into the destination is
+					// queued now; only when that was queued does the frame stop being pending.
+					if (Slots.PublishAndConsume(Slot, WrittenValue, RHICmdList, DestTextureRHI, TextureBracket.EntryBefore, TextureBracket.ExitAfter))
+					{
+						const bool bDelivered = Receiver->FrameSync.CompleteTransfer();
+						SPOUT_INSTRUMENT(if (bInstrument) { Rec.Completed = 1; Rec.Delivered = bDelivered ? 1 : 0; })
+						if (bDelivered)
+						{
+							++Receiver->ReceivedFrameNumber;
+							++Receiver->SlotTransfers;
+						}
+					}
+				}
+				else
+				{
+					// Late, failed or removed: never published, and the frame stays pending. CopyAndWait has already
+					// waited until the copy was proven finished (or the device removed), so access is given back after it.
+					Slots.Abandon(Slot, CopyResult == ESpoutSlotCopy::Late ? SpoutAsync::EAbandon::CompletionTimeout
+						: (CopyResult == ESpoutSlotCopy::NotStarted ? SpoutAsync::EAbandon::Cancelled : SpoutAsync::EAbandon::CopyFailed));
+				}
+			}
+		}
+		// Access has been given back. A keyed texture's release reaches the sender when the native context is flushed.
+		if (Slots.IsKeyedSource())
+		{
+			Slots.FlushKeyedRelease();
+		}
+		SPOUT_INSTRUMENT(if (bInstrument) { Rec.TRelease = SpoutInstrument::Now(); Rec.TRestore = Rec.TRelease; })
+	}
+
 	// GPU-direct path: wrap UE RHI destinations as D3D11 textures via D3D11-on-12 and
 	// issue CopyResource straight from the external shared texture. Zero CPU readback.
 	void ReceiveOnRenderThread_GPU(
@@ -380,6 +661,13 @@ namespace
 	{
 		if (!DestTextureRHI.IsValid() && !DestRenderTargetRHI.IsValid())
 		{
+			return;
+		}
+
+		// Latched once per process (r.Spout.SharedSlotInterop): the shared-slot path wraps nothing of Unreal's.
+		if (SpoutInterop::IsSharedSlot())
+		{
+			ReceiveOnRenderThread_SharedSlot(Receiver, DestTextureRHI, RHICmdList, Token);
 			return;
 		}
 
@@ -631,8 +919,10 @@ namespace
 		TRefCountPtr<FRHITexture> DestTextureRHI,
 		TRefCountPtr<FRHITexture> DestRenderTargetRHI,
 		FRHICommandListImmediate& RHICmdList,
-		const FSpoutStreamToken& Token)
+		const FSpoutStreamToken& Token,
+		bool& bUploaded)
 	{
+		bUploaded = false;
 		if (!DestTextureRHI.IsValid() && !DestRenderTargetRHI.IsValid())
 		{
 			return;
@@ -690,12 +980,16 @@ namespace
 			return;
 		}
 
-		// D3D11 immediate context use is serialized across sender/receiver paths.
-		FScopeLock Lock(&Context.GetD3D11ContextMutex());
-		ID3D11DeviceContext* ImmediateContext = Context.GetImmediateContext();
-		if (!ImmediateContext || !SharedTexture || !StagingTexture || !Context.PrepareGpuCompletion())
+		const bool bNative = SpoutInterop::IsSharedSlot();
+		FCriticalSection& ContextMutex = bNative ? FSpoutAsyncDevice::Get().GetContextMutex() : Context.GetD3D11ContextMutex();
+		ID3D11DeviceContext* ImmediateContext = bNative ? FSpoutAsyncDevice::Get().GetContext() : Context.GetImmediateContext();
+		if (!ImmediateContext || !SharedTexture || !StagingTexture)
 		{
 			return;
+		}
+		{
+			FScopeLock Lock(&ContextMutex);
+			if (!Receiver->CpuCompletion.Prepare(ImmediateContext)) return;
 		}
 
 		{
@@ -705,7 +999,7 @@ namespace
 			D3D11_TEXTURE2D_DESC SharedDesc = {};
 			SharedTexture->GetDesc(&SharedDesc);
 			const bool bKeyedShared = (SharedDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) != 0;
-			ON_SCOPE_EXIT { if (bKeyedShared) ImmediateContext->Flush(); };
+			ON_SCOPE_EXIT { if (bKeyedShared) { FScopeLock Lock(&ContextMutex); ImmediateContext->Flush(); } };
 			SPOUT_INSTRUMENT(if (bInstrument) Rec.TAccess0 = SpoutInstrument::Now();)
 			FSpoutTextureAccessScope Access(Receiver->FrameSync, SharedTexture.Get());
 			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = SpoutInstrument::Now(); Rec.Acquired = Access.IsAcquired() ? 1 : 0; })
@@ -728,9 +1022,12 @@ namespace
 			}
 
 			// A Flush alone submits asynchronously and cannot hand ownership back safely.
+			// Match the worker's lock order: peer access, then the native context. Never
+			// hold that context while attempting to acquire access another user may hold.
+			FScopeLock CopyLock(&ContextMutex);
 			ImmediateContext->CopyResource(StagingTexture.Get(), SharedTexture.Get());
 			SPOUT_INSTRUMENT(if (bInstrument) Rec.TCopyRec = SpoutInstrument::Now();)
-			const HRESULT StagingResult = Context.WaitForGpuCompletion();
+			const HRESULT StagingResult = Receiver->CpuCompletion.Wait(ImmediateContext);
 			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TGpuDone = SpoutInstrument::Now(); Rec.Hr = static_cast<int32>(StagingResult); })
 			if (FAILED(StagingResult))
 			{
@@ -739,6 +1036,7 @@ namespace
 		}
 		SPOUT_INSTRUMENT(if (bInstrument) Rec.TRelease = SpoutInstrument::Now();)
 
+		FScopeLock MapLock(&ContextMutex);
 		D3D11_MAPPED_SUBRESOURCE Mapped = {};
 		HRESULT MapResult;
 #if WITH_DEV_AUTOMATION_TESTS
@@ -779,6 +1077,7 @@ namespace
 			}
 
 			ImmediateContext->Unmap(StagingTexture.Get(), 0);
+			bUploaded = true;
 			// The completion point of the CPU path: the staging copy finished under access, access
 			// was released, and the map and the upload succeeded. A publication made after the
 			// read under access is not consumed by this: the next read reports it.
@@ -1082,13 +1381,18 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				else Receiver->ReceivedFrame.SafeRelease();
 			}
 			const uint64 PreviousFrame = Receiver->ReceivedFrameNumber;
-			if (bUseGPUPath)
+			bool bCpuUploaded = false;
+			if (ReceiveOnRenderThread_Async(*Receiver, TextureRHI, PixelFormat, RHICmdList))
+			{
+				// Experimental, off by default: the worker made the transfer; nothing more here.
+			}
+			else if (bUseGPUPath)
 			{
 				ReceiveOnRenderThread_GPU(Receiver, TextureRHI, nullptr, RHICmdList, Token);
 			}
 			else
 			{
-				ReceiveOnRenderThread_CPU(Receiver, TextureRHI, nullptr, RHICmdList, Token);
+				ReceiveOnRenderThread_CPU(Receiver, TextureRHI, nullptr, RHICmdList, Token, bCpuUploaded);
 			}
 			if (PreviousFrame != Receiver->ReceivedFrameNumber) Receiver->ReceivedFrame = TextureRHI;
 			for (auto It = Receiver->DestinationDeliveries.CreateIterator(); It; ++It)
@@ -1100,7 +1404,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				auto& Delivery = Receiver->DestinationDeliveries.FindOrAdd(OutputIdentity);
 				if (Delivery.Frame != Receiver->ReceivedFrameNumber || Delivery.Resource != TargetRHI)
 				{
-					CopyReceivedFrame(RHICmdList, Receiver->ReceivedFrame, TargetRHI);
+					CopyReceivedFrame(RHICmdList, Receiver->ReceivedFrame, TargetRHI, bCpuUploaded);
 					Delivery.Resource = TargetRHI;
 					Delivery.Frame = Receiver->ReceivedFrameNumber;
 				}

@@ -7,8 +7,11 @@
  * UE's D3D12 RHI, providing a shared context for sender and receiver paths.
  */
 #include "SpoutD3DContext.h"
+#include "SpoutAsyncReceive.h"
+#include "SpoutDebugCapture.h"
 #include "SpoutFrameSync.h"
 #include "SpoutModule.h"
+#include "SpoutSharedSlot.h"
 
 #include "RHI.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -131,6 +134,11 @@ void FSpoutD3DContext::Initialize()
 	SpoutDirectX = MakeUnique<spoutDirectX>();
 
 	UE_LOG(LogSpoutPlugin, Log, TEXT("SpoutDX11on12 Initialized."));
+
+	// Before any stream exists: the debug capture first, so that the native device's creation is inside its
+	// window, then the one-time choice of the interop path (r.Spout.SharedSlotInterop).
+	SpoutDebugCapture::Start();
+	SpoutInterop::LatchOnce();
 #endif
 }
 
@@ -140,6 +148,17 @@ void FSpoutD3DContext::Shutdown()
 	// Serialize with InitializeIfNeeded/IsInitialized/IsSpoutAvailable. InitMutex is documented to
 	// guard Shutdown(); taking it here makes that contract real and prevents an init racing teardown.
 	FScopeLock Lock(&InitMutex);
+
+	// The shared-slot path's retired objects, before the native device goes: each is released only once its GPU
+	// work is proven finished; what cannot be proven within the bound is kept, never released (SpoutSharedSlot.h).
+	FSpoutGpuRetirement::Get().DrainForShutdown(2000);
+	UE_LOG(LogSpoutPlugin, Log, TEXT("Spout interop at shutdown: path=%s wrap_calls=%lld"),
+		SpoutInterop::ToString(SpoutInterop::GetMode()), SpoutInterop::GetWrapCallCount());
+	SpoutDebugCapture::ReportNative(TEXT("shutdown"));
+	SpoutDebugCapture::Stop();
+
+	// The asynchronous receive's device. Its streams were destroyed with their registry entries.
+	FSpoutAsyncDevice::Get().Shutdown();
 
 	// Pooled frame-count backends are SDK objects; destroy them while Spout.dll is still loaded.
 	DrainSpoutSdkFrameSyncBackendPool();

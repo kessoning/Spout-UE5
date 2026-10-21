@@ -4,9 +4,13 @@
 #if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutD3DContext.h"
+#include "SpoutModule.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutSession.h"
+#include "SpoutTestExpectations.h"
 #include "Async/Async.h"
+#include "Misc/FileHelper.h"
+#include "RHI.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "HAL/Event.h"
@@ -28,16 +32,48 @@
 
 namespace
 {
+	// Id 916 comes with every D3D11-on-12 wrap. On the shared-slot path this does nothing; in a process latched to
+	// the legacy wrap path with -d3ddebug it requires the message at least once (SpoutTestExpectations.h).
 	void ExpectWindowsWrapProbe(FAutomationTestBase& Test)
 	{
-		if (FParse::Param(FCommandLine::Get(), TEXT("d3ddebug")))
+		SpoutTestExpectations::ExpectLegacyWrapDiagnostic(Test);
+	}
+
+	/** Unreal's adapter, in the form the pixel peer's --luid takes and reports: "<high>:<low>" in hex. */
+	FString UnrealAdapterLuid()
+	{
+		ID3D12Device* Device = GDynamicRHI ? static_cast<ID3D12Device*>(GDynamicRHI->RHIGetNativeDevice()) : nullptr;
+		if (!Device)
 		{
-			// Windows emits ID 916 while probing optional D3D11 metadata even when
-			// CreateWrappedResource returns S_OK. Tests/Native/D3D11On12WrapProbe.cpp
-			// reproduces it without Unreal/Spout. Leave the production debug queue
-			// untouched; accept only this exact diagnostic in these pixel tests.
-			Test.AddExpectedError(TEXT("ID3D12CompatibilityDevice::ReflectSharedProperties: Resource provided was not shared by D3D11, or with a D3D11 desc."), EAutomationExpectedErrorFlags::Contains, 0);
+			return FString();
 		}
+		const LUID Luid = Device->GetAdapterLuid();
+		return FString::Printf(TEXT("%08x:%08x"), static_cast<uint32>(Luid.HighPart), static_cast<uint32>(Luid.LowPart));
+	}
+
+	/**
+	 * Reads what the pixel peer wrote with --adapter-out, logs it, and requires the peer's device to have been made on
+	 * Unreal's adapter: the requested and the actual LUID both equal Unreal's.
+	 */
+	void CheckPeerAdapter(FAutomationTestBase& Test, const TCHAR* Mode, const FString& Path, const FString& Unreal)
+	{
+		FString Text;
+		const bool bRead = FFileHelper::LoadFileToString(Text, *Path);
+		auto Field = [&Text](const TCHAR* Key)
+		{
+			const FString Tag = FString::Printf(TEXT("\"%s\":\""), Key);
+			const int32 At = Text.Find(Tag, ESearchCase::CaseSensitive);
+			if (At < 0) return FString();
+			const int32 Start = At + Tag.Len();
+			const int32 End = Text.Find(TEXT("\""), ESearchCase::CaseSensitive, ESearchDir::FromStart, Start);
+			return End > Start ? Text.Mid(Start, End - Start) : FString();
+		};
+		const FString Requested = Field(TEXT("requested"));
+		const FString Actual = Field(TEXT("actual"));
+		const bool bMatch = bRead && !Unreal.IsEmpty() && Text.Contains(TEXT("\"match\":1"), ESearchCase::CaseSensitive) && Requested == Unreal && Actual == Unreal;
+		UE_LOG(LogSpoutPlugin, Log, TEXT("Spout T1 peer adapter: mode=%s unreal=%s requested=%s actual=%s match=%d"),
+			Mode, *Unreal, bRead ? *Requested : TEXT("unread"), bRead ? *Actual : TEXT("unread"), bMatch ? 1 : 0);
+		Test.TestTrue(FString::Printf(TEXT("the %s peer's device was made on Unreal's adapter %s (requested %s, actual %s)"), Mode, *Unreal, *Requested, *Actual), bMatch);
 	}
 	TArray<FColor> MakePattern(int32 W, int32 H, int32 Sequence)
 	{
@@ -183,6 +219,9 @@ bool FSpoutP0ExternalPixels::RunTest(const FString&)
 	if (!TestTrue(TEXT("native pixel oracle exists"), IFileManager::Get().FileExists(*PeerExe))) return false;
 	FSpoutD3DContext::Get().InitializeIfNeeded();
 	if (!TestTrue(TEXT("interop available"), FSpoutD3DContext::Get().IsSpoutAvailable())) return false;
+	// The peer is made on Unreal's adapter, by LUID, and reports the adapter it was actually made on (CheckPeerAdapter).
+	const FString UnrealLuid = UnrealAdapterLuid();
+	if (!TestFalse(TEXT("Unreal's adapter LUID is known"), UnrealLuid.IsEmpty())) return false;
 	const FString Prefix = TEXT("SpoutExternalP0_") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
 	const FName SendName(*(Prefix + TEXT("_UE")));
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(NewObject<UTextureRenderTarget2D>(GetTransientPackage()));
@@ -191,7 +230,8 @@ bool FSpoutP0ExternalPixels::RunTest(const FString&)
 	USpoutBPFunctionLibrary::SpoutSender(SendName, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get());
 	FlushRenderingCommands();
 	const FString ResultPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / (Prefix + TEXT(".json")));
-	const FString Args = FString::Printf(TEXT("receive %s \"%s\""), *SendName.ToString(), *ResultPath);
+	const FString ReceiverAdapterPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / (Prefix + TEXT("_receive_adapter.json")));
+	const FString Args = FString::Printf(TEXT("receive %s \"%s\" \"--luid=%s\" \"--adapter-out=%s\""), *SendName.ToString(), *ResultPath, *UnrealLuid, *ReceiverAdapterPath);
 	FProcHandle Peer = FPlatformProcess::CreateProc(*PeerExe, *Args, false, true, true, nullptr, 0, nullptr, nullptr);
 	TestTrue(TEXT("foreign receiver process launched"), Peer.IsValid());
 	const double Deadline = FPlatformTime::Seconds() + 15.0;
@@ -209,6 +249,7 @@ bool FSpoutP0ExternalPixels::RunTest(const FString&)
 		TestEqual(TEXT("foreign receiver verified eight complete frames"), Exit, 0);
 		FPlatformProcess::CloseProc(Peer);
 	}
+	CheckPeerAdapter(*this, TEXT("receive"), ReceiverAdapterPath, UnrealLuid);
 	USpoutBPFunctionLibrary::CloseSender(SendName); FlushRenderingCommands();
 
 	IConsoleVariable* Path = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.GPUReceiver"));
@@ -221,7 +262,8 @@ bool FSpoutP0ExternalPixels::RunTest(const FString&)
 		const FString StopName = ForeignName + TEXT("_Stop"), ReadyName = ForeignName + TEXT("_Ready");
 		HANDLE Stop = CreateEventW(nullptr, true, false, *StopName);
 		HANDLE Ready = CreateEventW(nullptr, true, false, *ReadyName);
-		const FString SenderArgs = FString::Printf(TEXT("send %s %s %s"), *ForeignName, *StopName, *ReadyName);
+		const FString SenderAdapterPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / (ForeignName + TEXT("_send_adapter.json")));
+		const FString SenderArgs = FString::Printf(TEXT("send %s %s %s \"--luid=%s\" \"--adapter-out=%s\""), *ForeignName, *StopName, *ReadyName, *UnrealLuid, *SenderAdapterPath);
 		Peer = FPlatformProcess::CreateProc(*PeerExe, *SenderArgs, false, true, true, nullptr, 0, nullptr, nullptr);
 		const bool IsReady = Peer.IsValid() && WaitForSingleObject(Ready, 10000) == WAIT_OBJECT_0;
 		TestTrue(TEXT("foreign sender published first frame"), IsReady);
@@ -259,6 +301,7 @@ bool FSpoutP0ExternalPixels::RunTest(const FString&)
 			TestEqual(TEXT("foreign sender stopped cleanly"), Exit, 0);
 			FPlatformProcess::CloseProc(Peer);
 		}
+		CheckPeerAdapter(*this, GPU ? TEXT("send-gpu") : TEXT("send-cpu"), SenderAdapterPath, UnrealLuid);
 		CloseHandle(Ready); CloseHandle(Stop);
 		USpoutBPFunctionLibrary::CloseReceiver(FName(*ForeignName), Texture, Material); FlushRenderingCommands();
 	}

@@ -91,13 +91,33 @@ void FSpoutSharedSender::ReleaseResources()
 	FScopeLock Lock(&ResourceMutex);
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReleaseNativeResources);
 
-	// Close the cross-process protocol first, while the texture it names still exists. By this
+	// The asynchronous receive first: its worker thread is the one that takes Spout access for this
+	// stream. Destroying it stops the worker, which finishes a transfer in progress and gives access
+	// back before it exits. The worker takes none of the locks held here.
+	Async.Reset();
+	AsyncRefusedFor = FSpoutAsyncStream::FIdentity();
+
+	// The shared-slot objects: their destructors hand them to the retirement list with their outstanding GPU
+	// work, which releases them once that work is proven finished. Nothing here waits for the GPU.
+	SlotReceive.Reset();
+	SlotReceiveRefusedFor = FSpoutSlotReceive::FIdentity();
+	SlotSend.Reset();
+	SlotSendRefusedFor = FSpoutSlotSend::FIdentity();
+
+	// Close the cross-process protocol next, while the texture it names still exists. By this
 	// point the ordered teardown has already flushed rendering commands, so no access scope can be
 	// live; FSpoutFrameSync::Close says so out loud if one somehow is.
 	FrameSync.Close();
 
+	if (bSharedTextureWriteUnproven)
+	{
+		// A native copy into it was never proven finished: only the native device's removal may release it.
+		SpoutRetireUnprovenTexture(MoveTemp(SharedTexture), FString::Printf(TEXT("the shared texture of sender '%s'"), *Name.ToString()));
+		bSharedTextureWriteUnproven = false;
+	}
 	SharedTexture.Reset();
 	StagingTexture.Reset();
+	CpuCompletion.Reset();
 	CachedWrappedResource.Reset();
 	CachedRTWrappedResource.Reset();
 	ReceivedFrame.SafeRelease();

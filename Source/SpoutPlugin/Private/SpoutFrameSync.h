@@ -308,6 +308,16 @@ public:
 	/** The count the most recent read, poll or read under access saw, or -1. Measurement logs and tests. */
 	int64 GetLastObservedSenderFrame();
 
+	/**
+	 * The asynchronous receive worker's read of the sender's notification (the SDK's public
+	 * GetNewFrame). Returns the SDK's answer, and in bOutCountUsable whether the sender publishes a
+	 * count; without one the SDK answers true every time. It touches none of the pending-frame state
+	 * above: a stream on the asynchronous path keeps what is owed in its own transfer gate
+	 * (SpoutSlotPool.h), and the calls above are then not used for that stream. False, and no usable
+	 * count, when nothing is open.
+	 */
+	bool PollNotification(bool& bOutCountUsable);
+
 	/** Counters of the notification state. Takes the lock. Measurement logs and tests. */
 	struct FNotificationStats
 	{

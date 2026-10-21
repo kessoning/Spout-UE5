@@ -1,10 +1,21 @@
 // Copyright (c) 2026 Giovanni Muzio (Kesson)
 // SPDX-License-Identifier: MIT
 // Separate-process pixel oracle for Unreal integration. No Unreal dependencies.
+//
+// Optional named arguments, anywhere after the mode, removed before the positional ones are read:
+//   --luid=<high>:<low>     (hex) make the D3D11 device on the adapter with this LUID. The adapter the device was
+//                           actually made on is read back from the device, and a mismatch ends the run with code 21
+//                           before anything is shared. Without it the default hardware adapter is used.
+//   --adapter-out=<path>    write {"requested":"<high>:<low>|default","actual":"<high>:<low>","match":0|1} there.
+// The adapter actually used is printed in every run.
 #include <windows.h>
 #include <wrl/client.h>
+#include <dxgi1_4.h>
 #include "SpoutSdkSafety.h"
 #include "SpoutGpuCompletion.h"
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include <vector>
 #include <iostream>
 #include <fstream>
@@ -26,16 +37,61 @@ static DXGI_FORMAT ReceiveFormat(int Argc, char** Argv)
 	if (!std::strcmp(Mode, "rgba_srgb")) return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 	return DXGI_FORMAT_UNKNOWN;
 }
-int main(int Argc, char** Argv)
+static std::string FormatLuid(const LUID& Luid)
 {
+	char Text[32];
+	std::snprintf(Text, sizeof(Text), "%08lx:%08lx", static_cast<unsigned long>(static_cast<DWORD>(Luid.HighPart)), static_cast<unsigned long>(Luid.LowPart));
+	return Text;
+}
+int main(int ArgcIn, char** ArgvIn)
+{
+	// The named arguments first; what is left keeps the positions every caller already uses.
+	std::string LuidArgument, AdapterOut;
+	std::vector<char*> Positional;
+	for (int I = 0; I < ArgcIn; ++I)
+	{
+		if (!std::strncmp(ArgvIn[I], "--luid=", 7)) LuidArgument = ArgvIn[I] + 7;
+		else if (!std::strncmp(ArgvIn[I], "--adapter-out=", 14)) AdapterOut = ArgvIn[I] + 14;
+		else Positional.push_back(ArgvIn[I]);
+	}
+	const int Argc = static_cast<int>(Positional.size());
+	char** Argv = Positional.data();
 	if (Argc < 4) return 2;
 	const bool Sending = std::strcmp(Argv[1], "send") == 0;
 	const DXGI_FORMAT ExpectedFormat = Sending ? DXGI_FORMAT_B8G8R8A8_UNORM : ReceiveFormat(Argc, Argv);
 	if (ExpectedFormat == DXGI_FORMAT_UNKNOWN) return 17;
+	ComPtr<IDXGIAdapter1> Wanted;
+	LUID WantedLuid = {};
+	if (!LuidArgument.empty())
+	{
+		unsigned long High = 0, Low = 0;
+		if (std::sscanf(LuidArgument.c_str(), "%lx:%lx", &High, &Low) != 2) return 19;
+		WantedLuid.HighPart = static_cast<LONG>(High);
+		WantedLuid.LowPart = static_cast<DWORD>(Low);
+		ComPtr<IDXGIFactory4> Factory;
+		if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&Factory))) || FAILED(Factory->EnumAdapterByLuid(WantedLuid, IID_PPV_ARGS(&Wanted)))) return 20;
+	}
 	ComPtr<ID3D11Device> Device;
 	ComPtr<ID3D11DeviceContext> Context;
-	if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+	if (FAILED(D3D11CreateDevice(Wanted.Get(), Wanted ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
 		D3D11_SDK_VERSION, &Device, nullptr, &Context))) return 3;
+	{
+		// The adapter the device was actually made on, read back from the device itself.
+		ComPtr<IDXGIDevice> Dxgi;
+		ComPtr<IDXGIAdapter> Made;
+		DXGI_ADAPTER_DESC MadeDesc = {};
+		if (FAILED(Device.As(&Dxgi)) || FAILED(Dxgi->GetAdapter(&Made)) || FAILED(Made->GetDesc(&MadeDesc))) return 22;
+		const bool Match = !Wanted || (MadeDesc.AdapterLuid.HighPart == WantedLuid.HighPart && MadeDesc.AdapterLuid.LowPart == WantedLuid.LowPart);
+		const std::string Requested = Wanted ? FormatLuid(WantedLuid) : std::string("default");
+		const std::string Actual = FormatLuid(MadeDesc.AdapterLuid);
+		std::cout << "Spout pixel peer: adapter requested=" << Requested << " actual=" << Actual << " match=" << (Match ? 1 : 0) << std::endl;
+		if (!AdapterOut.empty())
+		{
+			std::ofstream Out(AdapterOut);
+			Out << "{\"requested\":\"" << Requested << "\",\"actual\":\"" << Actual << "\",\"match\":" << (Match ? 1 : 0) << "}" << std::endl;
+		}
+		if (!Match) return 21;
+	}
 	FSpoutGpuCompletion Completion;
 	if (!Completion.Prepare(Context.Get())) return 4;
 	// Use the unmodified SDK access protocol as the external peer. Crash recovery

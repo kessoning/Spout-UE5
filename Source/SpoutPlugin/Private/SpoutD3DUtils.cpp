@@ -10,6 +10,7 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "SpoutD3DContext.h"
 #include "SpoutModule.h"
+#include "SpoutSharedSlot.h"
 #include "ID3D12DynamicRHI.h"
 #include "RHICommandList.h"
 #include "Runtime/Launch/Resources/Version.h"
@@ -99,6 +100,8 @@ ComPtr<ID3D11Texture2D> WrapD3D12Resource(ID3D12Resource* Resource, SpoutRHIStat
 	// SpoutRHIState::GetCopyBracket, so they cannot disagree.
 	const D3D12_RESOURCE_STATES NativeState = ToD3D12ResourceState(State);
 	ComPtr<ID3D11Resource> WrappedResource;
+	// Counted so that the shutdown log can show that the shared-slot path never wraps.
+	SpoutInterop::CountWrapCall();
 	HRESULT hr = D3D11On12->CreateWrappedResource(
 		Resource,
 		&Flags,

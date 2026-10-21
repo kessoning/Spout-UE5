@@ -17,6 +17,14 @@ add_executable(D3D11On12WrapProbe D3D11On12WrapProbe.cpp)
 # Engine-free bookkeeping of the asynchronous receive stream (SpoutSlotPool.h). No GPU and no Spout library.
 add_executable(SpoutSlotPoolTests SpoutSlotPoolTests.cpp)
 target_include_directories(SpoutSlotPoolTests PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private")
+# Engine-free completion rules of the shared-slot path (SpoutSlotRules.h). No GPU and no Spout library.
+add_executable(SpoutSlotRulesTests SpoutSlotRulesTests.cpp)
+target_include_directories(SpoutSlotRulesTests PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private")
+# Engine-free phases of the T1 viewport check (Tests/SpoutT1ViewportSequence.h). No GPU and no Spout library.
+add_executable(SpoutT1ViewportSequenceTests SpoutT1ViewportSequenceTests.cpp)
+target_include_directories(SpoutT1ViewportSequenceTests PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private")
+# The pixel peer selects its adapter by LUID (--luid) and reads back the one it was made on.
+target_link_libraries(SpoutPixelPeer PRIVATE dxgi)
 target_link_libraries(D3D11On12WrapProbe PRIVATE d3d11 d3d12)
 enable_testing()
 add_test(NAME SDKOwnershipAndAbandonedMutex COMMAND SpoutSdkSafetyTests)
@@ -24,4 +32,6 @@ add_test(NAME WindowsWrappedResourceProbe COMMAND D3D11On12WrapProbe)
 # Engine-free receive logic (SpoutNotificationState.h, SpoutPublishPredictor.h) and the bundled SDK's public frame-count calls.
 add_test(NAME NotificationStateAndPredictor COMMAND SpoutNotificationTests)
 add_test(NAME AsyncSlotPoolAndTransferGate COMMAND SpoutSlotPoolTests)
-set_tests_properties(SDKOwnershipAndAbandonedMutex WindowsWrappedResourceProbe NotificationStateAndPredictor AsyncSlotPoolAndTransferGate PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+add_test(NAME SharedSlotCompletionRules COMMAND SpoutSlotRulesTests)
+add_test(NAME T1ViewportSequence COMMAND SpoutT1ViewportSequenceTests)
+set_tests_properties(SDKOwnershipAndAbandonedMutex WindowsWrappedResourceProbe NotificationStateAndPredictor AsyncSlotPoolAndTransferGate SharedSlotCompletionRules T1ViewportSequence PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)

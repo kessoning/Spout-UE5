@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Giovanni Muzio (Kesson)
 // SPDX-License-Identifier: MIT
 #include "SpoutReceivedTexture.h"
+#include "SpoutDebugCapture.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "TextureResource.h"
 #include "RHICommandList.h"
@@ -50,6 +51,7 @@ namespace
 			FRHICommandListImmediate& Immediate = static_cast<FRHICommandListImmediate&>(RHICmdList);
 			Immediate.BeginRenderPass(FRHIRenderPassInfo(TextureRHI, ERenderTargetActions::Clear_Store), TEXT("SpoutClearReceivedTexture"));
 			Immediate.EndRenderPass();
+			SPOUT_D3D_DIAG_TRANSITION("receivedtexture.init.rtv-to-srv", TextureRHI.GetReference(), ERHIAccess::RTV, ERHIAccess::SRVMask);
 			Immediate.Transition(FRHITransitionInfo(TextureRHI, ERHIAccess::RTV, ERHIAccess::SRVMask));
 		}
 		virtual void ReleaseRHI() override

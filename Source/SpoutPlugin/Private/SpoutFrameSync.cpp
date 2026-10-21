@@ -671,6 +671,19 @@ int64 FSpoutFrameSync::GetLastObservedSenderFrame()
 	return Backend ? Backend->GetSenderFrame() : -1;
 }
 
+bool FSpoutFrameSync::PollNotification(bool& bOutCountUsable)
+{
+	FScopeLock Lock(&Mutex);
+	bOutCountUsable = false;
+	if (!Backend || !bOpen)
+	{
+		return false;
+	}
+	const bool bSdkNew = Backend->GetNewFrame();
+	bOutCountUsable = ReadBackendCountLocked() != FSpoutNotificationState::NoCount;
+	return bSdkNew;
+}
+
 FSpoutFrameSync::FNotificationStats FSpoutFrameSync::GetNotificationStats() const
 {
 	FScopeLock Lock(&Mutex);
