@@ -111,6 +111,41 @@ What they do and do not do:
 - A receiver still samples a single shared texture that the sender overwrites. These settings do
   not make receiving lossless between independent clocks, and they do not remove latency.
 
+### Async Receive (Beta) (off by default)
+
+Async Receive (Beta) is chosen per receiver: the `Async Receive (Beta)` input of Spout Receiver and
+Spout Receiver With Material, or the checkbox of the same name on the shipped receiver example
+(Spout > Experimental). It moves receive work off the render thread: a worker thread with its own
+device takes the sender's texture and waits for the copy, and the render thread only queues a copy
+of the newest completed image. It is off by default and it is not part of the qualified behaviour
+of this release.
+
+- **Per sender name, fixed while open.** The mode belongs to the receiver session of a name, which
+  every graph receiving that name shares. The first accepted receive decides it; a later call for
+  the same name asking for the other mode is refused (false, outputs untouched, a throttled
+  warning) and leaves the session and its other consumers as they were. Different names are
+  independent. To change the mode, close the receiver and receive again; nothing is switched or
+  reopened behind the other consumers, and there is no live switching of an open session.
+- **Fallback is visible.** A session that asked for it runs synchronously, and says why in the log
+  and in `GetSpoutStreamStatus` (`EffectiveReceiveMode`, `ReceiveModeNote`), when the sender's
+  format is not BGRA8 or RGBA8, when the worker's device or resources cannot be created, or after
+  the worker failed. A later sender size, format or handle is tried again.
+- **Console variables.** `r.Spout.AsyncReceive` is retired: still registered, ignored, and it logs a
+  warning when set to anything but 0. It cannot turn the asynchronous path on for any receiver.
+  `r.Spout.AsyncReceive.GpuPriority` (default 0) is a diagnostic for receivers that opted in.
+  `r.Spout.FrameWaitMs` and the frame-count recheck apply to the synchronous path only.
+- **Performance is a trade-off, not a gain.** In one measured pair on one laptop (RTX 2060, UE 5.8,
+  a counter-strip receive under GPU load), the asynchronous receive cut the render thread's receive
+  call p99 from 1.79 ms to 0.002 ms and delivered every publication (100% against 97.1%), but the
+  frame-interval p99 was 3.24 ms worse and the age of the final copy was 3.87 ms worse on average
+  and 15.19 ms worse at p99. Under light load the frame p99 was effectively unchanged. One pair is
+  not a general, causal or cross-machine result, and the original targets for this mode (3 ms
+  better frame p99, at most 1 ms / 1.5 ms worse image age) were not met. Measure it in your own
+  project before relying on it.
+- Same safety rules as the synchronous receive: the sender's texture is only read under its access
+  lock, every GPU wait is bounded, a copy that did not finish is never delivered, and a closed
+  receiver leaves no worker thread behind.
+
 Viewport requests coalesce by name until presentation. Estimates reserve three image equivalents per
 received output (CPU mip plus GPU recreation overlap), two per sender resource, four per receiver native state (shared/staging/upload/cache
 allowance), and two per attached optional target. Replaced output textures retain their reservation

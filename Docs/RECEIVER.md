@@ -47,6 +47,23 @@ Where to set the CVar:
 The value is read once per receive call on the game thread, so changes take effect on the next
 call with no restart needed.
 
+## Async Receive (Beta)
+
+Both receive nodes have an advanced **Async Receive (Beta)** input, and the shipped
+`BP_SpoutReceiverExample` has a checkbox of the same name under **Spout > Experimental** in its
+Details. It is off by default. When on, a worker thread takes the sender's texture and waits for
+the copy, and the render thread only queues a copy of the newest completed image. That can improve
+delivery under load, but it can also increase frame-time spikes or image latency: it is a beta
+trade-off, not a speed-up.
+
+The setting applies per sender name. All graphs and actors receiving one name share one receiver
+session, the first accepted receive decides its mode, and a call asking for the other mode is
+refused and logged until the receiver is closed. To change it, set it before Play, or close the
+receiver and receive again. A sender format other than BGRA8 or RGBA8, or a failure of the worker,
+makes the session run synchronously; `GetSpoutStreamStatus` reports the requested mode, the
+effective mode and why. Details: [Async Receive (Beta)](BLUEPRINT_API.md#async-receive-beta) and
+[limitations](LIMITATIONS.md#async-receive-beta-off-by-default).
+
 ## Colour space
 
 The Color Space pin (advanced) decides how the received bytes are read. **Auto** decodes 8-bit

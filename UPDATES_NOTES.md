@@ -32,6 +32,24 @@ I also tidied up how the plugin decides that a frame has really arrived. A frame
 the copy has actually finished, and if anything goes wrong on the way (the other app is busy, the
 copy fails), the plugin simply tries again on the next frame instead of forgetting about it.
 
+There's a new checkbox too, and it's off unless you tick it: Async Receive (Beta). You'll find it
+on the example receiver actor, under Spout and then Experimental, and as an extra option on both
+receive nodes. When it's on, the picture is fetched in the background instead of making Unreal's
+drawing work wait for it. In my tests under heavy load that meant Unreal waited far less and no
+frame from the other app went missing. But it isn't a free speed boost: in the same test the frame
+times got a bit spikier and the picture arrived a little later. That's why it says Beta, why it
+stays off for everyone who doesn't ask for it, and why I'd only turn it on after trying it in your
+own project.
+
+It works per stream name. Everything in your project that receives the same name shares one
+connection, so they all have to agree: the first one to connect decides, and anything asking for
+the other setting is politely turned away with a message in the log, without disturbing the ones
+already running. Different names can use different settings side by side. To switch, close that
+receiver and open it again (or just set it before you hit Play). If the background mode can't be
+used for a stream, for example because the other app sends a picture format it doesn't support,
+the receiver keeps working the normal way, and the log and the stream status tell you which mode is
+really running and why.
+
 ---
 
 ## SEPTEMBER 2026 UPDATES

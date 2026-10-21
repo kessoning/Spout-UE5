@@ -14,6 +14,29 @@ from the August preparation.
 
 ### Production-readiness fixes and release testing (September 2026)
 
+#### Async Receive (Beta) (October 2026, off by default, not qualified)
+- Added an opt-in **Async Receive (Beta)** setting per receiver: a `bAsyncReceive` input (default
+  false, advanced pin, display name "Async Receive (Beta)") on `SpoutReceiver` and
+  `SpoutReceiverWithMaterial`, and an instance-editable checkbox of the same name under
+  Spout > Experimental on `BP_SpoutReceiverExample`, wired to that input and saved with the actor.
+  Existing graphs, assets and C++ callers stay synchronous; an older graph gets the new pin set to
+  false when it is opened.
+- The receive mode belongs to the receiver session of a sender name. The first accepted receive
+  for a name decides it until Close Receiver; a later call for that name asking for the other mode
+  is refused (false, outputs untouched, a throttled warning) and leaves the session and its other
+  consumers unchanged. Different names are independent. There is no live switching: changing the
+  mode means closing the receiver and receiving again.
+- `GetSpoutStreamStatus` reports `RequestedReceiveMode`, `EffectiveReceiveMode` and
+  `ReceiveModeNote` (new `ESpoutReceiveMode` enum), so a session that asked for the asynchronous
+  path but runs synchronously (a sender format other than BGRA8 or RGBA8, a device or resource that
+  could not be created, a worker failure) says so. The fallback keeps delivering frames.
+- `r.Spout.AsyncReceive`, the internal process-wide switch of the prototype, is retired: it is
+  still registered, logs a warning when set to anything but 0, and no longer selects the path of any
+  receiver. Measurement harnesses that set it must pass the per-receiver input instead.
+- Performance is a trade-off, not an improvement: one measured pair under GPU load on one laptop
+  showed a much shorter render-thread receive call and complete delivery, but a worse frame-time
+  p99 and an older image. See Docs/LIMITATIONS.md.
+
 #### Experimental receive settings (October 2026, off by default, not yet qualified)
 - Added four experimental console variables for the receive path: `r.Spout.FrameCountRecheck`,
   `r.Spout.FrameWaitMs`, `r.Spout.FrameWaitBudgetMs` and `r.Spout.FrameWaitPollUs`. All are off by

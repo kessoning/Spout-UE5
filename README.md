@@ -250,6 +250,11 @@ naming it, rather than being published as something it is not.
   input reuses your material without allocating a new one on each call. Pass null for texture-only use.
 - The original `SpoutReceiver` signature remains available for existing graphs and C++ callers.
   Its material reference is an output pin in Blueprint; prefer the new node for repeated material use.
+- **Async Receive (Beta)**, an advanced input of both nodes and a checkbox on the receiver example
+  (Spout > Experimental), is off by default. It moves receive work off the render thread, which may
+  improve delivery under load but can increase frame-time spikes or image latency. It applies per
+  sender name and is fixed while that receiver is open; see
+  [Async Receive (Beta)](Docs/BLUEPRINT_API.md#async-receive-beta).
 - The **Spout Name** must exactly match the name used by the sender.
 - The function outputs:
   - `OutTexture` – a transient `UTexture2D` updated from the Spout stream.
