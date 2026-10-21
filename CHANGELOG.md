@@ -30,6 +30,8 @@ from the August preparation.
   `ReceiveModeNote` (new `ESpoutReceiveMode` enum), so a session that asked for the asynchronous
   path but runs synchronously (a sender format other than BGRA8 or RGBA8, a device or resource that
   could not be created, a worker failure) says so. The fallback keeps delivering frames.
+  `FramesSubmitted` and `bHasFrame` now also count the frames the asynchronous path delivers (they
+  stayed 0 on that path before).
 - `r.Spout.AsyncReceive`, the internal process-wide switch of the prototype, is retired: it is
   still registered, logs a warning when set to anything but 0, and no longer selects the path of any
   receiver. Measurement harnesses that set it must pass the per-receiver input instead.

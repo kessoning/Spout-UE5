@@ -138,6 +138,12 @@ public:
 	 * has not failed. AsyncReceiveNote says why a session that asked for Async Receive (Beta) runs synchronously.
 	 */
 	std::atomic<bool> bAsyncReceiveActive{false};
+	/**
+	 * Receiver role only: frames Async Receive (Beta) delivered (its render-thread copy queued), for the status's
+	 * FramesSubmitted. The asynchronous path does not complete transfers through FrameSync, so they are counted here;
+	 * cumulative for the entry like FrameSync's own count. Render thread writes, any thread reads. Status only.
+	 */
+	std::atomic<int64> AsyncDeliveredFrames{0};
 	void SetAsyncReceiveNote(const FString& Note) { FScopeLock Lock(&ReceiveModeNoteMutex); AsyncReceiveNote = Note; }
 	FString GetAsyncReceiveNote() const { FScopeLock Lock(&ReceiveModeNoteMutex); return AsyncReceiveNote; }
 

@@ -351,6 +351,9 @@ bool FSpoutAsyncBetaNames::RunTest(const FString&)
 	TestTrue(TEXT("A has no fallback note"), StatusA.ReceiveModeNote.IsEmpty());
 	TestTrue(TEXT("B requested the synchronous receive"), StatusB.RequestedReceiveMode == ESpoutReceiveMode::Synchronous);
 	TestTrue(TEXT("and B uses it"), StatusB.EffectiveReceiveMode == ESpoutReceiveMode::Synchronous);
+	// The status counts what each path delivered: three exact sequences each.
+	TestTrue(TEXT("A's status counts its asynchronous deliveries"), StatusA.bHasFrame && StatusA.FramesSubmitted >= 3);
+	TestTrue(TEXT("B's status counts its synchronous deliveries"), StatusB.bHasFrame && StatusB.FramesSubmitted >= 3);
 	const uint64 GenerationA = AB::WorkerGeneration(A);
 	TestTrue(TEXT("A has a worker object"), GenerationA != 0);
 	TestEqual(TEXT("B has none"), AB::WorkerGeneration(B), uint64(0));

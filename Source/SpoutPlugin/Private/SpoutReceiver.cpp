@@ -484,6 +484,7 @@ namespace
 		if (Receiver.Async->ConsumeOnRenderThread(RHICmdList, Destination, Receiver.ReceivedFrameNumber))
 		{
 			++Receiver.ReceivedFrameNumber;
+			Receiver.AsyncDeliveredFrames.fetch_add(1); // the status's count only
 		}
 		return true;
 	}

@@ -496,6 +496,9 @@ FSpoutStreamStatus USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName SpoutName
 			Result.RequestedReceiveMode = bRequested ? ESpoutReceiveMode::AsyncBeta : ESpoutReceiveMode::Synchronous;
 			Result.EffectiveReceiveMode = Entry->bAsyncReceiveActive.load() ? ESpoutReceiveMode::AsyncBeta : ESpoutReceiveMode::Synchronous;
 			Result.ReceiveModeNote = bRequested ? Entry->GetAsyncReceiveNote() : FString();
+			// Frames delivered by Async Receive (Beta) count as received copies too (FrameSync counts the synchronous ones).
+			Result.FramesSubmitted += Entry->AsyncDeliveredFrames.load();
+			Result.bHasFrame = Result.FramesSubmitted > 0;
 		}
 	}
 	return Result;
