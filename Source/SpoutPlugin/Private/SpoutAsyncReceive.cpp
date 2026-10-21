@@ -434,11 +434,7 @@ bool FSpoutAsyncStream::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 #if SPOUT_WITH_INSTRUMENT
 	if (SpoutInstrument::IsEnabled())
 	{
-		ReadWatchEvent = ::CreateEventW(nullptr, false, false, nullptr);
-		if (ReadWatchEvent)
-		{
-			ReadWatch = FThread(TEXT("SpoutAsyncReadWatch"), [this]() { WatchReadFence(); });
-		}
+		ReadWatch = MakeUnique<SpoutInstrument::FDestinationFenceWatch>(ReadFence.Get(), InstrumentStream, Generation, 2);
 	}
 #endif
 	return true;
@@ -456,15 +452,7 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 		Thread = nullptr;
 	}
 #if SPOUT_WITH_INSTRUMENT
-	if (ReadWatch.IsJoinable())
-	{
-		ReadWatch.Join();
-	}
-	if (ReadWatchEvent)
-	{
-		::CloseHandle(ReadWatchEvent);
-		ReadWatchEvent = nullptr;
-	}
+	ReadWatch.Reset();
 #endif
 	if (WorkerSeconds.load() > 0.0)
 	{
@@ -534,48 +522,6 @@ void FSpoutAsyncStream::WaitForNextPoll()
 	}
 	::WaitForSingleObject(StopEvent, 1);
 }
-
-#if SPOUT_WITH_INSTRUMENT
-void FSpoutAsyncStream::WatchReadFence()
-{
-	// When the read fence advances, the copy Unreal queued out of a slot has completed on Unreal's
-	// queue. One row says when this thread saw the new value: an upper bound of the completion time,
-	// late by this thread's wake-up only.
-	const HANDLE Handles[2] = { StopEvent, ReadWatchEvent };
-	uint64 Seen = 0;
-	uint64 Registered = 0;
-	while (!bStop.load())
-	{
-		const uint64 Done = ReadFence->GetCompletedValue();
-		if (Done == MAX_uint64)
-		{
-			return; // Unreal's device was removed
-		}
-		if (Done != Seen)
-		{
-			Seen = Done;
-			SpoutInstrument::FRecord Rec;
-			Rec.Kind = TEXT('F');
-			Rec.Stream = InstrumentStream;
-			Rec.FrameRT = GFrameCounterRenderThread;
-			Rec.TDetect = SpoutInstrument::Now();
-			Rec.Generation = static_cast<int64>(Generation);
-			Rec.ReadValue = static_cast<int64>(Done);
-			SpoutInstrument::Push(Rec);
-		}
-		// One registration per value: the event is set once, when the fence reaches the next value.
-		if (Registered != Seen + 1)
-		{
-			if (FAILED(ReadFence->SetEventOnCompletion(Seen + 1, ReadWatchEvent)))
-			{
-				return;
-			}
-			Registered = Seen + 1;
-		}
-		::WaitForMultipleObjects(2, Handles, false, 100);
-	}
-}
-#endif
 
 uint32 FSpoutAsyncStream::Run()
 {
@@ -799,6 +745,8 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 		if (bInstrument)
 		{
 			Rec.Kind = TEXT('A');
+			Rec.CompletionPath = 2;
+			Rec.CompletionStage = 1;
 			Rec.Stream = InstrumentStream;
 			Rec.FrameRT = GFrameCounterRenderThread;
 			Rec.TDetect = SpoutInstrument::Now();

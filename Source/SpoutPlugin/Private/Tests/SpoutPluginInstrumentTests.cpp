@@ -15,14 +15,14 @@ bool FSpoutInstrumentColumns::RunTest(const FString&)
 {
 	TArray<FString> Columns;
 	FString(SpoutInstrument::ColumnHeader()).ParseIntoArray(Columns, TEXT(","), false);
-	TestEqual(TEXT("instrumentVersion 7 has 56 columns"), Columns.Num(), 56);
-	TestEqual(TEXT("the version is 7"), SpoutInstrument::Version, 7);
+	TestEqual(TEXT("instrumentVersion 8 has 58 columns"), Columns.Num(), 58);
+	TestEqual(TEXT("the version is 8"), SpoutInstrument::Version, 8);
 	TestEqual(TEXT("the first column"), Columns[0], FString(TEXT("kind")));
 	TestEqual(TEXT("column 47 is the last of version 5"), Columns[46], FString(TEXT("syncOpens")));
 	TestEqual(TEXT("then the completion flag"), Columns[47], FString(TEXT("completed")));
 	TestEqual(TEXT("and the read under access, the last of version 6"), Columns[48], FString(TEXT("newUnderAccess")));
 	TestEqual(TEXT("version 7 begins with the slot"), Columns[49], FString(TEXT("slot")));
-	TestEqual(TEXT("and ends with the asynchronous outcome"), Columns.Last(), FString(TEXT("asyncOutcome")));
+	TestEqual(TEXT("and ends with the asynchronous outcome"), Columns[55], FString(TEXT("asyncOutcome")));
 
 	// A row whose every field has a distinct value, so a field written in the wrong place shows.
 	SpoutInstrument::FRecord R;
@@ -35,7 +35,7 @@ bool FSpoutInstrumentColumns::RunTest(const FString&)
 	R.BudgetBeforeUs = 10.0; R.BudgetAfterUs = 460.0; R.Flags = 43; R.PredSuspensions = 2; R.PredWastedWaits = 5; R.PredJitterUs = 250.0;
 	R.AckBefore = -2; R.Delivered = 1; R.ReceivedBefore = 1022; R.ReceivedAfter = 1023; R.FrameRequests = 6; R.SyncOpens = 7;
 	R.Completed = 1; R.NewUnderAccess = 0;
-	R.Slot = 2; R.Sequence = 1024; R.Generation = 8; R.WrittenValue = 1025; R.ReadValue = 1026; R.SlotReadValue = 1027; R.AsyncOutcome = 3;
+	R.Slot = 2; R.Sequence = 1024; R.Generation = 8; R.WrittenValue = 1025; R.ReadValue = 1026; R.SlotReadValue = 1027; R.AsyncOutcome = 3; R.CompletionPath = 2; R.CompletionStage = 1;
 	FString Line = SpoutInstrument::FormatRecordLine(R);
 	TestTrue(TEXT("a row ends with a line break"), Line.EndsWith(TEXT("\n")));
 	Line.TrimEndInline();
@@ -56,7 +56,7 @@ bool FSpoutInstrumentColumns::RunTest(const FString&)
 		{ TEXT("ackBefore"), TEXT("-2") }, { TEXT("delivered"), TEXT("1") }, { TEXT("receivedBefore"), TEXT("1022") }, { TEXT("receivedAfter"), TEXT("1023") },
 		{ TEXT("frameRequests"), TEXT("6") }, { TEXT("syncOpens"), TEXT("7") }, { TEXT("completed"), TEXT("1") }, { TEXT("newUnderAccess"), TEXT("0") },
 		{ TEXT("slot"), TEXT("2") }, { TEXT("sequence"), TEXT("1024") }, { TEXT("generation"), TEXT("8") }, { TEXT("writtenValue"), TEXT("1025") },
-		{ TEXT("readValue"), TEXT("1026") }, { TEXT("slotReadValue"), TEXT("1027") }, { TEXT("asyncOutcome"), TEXT("3") } };
+		{ TEXT("readValue"), TEXT("1026") }, { TEXT("slotReadValue"), TEXT("1027") }, { TEXT("asyncOutcome"), TEXT("3") }, { TEXT("completionPath"), TEXT("2") }, { TEXT("completionStage"), TEXT("1") } };
 	TestEqual(TEXT("every column has an expected value in this test"), int32(UE_ARRAY_COUNT(Expected)), Columns.Num());
 	for (const auto& Pair : Expected)
 	{

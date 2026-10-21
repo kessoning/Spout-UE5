@@ -34,6 +34,12 @@
  *   completed  1 when the transfer reached its completion point (FSpoutFrameSync::CompleteTransfer)
  *   newUnderAccess  what the read under access answered: -1 not read, 0 nothing new, 1 new
  *
+ * Version 8 appends completionPath and completionStage. R shared-slot and A completed rows name the
+ * final destination-copy readValue; F rows from the same observer implementation identify its completion.
+ * tGpuDone on shared-slot R/W remains the INTERMEDIATE native-slot completion, not the final destination.
+ * Generation is unique within its path; joins MUST include completionPath, especially during mode switches.
+ * Old version 7 shared-slot R rows cannot establish comparable final-copy completion.
+ *
  * Version 7 adds the asynchronous receive (r.Spout.AsyncReceive) and seven columns for it:
  *   kind W     one row per worker transfer attempt, on the worker thread: tDetect the start of the attempt,
  *              tAccess0/tAcquire/acquired the Spout access, tCopyRec after the copy and the written-fence signal
@@ -66,6 +72,8 @@
 /** The enclosed statements exist only in a measurement build. */
 #define SPOUT_INSTRUMENT(...) __VA_ARGS__
 
+#include "HAL/Thread.h"
+
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include "Windows/WindowsHWrapper.h"
@@ -80,7 +88,7 @@
 
 namespace SpoutInstrument
 {
-	constexpr int32 Version = 7;
+	constexpr int32 Version = 8;
 
 	/** r.Spout.Instrument != 0. Safe on any thread. */
 	bool IsEnabled();
@@ -139,6 +147,8 @@ namespace SpoutInstrument
 		int64 ReadValue = -1;
 		int64 SlotReadValue = -1;
 		int32 AsyncOutcome = -1;
+		int32 CompletionPath = 0;  // v8: 0 unspecified/legacy, 1 sync shared slot, 2 async
+		int32 CompletionStage = 0; // v8: 1 final Unreal destination-copy fence observation
 	};
 
 	/** The CSV's column line (no #meta line, no newline), and one row exactly as the writer formats it. */
@@ -152,6 +162,25 @@ namespace SpoutInstrument
 	void Push(const FRecord& Record);
 
 #if PLATFORM_WINDOWS
+	/** Same measurement-only observer for both receive paths. It never waits on a GPU from the render thread.
+	 * Identity is (stream, completionPath, generation, readValue); sync and async generation counters are separate.
+	 * F timestamps are CPU observation upper bounds, not exact GPU timestamps or display latency.
+	 * Stop joins only the observer and does not wait for, release or alter outstanding GPU work.
+	 */
+	class FDestinationFenceWatch
+	{
+	public:
+		FDestinationFenceWatch(ID3D12Fence* InFence, int32 InStream, uint64 InGeneration, int32 InPath);
+		~FDestinationFenceWatch();
+	private:
+		void Run();
+		Microsoft::WRL::ComPtr<ID3D12Fence> Fence;
+		const int32 Stream, Path;
+		const uint64 Generation;
+		HANDLE StopEvent = nullptr, WakeEvent = nullptr;
+		FThread Thread;
+	};
+
 	/** Writes a #calib line (QPC, GPU timestamp, GPU timestamp frequency) at most once per second. */
 	void Calibrate(ID3D12CommandQueue* Queue);
 

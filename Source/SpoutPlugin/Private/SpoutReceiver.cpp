@@ -550,6 +550,10 @@ namespace
 			if (bInstrument)
 			{
 				BeginReceiveRecord(Rec, *Receiver, TEXT('R'));
+				Rec.CompletionPath = 1;
+				Rec.CompletionStage = 1;
+				Rec.Generation = static_cast<int64>(Slots.GetGeneration());
+				Slots.ObserveDestination(Rec.Stream);
 			}
 		)
 		FSpoutReceiveCheck Check;
@@ -625,7 +629,7 @@ namespace
 					if (Slots.PublishAndConsume(Slot, WrittenValue, RHICmdList, DestTextureRHI, TextureBracket.EntryBefore, TextureBracket.ExitAfter))
 					{
 						const bool bDelivered = Receiver->FrameSync.CompleteTransfer();
-						SPOUT_INSTRUMENT(if (bInstrument) { Rec.Completed = 1; Rec.Delivered = bDelivered ? 1 : 0; })
+						SPOUT_INSTRUMENT(if (bInstrument) { Rec.Completed = 1; Rec.Delivered = bDelivered ? 1 : 0; Rec.ReadValue = static_cast<int64>(Slots.GetInstrumentReadValue()); Rec.WrittenValue = static_cast<int64>(WrittenValue); })
 						if (bDelivered)
 						{
 							++Receiver->ReceivedFrameNumber;

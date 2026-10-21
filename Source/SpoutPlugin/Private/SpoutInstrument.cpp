@@ -23,6 +23,58 @@
 #include "Runtime/Launch/Resources/Version.h"
 #include <atomic>
 
+#if PLATFORM_WINDOWS
+SpoutInstrument::FDestinationFenceWatch::FDestinationFenceWatch(ID3D12Fence* InFence, int32 InStream, uint64 InGeneration, int32 InPath)
+	: Fence(InFence), Stream(InStream), Path(InPath), Generation(InGeneration)
+{
+	StopEvent = ::CreateEventW(nullptr, true, false, nullptr);
+	WakeEvent = ::CreateEventW(nullptr, false, false, nullptr);
+	if (Fence && StopEvent && WakeEvent)
+	{
+		Thread = FThread(TEXT("SpoutDestinationWatch"), [this]() { Run(); });
+	}
+	// If creation fails no F rows are written, and completion cannot be established without them.
+}
+
+SpoutInstrument::FDestinationFenceWatch::~FDestinationFenceWatch()
+{
+	if (StopEvent) ::SetEvent(StopEvent);
+	if (Thread.IsJoinable()) Thread.Join();
+	if (WakeEvent) ::CloseHandle(WakeEvent);
+	if (StopEvent) ::CloseHandle(StopEvent);
+}
+
+void SpoutInstrument::FDestinationFenceWatch::Run()
+{
+	const HANDLE Handles[2] = { StopEvent, WakeEvent };
+	uint64 Seen = 0, Registered = 0;
+	while (::WaitForSingleObject(StopEvent, 0) == WAIT_TIMEOUT)
+	{
+		const uint64 Done = Fence->GetCompletedValue();
+		if (Done == MAX_uint64) return; // device removed: never manufacture completion
+		if (Done != Seen)
+		{
+			Seen = Done;
+			FRecord Rec;
+			Rec.Kind = TEXT('F');
+			Rec.Stream = Stream;
+			Rec.TDetect = Now();
+			Rec.Generation = static_cast<int64>(Generation);
+			Rec.ReadValue = static_cast<int64>(Done);
+			Rec.CompletionPath = Path;
+			Rec.CompletionStage = 1;
+			Push(Rec);
+		}
+		if (Registered != Seen + 1)
+		{
+			if (FAILED(Fence->SetEventOnCompletion(Seen + 1, WakeEvent))) return;
+			Registered = Seen + 1;
+		}
+		if (::WaitForMultipleObjects(2, Handles, false, 100) == WAIT_FAILED) return;
+	}
+}
+#endif
+
 namespace
 {
 	TAutoConsoleVariable<int32> GSpoutInstrument(TEXT("r.Spout.Instrument"), 0,
@@ -46,11 +98,11 @@ namespace
 		TEXT("waitDecision,waitOutcome,tWait0,tWait1,waitPolls,waitBoundUs,predLoUs,predHiUs,periodUs,countAfterWait,countUnderAccess,budgetBeforeUs,budgetAfterUs,flags,predSuspensions,predWastedWaits,predJitterUs,")
 		TEXT("ackBefore,delivered,receivedBefore,receivedAfter,frameRequests,syncOpens,")
 		TEXT("completed,newUnderAccess,")
-		TEXT("slot,sequence,generation,writtenValue,readValue,slotReadValue,asyncOutcome");
+		TEXT("slot,sequence,generation,writtenValue,readValue,slotReadValue,asyncOutcome,completionPath,completionStage");
 
 	FString FormatRecord(const SpoutInstrument::FRecord& R)
 	{
-		return FString::Printf(TEXT("%c,%d,%llu,%llu,%d,%lld,%d,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,0x%08x,%d,%d,%llu,%llu,%d,%.1f,%.1f,%.1f,%.1f,%lld,%lld,%.1f,%.1f,%d,%lld,%lld,%.1f,%lld,%d,%llu,%llu,%lld,%lld,%d,%d,%d,%lld,%lld,%lld,%lld,%lld,%d\n"),
+		return FString::Printf(TEXT("%c,%d,%llu,%llu,%d,%lld,%d,%llu,%llu,%llu,%llu,%llu,%llu,%d,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d,0x%08x,%d,%d,%llu,%llu,%d,%.1f,%.1f,%.1f,%.1f,%lld,%lld,%.1f,%.1f,%d,%lld,%lld,%.1f,%lld,%d,%llu,%llu,%lld,%lld,%d,%d,%d,%lld,%lld,%lld,%lld,%lld,%d,%d,%d\n"),
 			R.Kind, R.Stream, R.FrameRT, R.TDetect, R.NewFrame, R.SenderFrame, R.Pending,
 			R.TDrain0, R.TDrain1, R.TWrap0, R.TWrap1, R.TAccess0, R.TAcquire, R.Acquired,
 			R.TCopyRec, R.TGpuDone, R.TPublish, R.TRelease, R.TRestore,
@@ -59,7 +111,7 @@ namespace
 			R.CountAfterWait, R.CountUnderAccess, R.BudgetBeforeUs, R.BudgetAfterUs, R.Flags, R.PredSuspensions, R.PredWastedWaits, R.PredJitterUs,
 			R.AckBefore, R.Delivered, R.ReceivedBefore, R.ReceivedAfter, R.FrameRequests, R.SyncOpens,
 			R.Completed, R.NewUnderAccess,
-			R.Slot, R.Sequence, R.Generation, R.WrittenValue, R.ReadValue, R.SlotReadValue, R.AsyncOutcome);
+			R.Slot, R.Sequence, R.Generation, R.WrittenValue, R.ReadValue, R.SlotReadValue, R.AsyncOutcome, R.CompletionPath, R.CompletionStage);
 	}
 
 	/** Buffers rows on the producing thread and writes them from its own thread every 250 ms. */

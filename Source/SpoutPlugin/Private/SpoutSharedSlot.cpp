@@ -770,8 +770,20 @@ bool FSpoutSlotReceive::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 	return true;
 }
 
+#if SPOUT_WITH_INSTRUMENT
+void FSpoutSlotReceive::ObserveDestination(int32 InstrumentStream)
+{
+	if (!ReadWatch)
+	{
+		ReadWatch = MakeUnique<SpoutInstrument::FDestinationFenceWatch>(ReadFence.Get(), InstrumentStream, Generation, 1);
+	}
+}
+#endif
+
 FSpoutSlotReceive::~FSpoutSlotReceive()
 {
+	SPOUT_INSTRUMENT(ReadWatch.Reset();)
+
 	Pool.Retire();
 	TUniquePtr<FSpoutGpuRetirement::FRetiredSet> Record = MakeUnique<FSpoutGpuRetirement::FRetiredSet>();
 	Record->What = FString::Printf(TEXT("receive slots of '%s' (generation %llu)"), *Name.ToString(), Generation);

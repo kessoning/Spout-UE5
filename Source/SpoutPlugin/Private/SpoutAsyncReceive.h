@@ -191,9 +191,7 @@ private:
 	 * is, when a copy Unreal queued out of a slot has completed on Unreal's queue. It reads the fence
 	 * and writes log rows. It takes no lock of the stream and changes none of its state.
 	 */
-	void WatchReadFence();
-	FThread ReadWatch;
-	HANDLE ReadWatchEvent = nullptr;
+	TUniquePtr<SpoutInstrument::FDestinationFenceWatch> ReadWatch;
 #endif
 
 	static constexpr int32 NumSlots = 3;

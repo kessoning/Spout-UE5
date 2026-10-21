@@ -37,6 +37,7 @@
 #include "CoreMinimal.h"
 #include "RHI.h"
 #include "SpoutSlotPool.h"
+#include "SpoutInstrument.h"
 #include "SpoutSlotRules.h"
 #include <atomic>
 
@@ -203,6 +204,10 @@ public:
 
 	const FIdentity& GetIdentity() const { return Identity; }
 	uint64 GetGeneration() const { return Generation; }
+#if SPOUT_WITH_INSTRUMENT
+	void ObserveDestination(int32 InstrumentStream);
+	uint64 GetInstrumentReadValue() const { return ReadValue; }
+#endif
 	ID3D11Texture2D* GetNativeSource() const { return NativeSource.Get(); }
 	bool IsKeyedSource() const { return bKeyedSource; }
 	bool HasFailed() const { return bFailed; }
@@ -235,6 +240,9 @@ public:
 	const SpoutSlotRules::FOutstanding& GetOutstanding() const { return Outstanding; }
 
 private:
+#if SPOUT_WITH_INSTRUMENT
+	TUniquePtr<SpoutInstrument::FDestinationFenceWatch> ReadWatch;
+#endif
 	FSpoutSlotReceive(const FName& InName, const FIdentity& InIdentity);
 	bool Initialize(EPixelFormat PixelFormat, FString& OutWhy);
 	void Fail(const TCHAR* Why, HRESULT Result);
