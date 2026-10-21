@@ -64,6 +64,24 @@ enum class ESpoutColorSpace : uint8
 };
 
 /**
+ * How a receiver session moves frames. One session exists per sender name, so the mode belongs to the
+ * session, not to one caller: the first accepted receive for a name decides it, and it stays fixed until
+ * that receiver is closed. Synchronous is the default for every caller and every existing asset.
+ */
+UENUM(BlueprintType)
+enum class ESpoutReceiveMode : uint8
+{
+	/** The render thread takes the sender's texture and waits for the copy. The default. */
+	Synchronous UMETA(DisplayName = "Synchronous"),
+
+	/**
+	 * Async Receive (Beta): a worker thread takes the sender's texture and waits for the copy, and the render
+	 * thread only queues a copy of the newest completed image. Opt-in per receiver.
+	 */
+	AsyncBeta   UMETA(DisplayName = "Async Receive (Beta)")
+};
+
+/**
  * Lightweight struct for Blueprint interaction.
  * Heavy D3D resources are managed internally by the CPP file.
  */
@@ -132,6 +150,18 @@ struct FSpoutStreamStatus
 	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 NativeFailures = 0;
 	/** Zero after recovery; signed Windows HRESULT on a native failure. */
 	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 LastNativeError = 0;
+	/**
+	 * Receiver role: the mode this name's open session was opened with (Async Receive (Beta) or synchronous).
+	 * Fixed until Close Receiver; a receive asking for the other mode is refused meanwhile.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category="Spout") ESpoutReceiveMode RequestedReceiveMode = ESpoutReceiveMode::Synchronous;
+	/**
+	 * Receiver role: the path the most recent receive on the render thread actually used. Synchronous until the
+	 * first one, and whenever Async Receive (Beta) was requested but refused or stopped (see ReceiveModeNote).
+	 */
+	UPROPERTY(BlueprintReadOnly, Category="Spout") ESpoutReceiveMode EffectiveReceiveMode = ESpoutReceiveMode::Synchronous;
+	/** Receiver role: why a session opened with Async Receive (Beta) is running synchronously. Empty otherwise. */
+	UPROPERTY(BlueprintReadOnly, Category="Spout") FString ReceiveModeNote;
 };
 
 USTRUCT(BlueprintType)
@@ -251,16 +281,26 @@ public:
 	 *     format — a render target created with Force Linear Gamma, for example.
 	 *   - sRGB: force decoding. Only valid for 8-bit frames; asking for it on a 10-bit or float
 	 *     frame fails the call and logs, rather than being silently ignored.
+	 *
+	 * bAsyncReceive (Async Receive (Beta), default false) asks for the asynchronous receive: a worker thread takes
+	 * the sender's texture and waits for the copy, and the render thread only queues a copy of the newest completed
+	 * image. It may improve delivery under load, but can increase frame-time spikes or image latency. It is per
+	 * receiver session, that is per sender name: the first accepted receive for a name decides the mode, every later
+	 * call for that name must ask for the same mode or is refused (false, outputs untouched, a throttled warning),
+	 * and the mode stays until Close Receiver. Spout Receiver and Spout Receiver With Material share this rule. A
+	 * session that asked for it and could not use it (an unsupported format, an unavailable device, a worker
+	 * failure) runs synchronously; GetSpoutStreamStatus reports the requested and the effective mode and why.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Spout", meta = (AdvancedDisplay = "5",
-		ToolTip = "Queues a receive; true means accepted, not completed. For repeated Blueprint material use, prefer Spout Receiver With Material and a stored MID. Keep the outputs for Close Receiver."))
+		ToolTip = "Queues a receive; true means accepted, not completed. For repeated Blueprint material use, prefer Spout Receiver With Material and a stored MID. Keep the outputs for Close Receiver. Async Receive (Beta) is per sender name, fixed when the receiver opens; a call asking for the other mode is refused until Close Receiver."))
 	static bool SpoutReceiver(const FName SpoutName,
 							  UMaterialInterface* InputMaterial,
 							  FName TextureParameterName,
 							  UMaterialInstanceDynamic*& OutMat,
 							  UTexture2D*& OutTexture,
 							  UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,
-							  ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto);
+							  ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto,
+							  UPARAM(DisplayName = "Async Receive (Beta)") bool bAsyncReceive = false);
 
 	/**
 	 * Receives into an explicitly reusable MID. Create the MID once with Unreal's Create Dynamic
@@ -268,11 +308,15 @@ public:
 	 * for texture-only use. This node allocates no material. The texture is shared per sender name;
 	 * the first accepted color interpretation remains in effect until close or a source format change.
 	 * Optional targets catch up from the completed image even when the sender is paused.
+	 * bAsyncReceive (Async Receive (Beta), default false) follows the same per-name rule as Spout Receiver: the
+	 * first accepted receive for a name decides the mode until Close Receiver, and a call asking for the other
+	 * mode is refused meanwhile.
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Spout", meta = (DisplayName = "Spout Receiver With Material"))
+	UFUNCTION(BlueprintCallable, Category = "Spout", meta = (DisplayName = "Spout Receiver With Material", AdvancedDisplay = "bAsyncReceive"))
 	static bool SpoutReceiverWithMaterial(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial,
 		FName TextureParameterName, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,
-		ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto);
+		ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto,
+		UPARAM(DisplayName = "Async Receive (Beta)") bool bAsyncReceive = false);
 
 	/** Releases only this material parameter binding. Other consumers and the shared session remain
 	 * open. Restores the saved texture (or engine default) only if the parameter still points to

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "SpoutLimits.h"
 #include "HAL/IConsoleManager.h"
+#include "SpoutModule.h"
 #include "SpoutValidation.h"
 
 namespace
@@ -36,14 +37,26 @@ namespace
 		TEXT("Experimental. 1: the sender's frame notification is read again while the texture access lock is held, and a receive call that found nothing new still copies ")
 		TEXT("when the sender published since the previous call. 0 (default): off. Always on while r.Spout.FrameWaitMs is above 0."),
 		ECVF_RenderThreadSafe);
+	// Retired and ignored. The receive mode is a per-receiver setting (Async Receive (Beta)) and nothing reads this
+	// variable to choose a path. It stays registered so that old command lines and configuration files do not fail, and
+	// it says so when set.
+	void WarnRetiredAsyncReceive(IConsoleVariable* Variable)
+	{
+		if (Variable && Variable->GetInt() != 0)
+		{
+			UE_LOG(LogSpoutPlugin, Warning,
+				TEXT("r.Spout.AsyncReceive is retired and ignored: it no longer selects the receive path of any stream. ")
+				TEXT("Async Receive (Beta) is chosen per receiver (the Async Receive (Beta) input of Spout Receiver and Spout Receiver With Material, ")
+				TEXT("or the example receiver actor's Details), and a receiver that does not ask for it stays synchronous."));
+		}
+	}
 	TAutoConsoleVariable<int32> GSpoutAsyncReceive(TEXT("r.Spout.AsyncReceive"), 0,
-		TEXT("Internal, experimental prototype. 0 (default): receive streams use the synchronous path. 1: a stream that meets every precondition takes Spout access, ")
-		TEXT("copies and waits for the copy on a worker thread with its own D3D11 device, and the render thread only queues a copy of the newest completed image. ")
-		TEXT("A stream that does not meet a precondition, or whose worker fails, uses the synchronous path and logs why once. ")
-		TEXT("A stream on this path makes no publication wait: r.Spout.FrameWaitMs applies to the synchronous path only."),
-		ECVF_RenderThreadSafe);
+		TEXT("Retired and ignored. It no longer selects the receive path of any stream: Async Receive (Beta) is a per-receiver setting ")
+		TEXT("(the Async Receive (Beta) input of Spout Receiver and Spout Receiver With Material). Setting it to anything but 0 only logs this warning."),
+		FConsoleVariableDelegate::CreateStatic(&WarnRetiredAsyncReceive),
+		ECVF_Default);
 	TAutoConsoleVariable<int32> GSpoutAsyncReceiveGpuPriority(TEXT("r.Spout.AsyncReceive.GpuPriority"), 0,
-		TEXT("Internal diagnostic of the experimental asynchronous receive. 0 (default): the GPU scheduling priority of the worker's device is left alone. ")
+		TEXT("Internal diagnostic of Async Receive (Beta), for receivers that opted in. 0 (default): the GPU scheduling priority of the worker's device is left alone. ")
 		TEXT("Otherwise, clamped to -7..7, the priority asked for that device relative to the process's other devices. Read once, when the worker's device is created."),
 		ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> GSpoutSharedSlotInterop(TEXT("r.Spout.SharedSlotInterop"), 1,
@@ -75,7 +88,7 @@ double SpoutLimits::FrameWaitSeconds() { const float V = GSpoutFrameWaitMs.GetVa
 double SpoutLimits::FrameWaitBudgetSeconds() { const float V = GSpoutFrameWaitBudgetMs.GetValueOnAnyThread(); return FMath::IsFinite(V) ? double(FMath::Clamp(V,0.0f,MaxFrameWaitMs))/1000.0 : 0.0; }
 double SpoutLimits::FrameWaitPollSeconds() { return double(FMath::Clamp(GSpoutFrameWaitPollUs.GetValueOnAnyThread(),MinFrameWaitPollUs,MaxFrameWaitPollUs))/1000000.0; }
 bool SpoutLimits::FrameCountRecheck() { return GSpoutFrameCountRecheck.GetValueOnAnyThread() != 0 || FrameWaitSeconds() > 0.0; }
-bool SpoutLimits::AsyncReceive() { return GSpoutAsyncReceive.GetValueOnAnyThread() != 0; }
+void SpoutLimits::WarnIfRetiredSettingsSet() { WarnRetiredAsyncReceive(GSpoutAsyncReceive.AsVariable()); }
 int32 SpoutLimits::AsyncReceiveGpuPriority() { return FMath::Clamp(GSpoutAsyncReceiveGpuPriority.GetValueOnAnyThread(),-7,7); }
 bool SpoutLimits::SharedSlotInteropRequested() { return GSpoutSharedSlotInterop.GetValueOnAnyThread() != 0; }
 int64 SpoutLimits::RetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitReserved; }

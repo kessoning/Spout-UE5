@@ -11,6 +11,8 @@
  *   - CPU path (CVar=0): copies into a D3D11 STAGING texture, maps it and uploads
  *     through the RHI. It uses the native device in shared-slot mode and the
  *     D3D11-on-12 device on the legacy wrap path.
+ * A receiver session may instead ask for Async Receive (Beta) (SpoutAsyncReceive.h): requested per session
+ * through Receive's bAsyncReceive, fixed by the session's first accepted call, never by a process-wide setting.
  */
 #include "SpoutReceiver.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -403,26 +405,31 @@ namespace
 #endif
 
 	/**
-	 * The experimental asynchronous path (r.Spout.AsyncReceive, off by default). Returns false when
-	 * this call is to use the synchronous path: the setting is off, a precondition failed, or the
-	 * stream's worker failed. With the setting off nothing here is created and the cost is one
-	 * console-variable read.
+	 * Async Receive (Beta), off by default. bAsyncRequested is the session's own request, decided by the first
+	 * accepted receive of this entry and carried by every render command of it; no process-wide setting is read.
+	 * Returns false when this call is to use the synchronous path: the session did not ask for it, a precondition
+	 * failed, or the stream's worker failed. For a session that did not ask nothing here is created.
 	 *
 	 * On this path the render thread takes no Spout access and waits for no GPU work. It takes the
 	 * newest image the worker completed, when there is one, and queues its copy into the same
 	 * Unreal texture the synchronous path fills. That copy is the delivery.
+	 *
+	 * What the call ends up using is recorded on the entry (bAsyncReceiveActive, and the reason when a session
+	 * that asked for it runs synchronously), so the status never reports a requested mode as the effective one.
 	 */
-	bool ReceiveOnRenderThread_Async(FSpoutSharedSender& Receiver, FRHITexture* Destination, EPixelFormat PixelFormat, FRHICommandListImmediate& RHICmdList)
+	bool ReceiveOnRenderThread_Async(FSpoutSharedSender& Receiver, bool bAsyncRequested, FRHITexture* Destination, EPixelFormat PixelFormat, FRHICommandListImmediate& RHICmdList)
 	{
 		check(IsInRenderingThread());
-		if (!SpoutLimits::AsyncReceive())
+		if (!bAsyncRequested)
 		{
 			if (Receiver.Async)
 			{
-				// Turned off while a stream was on it: back to the synchronous path, from the current image.
+				// Not reachable while the mode is fixed per entry; kept so that an entry that is not asking can
+				// never keep a worker. Back to the synchronous path, from the current image.
 				Receiver.Async.Reset();
 				Receiver.FrameSync.RequestCurrentFrame();
 			}
+			Receiver.bAsyncReceiveActive.store(false);
 			return false;
 		}
 		FSpoutAsyncStream::FIdentity Identity;
@@ -437,18 +444,20 @@ namespace
 		{
 			if (Receiver.Async->HasFailed())
 			{
-				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': the asynchronous receive stopped (%s); the stream uses the synchronous path."),
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive (Beta) stopped (%s); the stream uses the synchronous path."),
 					*Receiver.Name.ToString(), *Receiver.Async->GetFailure());
+				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive (Beta) stopped: %s"), *Receiver.Async->GetFailure()));
 				Receiver.AsyncRefusedFor = Identity;
 			}
 			Receiver.Async.Reset();
+			Receiver.bAsyncReceiveActive.store(false);
 			Receiver.FrameSync.RequestCurrentFrame();
 		}
 		if (!Receiver.Async)
 		{
 			if (Receiver.AsyncRefusedFor == Identity)
 			{
-				return false; // refused once for this identity: no retry on every frame
+				return false; // refused once for this identity: no retry on every frame, the reason is already recorded
 			}
 			// Measurement builds: the id the worker's rows carry. -1 otherwise, and then unused.
 			int32 MeasurementStream = -1;
@@ -461,12 +470,17 @@ namespace
 			if (!Receiver.Async)
 			{
 				Receiver.AsyncRefusedFor = Identity;
-				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': the asynchronous receive is not used (%s); the stream uses the synchronous path."),
+				Receiver.bAsyncReceiveActive.store(false);
+				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive (Beta) is not available for this sender: %s"), *Why));
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive (Beta) was requested but is not used (%s); the stream uses the synchronous path."),
 					*Receiver.Name.ToString(), *Why);
 				return false;
 			}
-			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': asynchronous receive started (experimental)."), *Receiver.Name.ToString());
+			Receiver.SetAsyncReceiveNote(FString());
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': Async Receive (Beta) started (worker generation %llu)."),
+				*Receiver.Name.ToString(), Receiver.Async->GetGeneration());
 		}
+		Receiver.bAsyncReceiveActive.store(true);
 		if (Receiver.Async->ConsumeOnRenderThread(RHICmdList, Destination, Receiver.ReceivedFrameNumber))
 		{
 			++Receiver.ReceivedFrameNumber;
@@ -1131,7 +1145,7 @@ UMaterialInstanceDynamic* SpoutReceiverInternal::ResolveConsumerMaterial(
 	return Material;
 }
 
-bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace)
+bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace, bool bAsyncReceive)
 {
 	check(IsInGameThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_Receive);
@@ -1240,6 +1254,25 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	}
 	if (!Receiver || !Receiver->HasValidName()) return false;
 
+	// One session per name has one receive mode. The first accepted call fixed it; a call asking for the other mode
+	// is refused here, before any reservation, output, material or queued work is touched, so the session and every
+	// other consumer stay exactly as they were. It is neither switched behind them nor reopened, and a conflicting
+	// caller does not win by calling last or more often.
+	if (Receiver->bReceiveModeEstablished && Receiver->bAsyncReceiveRequested != bAsyncReceive)
+	{
+		if (Receiver->ReceiveModeLogThrottle.ShouldLog())
+		{
+			UE_LOG(LogSpoutPlugin, Warning,
+				TEXT("Spout receiver '%s': refused a receive asking for %s, because the open receiver for this name uses %s. ")
+				TEXT("Every consumer of one Spout name shares one receiver and one receive mode, fixed when it opened. ")
+				TEXT("Use the same Async Receive (Beta) setting for every consumer of the name, or Close Receiver and receive again to change it."),
+				*SpoutName.ToString(),
+				bAsyncReceive ? TEXT("Async Receive (Beta)") : TEXT("the synchronous receive"),
+				Receiver->bAsyncReceiveRequested ? TEXT("Async Receive (Beta)") : TEXT("the synchronous receive"));
+		}
+		return false;
+	}
+
 	// The destination is whatever this plugin owns for this receiver name, not whatever the caller
 	// happened to pass in. Ownership decides which object the receive path writes into and which
 	// object the close path may release; a caller variable is an output rather than the authority.
@@ -1343,9 +1376,21 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	}
 	const bool bUseGPUPath = CVarSpoutGPUReceiver.GetValueOnAnyThread() != 0;
 	const TWeakObjectPtr<UObject> OutputIdentity(OptionalOutputRenderTarget);
+	// The call is accepted. The first accepted call of this entry fixes the session's receive mode; every command
+	// of the entry then carries the same value, so the render thread never sees the mode change within a session.
+	if (!Receiver->bReceiveModeEstablished)
+	{
+		Receiver->bReceiveModeEstablished = true;
+		Receiver->bAsyncReceiveRequested = bAsyncReceive;
+		if (bAsyncReceive)
+		{
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': opened with Async Receive (Beta) requested. It stays in this mode until Close Receiver."), *SpoutName.ToString());
+		}
+	}
+	const bool bAsyncRequested = Receiver->bAsyncReceiveRequested;
 	FSpoutSession::Get().MarkQueued(Token);
 	ENQUEUE_RENDER_COMMAND(SpoutRecvCmd)(
-		[Token, Receiver, TextureResource, OutputResource, OutputIdentity, W, H, SharedHandle, Format, PixelFormat, bUseGPUPath, QueuedWork, PreviousOutputReservation](FRHICommandListImmediate& RHICmdList)
+		[Token, Receiver, TextureResource, OutputResource, OutputIdentity, W, H, SharedHandle, Format, PixelFormat, bUseGPUPath, bAsyncRequested, QueuedWork, PreviousOutputReservation](FRHICommandListImmediate& RHICmdList)
 		{
 			if (!FSpoutSession::Get().IsCurrent(Token))
 			{
@@ -1386,9 +1431,9 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			}
 			const uint64 PreviousFrame = Receiver->ReceivedFrameNumber;
 			bool bCpuUploaded = false;
-			if (ReceiveOnRenderThread_Async(*Receiver, TextureRHI, PixelFormat, RHICmdList))
+			if (ReceiveOnRenderThread_Async(*Receiver, bAsyncRequested, TextureRHI, PixelFormat, RHICmdList))
 			{
-				// Experimental, off by default: the worker made the transfer; nothing more here.
+				// Async Receive (Beta), requested by this session: the worker made the transfer; nothing more here.
 			}
 			else if (bUseGPUPath)
 			{

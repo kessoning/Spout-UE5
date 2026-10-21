@@ -14,6 +14,7 @@ FString FSpoutModule::GetBuildSourceIdentity()
 	return UTF8_TO_TCHAR(SPOUT_BUILD_SOURCE_ID);
 }
 #include "SpoutBPFunctionLibrary.h"
+#include "SpoutLimits.h"
 
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
@@ -127,6 +128,7 @@ void FSpoutModule::StartupModule()
 {
 	// Nothing to initialize eagerly; D3D/Spout resources are created on first use.
 	UE_LOG(LogSpoutPlugin, Log, TEXT("Spout Plugin Loaded"));
+	SpoutLimits::WarnIfRetiredSettingsSet();
 
 #if PLATFORM_WINDOWS
 	// Explicitly load Spout.dll so its delay-loaded imports bind on first Spout call

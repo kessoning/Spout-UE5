@@ -3,7 +3,7 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * Implements the experimental asynchronous receive path (r.Spout.AsyncReceive, off by default).
+ * Implements the asynchronous receive path, Async Receive (Beta): off by default and requested per receiver session.
  * See SpoutAsyncReceive.h for the design and the ownership rules, and SpoutSlotPool.h for the
  * bookkeeping.
  */
@@ -36,6 +36,9 @@ namespace
 
 	/** The next stream object's generation. Never 0, and never the same twice in a process. */
 	std::atomic<uint64> GNextGeneration{1};
+
+	/** Stream objects alive in the process. Each owns its worker thread, joined before the object is gone. */
+	std::atomic<int32> GLiveAsyncStreams{0};
 
 	/**
 	 * Waits until Fence reached Value, for at most TimeoutMs. False on a timeout and on device
@@ -281,6 +284,12 @@ FSpoutAsyncStream::FSpoutAsyncStream(const FName& InName, int32 InInstrumentStre
 	, Identity(InIdentity)
 	, Generation(GNextGeneration.fetch_add(1))
 {
+	GLiveAsyncStreams.fetch_add(1);
+}
+
+int32 FSpoutAsyncStream::GetLiveStreams()
+{
+	return GLiveAsyncStreams.load();
 }
 
 TUniquePtr<FSpoutAsyncStream> FSpoutAsyncStream::Create(const FName& Name, int32 InstrumentStream, FSpoutFrameSync& FrameSync, const FIdentity& Identity, EPixelFormat PixelFormat, FString& OutWhy)
@@ -486,6 +495,7 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 	Reservation.Reset();
 	// With the debug layer on: what the worker's device had to say about this stream's resources.
 	FSpoutAsyncDevice::Get().ReportDebugLayer();
+	GLiveAsyncStreams.fetch_sub(1);
 }
 
 void FSpoutAsyncStream::Stop()

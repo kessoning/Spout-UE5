@@ -96,6 +96,7 @@ void FSpoutSharedSender::ReleaseResources()
 	// back before it exits. The worker takes none of the locks held here.
 	Async.Reset();
 	AsyncRefusedFor = FSpoutAsyncStream::FIdentity();
+	bAsyncReceiveActive.store(false);
 
 	// The shared-slot objects: their destructors hand them to the retirement list with their outstanding GPU
 	// work, which releases them once that work is proven finished. Nothing here waits for the GPU.

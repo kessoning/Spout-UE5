@@ -111,16 +111,35 @@ public:
 	int32 InstrumentId = -1;
 
 	/**
-	 * Receiver role only, experimental (r.Spout.AsyncReceive, off by default): the asynchronous
-	 * receive of this stream at its current sender identity, or null while the stream uses the
-	 * synchronous path. Created, used and replaced on the render thread; destroyed there or by
-	 * ReleaseResources. While it exists it is the only user of FrameSync's access and notification
-	 * calls, and its worker thread is the only thread that takes Spout access for this stream.
-	 * AsyncRefusedFor is the identity the asynchronous path was last refused for, so a refusal is
-	 * logged once and not retried on every frame.
+	 * Receiver role only, Async Receive (Beta), off by default: the asynchronous receive of this stream at its
+	 * current sender identity, or null while the stream uses the synchronous path. Created only for a session
+	 * opened with Async Receive (Beta); created, used and replaced on the render thread; destroyed there or by
+	 * ReleaseResources. While it exists it is the only user of FrameSync's access and notification calls, and its
+	 * worker thread is the only thread that takes Spout access for this stream. AsyncRefusedFor is the identity
+	 * the asynchronous path was last refused for, so a refusal is logged once and not retried on every frame.
 	 */
 	TUniquePtr<FSpoutAsyncStream> Async;
 	FSpoutAsyncStream::FIdentity AsyncRefusedFor;
+
+	/**
+	 * Receiver role only: the receive mode of this session. One entry is one session per name, so the mode is
+	 * the session's, decided by the first ACCEPTED receive on this entry and never changed for its life; a
+	 * different mode needs Close (which removes the entry) and a new receive. Game thread only: the render
+	 * commands carry the value they were queued with, which is the same for every command of one entry.
+	 */
+	bool bReceiveModeEstablished = false;
+	bool bAsyncReceiveRequested = false;
+	/** Rate limiter for refused receives that asked for the other mode. */
+	FSpoutLogThrottle ReceiveModeLogThrottle;
+
+	/**
+	 * Receiver role only: what the most recent render-thread receive actually used, written there and read on the
+	 * game thread by GetSpoutStreamStatus. bAsyncReceiveActive is true only while this session's worker exists and
+	 * has not failed. AsyncReceiveNote says why a session that asked for Async Receive (Beta) runs synchronously.
+	 */
+	std::atomic<bool> bAsyncReceiveActive{false};
+	void SetAsyncReceiveNote(const FString& Note) { FScopeLock Lock(&ReceiveModeNoteMutex); AsyncReceiveNote = Note; }
+	FString GetAsyncReceiveNote() const { FScopeLock Lock(&ReceiveModeNoteMutex); return AsyncReceiveNote; }
 
 	/**
 	 * The shared-slot path (SpoutSharedSlot.h), when the process latched it. Render thread only, apart from
@@ -217,6 +236,11 @@ public:
 		RetryDelay = FMath::Min(1.0, RetryDelay * 2.0);
 	}
 	void NativeSuccess() { LastNativeError.store(0); NextNativeRetry = 0; RetryDelay = 0.01; }
+
+private:
+	/** Guards AsyncReceiveNote only (render thread writes, game thread reads); never held with another lock. */
+	mutable FCriticalSection ReceiveModeNoteMutex;
+	FString AsyncReceiveNote;
 };
 
 class FSpoutSenderRegistry

@@ -64,17 +64,19 @@ namespace SpoutLimits
 	 */
 	bool FrameCountRecheck();
 
-	/**
-	 * Whether a receive stream may use the asynchronous path: r.Spout.AsyncReceive != 0. An internal,
-	 * experimental switch, off by default. With it off the worker, its device and
-	 * its slots are never created. Read on every receive call, so turning it off returns a stream to
-	 * the synchronous path at its next call. A stream on the asynchronous path makes no publication
-	 * wait: r.Spout.FrameWaitMs applies to the synchronous path only.
-	 */
-	bool AsyncReceive();
+	// There is no process-wide switch for the asynchronous receive. r.Spout.AsyncReceive is retired: still
+	// registered, ignored, and it logs a warning when set. Async Receive (Beta) is requested per receiver session
+	// (FSpoutReceiver::Receive, bAsyncReceive) and decided once per session; see FSpoutSharedSender. A stream on the
+	// asynchronous path makes no publication wait: r.Spout.FrameWaitMs applies to the synchronous path only.
 
 	/**
-	 * r.Spout.AsyncReceive.GpuPriority, clamped to -7..7. A diagnostic of the asynchronous receive, 0 by default:
+	 * Logs the retirement warning when r.Spout.AsyncReceive already holds a value other than 0 at module startup (set
+	 * by an ini file or the command line before the plugin registered it, which its change callback does not see).
+	 */
+	void WarnIfRetiredSettingsSet();
+
+	/**
+	 * r.Spout.AsyncReceive.GpuPriority, clamped to -7..7. A diagnostic of Async Receive (Beta), 0 by default:
 	 * the GPU scheduling priority asked for the worker's device relative to the process's other
 	 * devices (IDXGIDevice::SetGPUThreadPriority). With 0 the call is not made. Read once, when the
 	 * worker's device is created.

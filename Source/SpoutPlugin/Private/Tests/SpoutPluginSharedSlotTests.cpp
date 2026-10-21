@@ -251,10 +251,8 @@ bool FSpoutSlotFormats::RunTest(const FString&)
 	IConsoleVariable* Path = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.GPUReceiver"));
 	const int32 PreviousPath = Path->GetInt();
 	const EConsoleVariableFlags PreviousPriority = static_cast<EConsoleVariableFlags>(Path->GetFlags() & ECVF_SetByMask);
-	IConsoleVariable* AsyncPath = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive"));
-	const int32 PreviousAsync = AsyncPath->GetInt();
-	const EConsoleVariableFlags PreviousAsyncPriority = static_cast<EConsoleVariableFlags>(AsyncPath->GetFlags() & ECVF_SetByMask);
-	AsyncPath->Set(0, ECVF_SetByCode);
+	// These receives do not ask for Async Receive (Beta), so they use the synchronous paths under test whatever the
+	// retired r.Spout.AsyncReceive holds.
 	const int64 WrapsBefore = SpoutInterop::GetWrapCallCount();
 
 	struct FCase { EPixelFormat Format; bool bLinear; ESpoutColorSpace Mode; };
@@ -314,9 +312,6 @@ bool FSpoutSlotFormats::RunTest(const FString&)
 	Path->Set(PreviousPath, ECVF_SetByCode);
 	Path->ClearFlags(ECVF_SetByMask);
 	Path->SetFlags(PreviousPriority);
-	AsyncPath->Set(PreviousAsync, ECVF_SetByCode);
-	AsyncPath->ClearFlags(ECVF_SetByMask);
-	AsyncPath->SetFlags(PreviousAsyncPriority);
 	return true;
 }
 

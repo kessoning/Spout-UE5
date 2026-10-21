@@ -186,11 +186,12 @@ void USpoutBPFunctionLibrary::CloseSender(FName SpoutName)
 }
 
 bool USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial,
-	FName TextureParameterName, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace)
+	FName TextureParameterName, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace,
+	bool bAsyncReceive)
 {
 	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
 	check(IsInGameThread());
-	return FSpoutReceiver::Receive(SpoutName, nullptr, TextureParameterName, ConsumerMaterial, OutTexture, OptionalOutputRenderTarget, ColorSpace);
+	return FSpoutReceiver::Receive(SpoutName, nullptr, TextureParameterName, ConsumerMaterial, OutTexture, OptionalOutputRenderTarget, ColorSpace, bAsyncReceive);
 }
 
 bool USpoutBPFunctionLibrary::ReleaseReceiverMaterialBinding(FName SpoutName, UMaterialInstanceDynamic* ConsumerMaterial, FName TextureParameterName)
@@ -276,13 +277,14 @@ bool USpoutBPFunctionLibrary::SpoutReceiver(
 	UMaterialInstanceDynamic*& OutMat,
 	UTexture2D*& OutTexture,
 	UTextureRenderTarget2D* OptionalOutputRenderTarget,
-	ESpoutColorSpace ColorSpace
+	ESpoutColorSpace ColorSpace,
+	bool bAsyncReceive
 )
 {
 	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
 	// OptionalOutputRenderTarget is copied into by both the GPU and CPU receive paths when it is
 	// compatible with the incoming frame, and excluded and left untouched when it is not.
-	return FSpoutReceiver::Receive(SpoutName, InputMaterial, TextureParameterName, OutMat, OutTexture, OptionalOutputRenderTarget, ColorSpace);
+	return FSpoutReceiver::Receive(SpoutName, InputMaterial, TextureParameterName, OutMat, OutTexture, OptionalOutputRenderTarget, ColorSpace, bAsyncReceive);
 }
 
 bool USpoutBPFunctionLibrary::SpoutInfo(TArray<FSenderStruct>& Senders)
@@ -486,6 +488,15 @@ FSpoutStreamStatus USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName SpoutName
 		Result.bHasFrame = Result.FramesSubmitted > 0;
 		Result.NativeFailures = Entry->NativeFailures.load();
 		Result.LastNativeError = Entry->LastNativeError.load();
+		if (Type == ESpoutType::Receiver)
+		{
+			// The request is the session's (game thread); the effective path is what the render thread last used.
+			// A requested mode is never reported as effective on its own: until the worker runs, it is synchronous.
+			const bool bRequested = Entry->bReceiveModeEstablished && Entry->bAsyncReceiveRequested;
+			Result.RequestedReceiveMode = bRequested ? ESpoutReceiveMode::AsyncBeta : ESpoutReceiveMode::Synchronous;
+			Result.EffectiveReceiveMode = Entry->bAsyncReceiveActive.load() ? ESpoutReceiveMode::AsyncBeta : ESpoutReceiveMode::Synchronous;
+			Result.ReceiveModeNote = bRequested ? Entry->GetAsyncReceiveNote() : FString();
+		}
 	}
 	return Result;
 }

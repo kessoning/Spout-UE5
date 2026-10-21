@@ -3,7 +3,10 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * The asynchronous receive path: an experimental prototype, off by default (r.Spout.AsyncReceive).
+ * The asynchronous receive path: Async Receive (Beta), off by default. A receiver session asks for it through the
+ * Async Receive (Beta) input of the receive functions (FSpoutReceiver::Receive, bAsyncReceive); the session's first
+ * accepted call fixes the request for the session's life. No process-wide setting enables it (r.Spout.AsyncReceive
+ * is retired and ignored).
  *
  * The synchronous receive (SpoutReceiver.cpp) takes Spout access, copies and waits for the copy on
  * the render thread, on a D3D11-on-12 device that shares Unreal's graphics queue. Under GPU load
@@ -158,6 +161,12 @@ public:
 	const FIdentity& GetIdentity() const { return Identity; }
 	/** This stream object's generation: a number no other stream object of the process has. */
 	uint64 GetGeneration() const { return Generation; }
+	/**
+	 * Stream objects alive in the process, any thread. Each owns its worker thread and joins it before it is gone,
+	 * so 0 means no worker runs. Diagnostics and tests: a receiver that did not ask for Async Receive (Beta) never
+	 * adds one, and a closed one leaves none behind.
+	 */
+	static int32 GetLiveStreams();
 
 	/**
 	 * Render thread. Takes the newest completed image, when there is one, and queues its copy into
