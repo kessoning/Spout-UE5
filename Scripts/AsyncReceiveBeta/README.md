@@ -18,8 +18,10 @@ Commandlet `-run=SpoutAsyncBetaAsset`:
 | `Migrate` | Adds the instance-editable variable `AsyncReceiveBeta` (display name "Async Receive (Beta)", default false, category `Spout\|Experimental`, the setting's tooltip plus the apply rule) and connects it to the `Async Receive (Beta)` input of every receive node of the example. Compiles, and saves with the running engine. Refuses an already migrated asset. |
 | `MakeLevel` | Saves a validation level with one example actor (the example always receives the name `Spout`): with `-AsyncOn` the placed instance has Async Receive (Beta) set, without it the instance keeps the class default (false). |
 
-The editor console command `SpoutAsyncBeta.DetailsShot <map> <actor label> <out.png>`, run in the full
-editor, renders the editor's own Details panel of that actor's Spout categories to a PNG.
+The editor console command `SpoutAsyncBeta.DetailsShot <map> <actor label> <out.png> [quit]`, run in the
+full editor, renders the editor's own Details panel of that actor's Spout categories to a PNG. The
+Experimental sub-group starts collapsed, so the command first opens the path to the setting the way the
+editor does when it points at a property, and the row appears highlighted.
 
 **Engine.** The example is saved by the oldest supported engine (UE 5.3), so that every engine from 5.3 to
 5.8 can load it. A package saved by a newer engine cannot be opened by an older one.
