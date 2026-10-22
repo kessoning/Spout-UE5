@@ -3,6 +3,8 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 // SpoutHostTest.AsyncBetaCheck <report.json> <seconds> <spout name>
+// (or -SpoutAsyncBetaCheck=<report.json> [-SpoutAsyncBetaSeconds=] [-SpoutAsyncBetaName=] on the command line, which also
+// works in Shipping builds)
 //
 // The Async Receive (Beta) check of a packaged host (Scripts/AsyncReceiveBeta/README.md). The level it runs in holds
 // shipped receiver examples (BP_SpoutReceiverExample) whose Async Receive (Beta) setting was SAVED with the level; the
@@ -13,6 +15,11 @@
 // equals its saved request and its image arrived, 1 otherwise).
 #include "SpoutBPFunctionLibrary.h"
 #include "Containers/Ticker.h"
+#include "Engine/Engine.h"
+#include "Kismet/GameplayStatics.h"
+#include "Misc/CommandLine.h"
+#include "Misc/DelayedAutoRegister.h"
+#include "Misc/Parse.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
@@ -70,6 +77,7 @@ namespace SpoutHostTestAsyncBeta
 	struct FRun
 	{
 		FString ReportPath;
+		FString Level;
 		FName Name;
 		double End = 0.0;
 		int32 Sequence = 0;
@@ -84,9 +92,9 @@ namespace SpoutHostTestAsyncBeta
 	static void Finish(const FString& Refusal = FString())
 	{
 		const FSpoutStreamStatus Status = USpoutBPFunctionLibrary::GetSpoutStreamStatus(GRun->Name, ESpoutType::Receiver);
-		FString Json = FString::Printf(TEXT("{\n  \"check\": \"SpoutHostTest.AsyncBetaCheck\",\n  \"spoutName\": \"%s\",\n  \"refusal\": \"%s\",\n")
+		FString Json = FString::Printf(TEXT("{\n  \"check\": \"SpoutHostTest.AsyncBetaCheck\",\n  \"level\": \"%s\",\n  \"spoutName\": \"%s\",\n  \"refusal\": \"%s\",\n")
 			TEXT("  \"status\": {\"active\": %s, \"requested\": \"%s\", \"effective\": \"%s\", \"note\": \"%s\", \"framesSubmitted\": %lld},\n  \"examples\": [\n"),
-			*GRun->Name.ToString(), *Refusal.ReplaceCharWithEscapedChar(), Status.bActive ? TEXT("true") : TEXT("false"), ModeName(Status.RequestedReceiveMode),
+			*GRun->Level, *GRun->Name.ToString(), *Refusal.ReplaceCharWithEscapedChar(), Status.bActive ? TEXT("true") : TEXT("false"), ModeName(Status.RequestedReceiveMode),
 			ModeName(Status.EffectiveReceiveMode), *Status.ReceiveModeNote.ReplaceCharWithEscapedChar(), Status.FramesSubmitted);
 		bool bAllPassed = Refusal.IsEmpty() && GRun->Examples.Num() > 0;
 		for (int32 I = 0; I < GRun->Examples.Num(); ++I)
@@ -147,6 +155,7 @@ namespace SpoutHostTestAsyncBeta
 		}
 		GRun = MakeUnique<FRun>();
 		GRun->ReportPath = Args[0];
+		GRun->Level = World->GetOutermost()->GetName();
 		GRun->End = FPlatformTime::Seconds() + FMath::Clamp(FCString::Atod(*Args[1]), 1.0, 120.0);
 		GRun->Name = FName(*Args[2]);
 		for (TActorIterator<AActor> It(World); It; ++It)
@@ -178,4 +187,51 @@ namespace SpoutHostTestAsyncBeta
 	static FAutoConsoleCommandWithWorldAndArgs Command(TEXT("SpoutHostTest.AsyncBetaCheck"),
 		TEXT("SpoutHostTest.AsyncBetaCheck <report.json> <seconds> <spout name>: publishes under that name to the placed receiver examples and reports their saved, requested and effective receive mode and image, then exits."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&Start));
+
+	// The same check from the command line, for Shipping builds, which do not run -ExecCmds:
+	//   -SpoutAsyncBetaCheck=<report.json> [-SpoutAsyncBetaSeconds=<s>, default 15] [-SpoutAsyncBetaName=<name>, default Spout]
+	//   [-SpoutAsyncBetaMap=<level package, for example /Game/AsyncBeta/L_AsyncBetaOn>]
+	// Shipping ignores a map given on the command line (UGameInstance::StartGameInstance), so with -SpoutAsyncBetaMap the
+	// check opens that level itself once the first game world began play, and starts when that level has begun play.
+	// Without it, the check starts in the first game world that began play. Without the wanted world within 60 s it writes
+	// a refusal report and exits with 1.
+	static FDelayedAutoRegisterHelper CommandLineStart(EDelayedRegisterRunPhase::EndOfEngineInit, []
+	{
+		FString Report;
+		if (!FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaCheck="), Report)) return;
+		FString Seconds = TEXT("15"), Name = TEXT("Spout"), Map;
+		FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaSeconds="), Seconds);
+		FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaName="), Name);
+		FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaMap="), Map);
+		const double GiveUp = FPlatformTime::Seconds() + 60.0;
+		TSharedRef<bool> bOpenRequested = MakeShared<bool>(false);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Report, Seconds, Name, Map, GiveUp, bOpenRequested](float)
+		{
+			if (GRun) return false;
+			if (GEngine)
+			{
+				for (const FWorldContext& Context : GEngine->GetWorldContexts())
+				{
+					UWorld* World = Context.World();
+					if (!World || !World->IsGameWorld() || !World->HasBegunPlay()) continue;
+					if (!Map.IsEmpty() && World->GetOutermost()->GetName() != Map)
+					{
+						if (!*bOpenRequested)
+						{
+							*bOpenRequested = true;
+							UGameplayStatics::OpenLevel(World, FName(*Map));
+						}
+						continue;
+					}
+					Start({ Report, Seconds, Name }, World);
+					return false;
+				}
+			}
+			if (FPlatformTime::Seconds() < GiveUp) return true;
+			FFileHelper::SaveStringToFile(FString::Printf(TEXT("{\n  \"check\": \"SpoutHostTest.AsyncBetaCheck\",\n  \"refusal\": \"no game world of '%s' began play within 60 s\",\n  \"passed\": false\n}\n"),
+				Map.IsEmpty() ? TEXT("any level") : *Map), *Report, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+			FPlatformMisc::RequestExitWithStatus(false, 1);
+			return false;
+		}));
+	});
 }

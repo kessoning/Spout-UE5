@@ -163,6 +163,12 @@ namespace SpoutHostTest
 		bool Bound=false;
 		for(auto* Mesh : Meshes) if(auto* MID=Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0))) Bound |= MID->K2_GetTextureParameterValue(TEXT("SpoutTexture")) != nullptr;
 		if (Verified<64 || Widths.Num()<2 || !Bound) { Error=FString::Printf(TEXT("shipped receiver failed sustained Blueprint/material/resize qualification (%d frames, %d sizes, bound=%d)"),Verified,Widths.Num(),Bound); return false; }
+		// Async Receive (Beta) is off unless an instance sets it. This spawned example keeps the class default, so its
+		// session must have asked for, and run, the synchronous receive.
+		const FSpoutStreamStatus ExampleStatus=USpoutBPFunctionLibrary::GetSpoutStreamStatus(ReceiverName,ESpoutType::Receiver);
+		const bool bExampleSynchronous=ExampleStatus.RequestedReceiveMode==ESpoutReceiveMode::Synchronous && ExampleStatus.EffectiveReceiveMode==ESpoutReceiveMode::Synchronous;
+		if (FReport* Report=FReport::Get()) Report->SetField(TEXT("shippedReceiverDefaultSynchronous"),bExampleSynchronous?TEXT("true"):TEXT("false"));
+		if (!bExampleSynchronous) { Error=TEXT("the shipped receiver example with its default setting did not run the synchronous receive"); return false; }
 		Receiver->Destroy(); FlushRenderingCommands();
 		if (USpoutBPFunctionLibrary::GetSpoutStreamStatus(ReceiverName,ESpoutType::Receiver).bActive) { Error=TEXT("shipped receiver EndPlay did not close its session"); return false; }
 		SetEvent(Stop);
@@ -223,13 +229,16 @@ namespace SpoutHostTest
 			UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr;
 			ON_SCOPE_EXIT { USpoutBPFunctionLibrary::CloseReceiver(FName(*Name),Texture,Material); FlushRenderingCommands(); CloseHandle(Ready); CloseHandle(Stop); };
 			const bool ReadyToRead=Peer.IsValid() && WaitForSingleObject(Ready,10000)==WAIT_OBJECT_0;
-			int32 Verified=0, Last=-1; TSet<int32> Widths; bool Match=true;
+			int32 Verified=0, Last=-1; TSet<int32> Widths; bool Match=true, bSynchronous=true;
 			const double Deadline=FPlatformTime::Seconds()+10.0;
 			while (ReadyToRead && (Verified<8 || Widths.Num()<2) && FPlatformTime::Seconds()<Deadline)
 			{
 				if (USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(FName(*Name),nullptr,NAME_None,Texture,nullptr,ESpoutColorSpace::Linear) && Texture)
 				{
 					const auto Pixels=ReadPixels(Texture->GetResource(),Texture->GetSizeX(),Texture->GetSizeY());
+					// Nothing asked for Async Receive (Beta) here: the session must request and run the synchronous receive.
+					const FSpoutStreamStatus Status=USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName(*Name),ESpoutType::Receiver);
+					bSynchronous &= Status.RequestedReceiveMode==ESpoutReceiveMode::Synchronous && Status.EffectiveReceiveMode==ESpoutReceiveMode::Synchronous;
 					if (Pixels.Num() && Pixels[0].A==255)
 					{
 						Match=Pixels==Pattern(Texture->GetSizeX(),Texture->GetSizeY(),Pixels[0].R);
@@ -242,6 +251,59 @@ namespace SpoutHostTest
 			}
 			SetEvent(Stop); const bool Stopped=FinishPeer(Peer,3.0);
 			if (!Stopped || !Match || Verified<8 || Widths.Num()<2) { Error=TEXT("native sender pixels, progress, resize, or shutdown failed"); return false; }
+			if (!bSynchronous) { Error=TEXT("a receiver that did not ask for Async Receive (Beta) did not run the synchronous receive"); return false; }
+		}
+		// Async Receive (Beta), asked for by this one receiver, from the same independent native sender: exact pixels
+		// across the sender's resizes (every size change is a new sender identity, so a new worker), every verified frame
+		// read while the status reported the asynchronous path as effective, the request recorded throughout, no
+		// fallback note, and the receiver inactive after Close Receiver.
+		{
+			CVar->Set(1,ECVF_SetByCode);
+			const FString Name=Prefix+TEXT("_NativeAsync"), StopName=Name+TEXT("_Stop"), ReadyName=Name+TEXT("_Ready");
+			HANDLE Stop=CreateEventW(nullptr,true,false,*StopName), Ready=CreateEventW(nullptr,true,false,*ReadyName);
+			if (!Stop || !Ready) { if(Stop) CloseHandle(Stop); if(Ready) CloseHandle(Ready); Error=TEXT("peer event creation failed"); return false; }
+			const FString Args=FString::Printf(TEXT("send %s %s %s"),*Name,*StopName,*ReadyName);
+			FProcHandle Peer=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr);
+			UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr; bool bClosed=false;
+			ON_SCOPE_EXIT { if (!bClosed) USpoutBPFunctionLibrary::CloseReceiver(FName(*Name),Texture,Material); FlushRenderingCommands(); CloseHandle(Ready); CloseHandle(Stop); };
+			const bool ReadyToRead=Peer.IsValid() && WaitForSingleObject(Ready,10000)==WAIT_OBJECT_0;
+			// A note during a resize can be legitimate (an identity caught between the sender's new size and its new
+			// texture is refused and the next identity is tried again); the session must not END in fallback.
+			int32 Verified=0, Last=-1, NoteSamples=0; TSet<int32> Widths; bool Match=true, bRequested=true; FString Note;
+			const double Deadline=FPlatformTime::Seconds()+15.0;
+			while (ReadyToRead && (Verified<8 || Widths.Num()<2) && FPlatformTime::Seconds()<Deadline)
+			{
+				if (USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(FName(*Name),nullptr,NAME_None,Texture,nullptr,ESpoutColorSpace::Linear,/*bAsyncReceive*/ true) && Texture)
+				{
+					const auto Pixels=ReadPixels(Texture->GetResource(),Texture->GetSizeX(),Texture->GetSizeY());
+					const FSpoutStreamStatus Status=USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName(*Name),ESpoutType::Receiver);
+					bRequested &= Status.RequestedReceiveMode==ESpoutReceiveMode::AsyncBeta;
+					Note=Status.ReceiveModeNote;
+					NoteSamples+=Note.IsEmpty()?0:1;
+					if (Pixels.Num() && Pixels[0].A==255 && Status.EffectiveReceiveMode==ESpoutReceiveMode::AsyncBeta)
+					{
+						Match=Pixels==Pattern(Texture->GetSizeX(),Texture->GetSizeY(),Pixels[0].R);
+						if (!Match) break;
+						Widths.Add(Texture->GetSizeX());
+						if (Last!=Pixels[0].R) { Last=Pixels[0].R; ++Verified; }
+					}
+				}
+				FPlatformProcess::Sleep(0.01f);
+			}
+			SetEvent(Stop); const bool Stopped=FinishPeer(Peer,3.0);
+			USpoutBPFunctionLibrary::CloseReceiver(FName(*Name),Texture,Material); FlushRenderingCommands(); bClosed=true;
+			const bool bInactive=!USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName(*Name),ESpoutType::Receiver).bActive;
+			if (FReport* Report=FReport::Get())
+			{
+				Report->SetField(TEXT("nativeAsyncBetaVerifiedFrames"),FString::FromInt(Verified));
+				Report->SetField(TEXT("nativeAsyncBetaNoteSamples"),FString::FromInt(NoteSamples));
+			}
+			if (!Stopped || !Match || !bRequested || !Note.IsEmpty() || Verified<8 || Widths.Num()<2 || !bInactive)
+			{
+				Error=FString::Printf(TEXT("Async Receive (Beta) from the native sender failed (stopped %d, match %d, requested %d, final note '%s', notes seen %d, verified %d, sizes %d, inactive after close %d)"),
+					Stopped?1:0, Match?1:0, bRequested?1:0, *Note, NoteSamples, Verified, Widths.Num(), bInactive?1:0);
+				return false;
+			}
 		}
 		return true;
 	}
