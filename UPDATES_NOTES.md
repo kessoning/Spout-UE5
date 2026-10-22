@@ -19,6 +19,12 @@ freeze things for long: it just gets skipped and the next one goes through. The 
 still there as a fallback setting if you ever need it, and the log tells you which one a session is
 using.
 
+While testing the release I also caught a small slowdown in how the plugin cleans up after a rare
+hiccup. In those unusual moments it asks the graphics card whether some earlier work is done, and on
+my NVIDIA laptop that question could sit unanswered for about three seconds. Now it asks in a way the
+graphics card answers right away, about a hundredth of a second in my test. You would only ever
+notice this if something had already gone wrong, but it's one less thing to wait on.
+
 I've been chasing the last bit of stutter you can get when Unreal and the other app both run at the
 same frame rate. Their timing drifts, and every now and then Unreal asks for the picture a hair
 before the other app has finished the next one, so you see the same frame twice and then one gets

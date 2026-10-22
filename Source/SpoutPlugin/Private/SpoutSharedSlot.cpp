@@ -191,6 +191,14 @@ namespace
 		return Device11->CreateQuery(&Desc, Out.GetAddressOf());
 	}
 
+	/**
+	 * GetData flags for every poll of a proof query: none, so a poll of an unfinished query may flush. A query ended and
+	 * flushed with no other work in its batch (a re-issued proof, the proof of a lost fence view) may not be submitted
+	 * by that Flush on some drivers: polled with D3D11_ASYNC_GETDATA_DONOTFLUSH it can report only after seconds, or
+	 * only when later work is flushed. Context lock held by the caller.
+	 */
+	constexpr UINT ProofQueryGetDataFlags = 0;
+
 	void AddObject(TArray<TRefCountPtr<IUnknown>>& Objects, IUnknown* Object)
 	{
 		if (Object)
@@ -316,7 +324,7 @@ namespace
 				{
 					FScopeLock ContextLock(&Async.GetContextMutex());
 					ID3D11DeviceContext4* Context = Async.GetContext();
-					QueryResult = Context ? Context->GetData(Proof, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) : DXGI_ERROR_DEVICE_REMOVED;
+					QueryResult = Context ? Context->GetData(Proof, nullptr, 0, ProofQueryGetDataFlags) : DXGI_ERROR_DEVICE_REMOVED;
 				}
 #if WITH_DEV_AUTOMATION_TESTS
 				if (QueryResult == S_OK && TakeHook(SpoutSlotTestHooks::FailProofQueries))
@@ -539,8 +547,7 @@ bool FSpoutGpuRetirement::IsIdle(FRetiredSet& Record)
 		FScopeLock ContextLock(&Async.GetContextMutex());
 		if (ID3D11DeviceContext4* Context = Async.GetContext())
 		{
-			// The query was ended and flushed when it was issued: no flush is needed to make progress.
-			if (Context->GetData(Record.Proof.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
+			if (Context->GetData(Record.Proof.Get(), nullptr, 0, ProofQueryGetDataFlags) == S_OK)
 			{
 				Record.Outstanding.ProofCompleted();
 			}
@@ -562,7 +569,7 @@ bool FSpoutGpuRetirement::IsIdle(FRetiredSet& Record)
 		}
 		else if (Context && Record.ViewLostProof)
 		{
-			bViewLostProven = Context->GetData(Record.ViewLostProof.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
+			bViewLostProven = Context->GetData(Record.ViewLostProof.Get(), nullptr, 0, ProofQueryGetDataFlags) == S_OK;
 		}
 	}
 	const uint64 NativeDone = SpoutSlotRules::NativeProgress(NativeView, bNativeRemoved, bViewLostProven);

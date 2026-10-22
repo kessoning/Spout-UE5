@@ -26,6 +26,11 @@ from the August preparation.
   copy and at most 1 s for Unreal's copy into a send slot; a copy that does not finish in time is not
   published. No queue waits on a fence value that was not already observed complete. Objects whose
   GPU work may still run are released only once fences prove it finished.
+- Where a fence cannot prove it (a failed native signal, or Unreal's device removed), an event query
+  on the native device does, and it is polled with a `GetData` that may flush. A query issued with
+  no other work in its batch was measured to report only after about 3 s on an NVIDIA RTX 2060 when
+  polled without flushing, which delayed those rare recovery paths and failed an automation test's
+  2 s bound twice on UE 5.8.
 - `r.Spout.SharedSlotInterop` (default 1) selects the path once per process, at the first Spout use.
   `0` restores the D3D11-on-12 path of earlier 1.0.0 builds as a fallback; there is no live
   switching and no automatic fallback. The log names the path the process latched. The earlier
