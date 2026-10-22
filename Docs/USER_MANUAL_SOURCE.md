@@ -26,8 +26,10 @@ render target, to other Spout applications, and receive Spout streams back into 
 textures and materials. The default transfer path stays on the GPU; CPU receiver fallback uses system memory for readback and upload.
 
 The technical challenge it solves: Spout shares DirectX 11 textures, but modern UE5 runs on the
-DirectX 12 RHI. The plugin stands up a D3D11-on-D3D12 interop device and bridges UE's D3D12
-textures to Spout's D3D11 shared textures.
+DirectX 12 RHI. The plugin bridges UE's D3D12 textures to Spout's D3D11 shared textures on the
+GPU. By default (the shared-slot path) it copies through plugin-owned slot textures with its own
+native D3D11 device and never wraps UE's textures; the earlier D3D11-on-D3D12 path remains
+selectable with `r.Spout.SharedSlotInterop 0` (see Limitations).
 
 Typical use cases:
 
@@ -53,8 +55,9 @@ do not need to write C++ to use the plugin.
 
 - Windows 64-bit.
 - Unreal Engine 5 (5.3 through 5.8).
-- DirectX 12 RHI enabled in the project. The plugin creates a D3D11-on-D3D12 interop device and
-  will not initialize on any other RHI. It logs `SpoutPlugin requires DX12 RHI.` and stops.
+- DirectX 12 RHI enabled in the project. The plugin creates its D3D11 interop devices on UE's
+  D3D12 device and will not initialize on any other RHI. It logs `SpoutPlugin requires DX12 RHI.`
+  and stops.
 - `Spout.dll`, bundled with the plugin under `ThirdParty/Spout/lib/amd64/` and staged to the
   plugin's `Binaries/Win64/` at build time.
 - For source builds and for packaging a game (the supported workflow): Visual Studio 2022 with
@@ -179,11 +182,13 @@ Lifetime: call the sender continuously; registration and the last image persist 
 texture is created and resized automatically. Call Close Sender to stop a stream; it affects only
 the sender entry.
 
-Under the hood: the UE D3D12 source texture is wrapped as a D3D11 texture through the interop
-device and copied into a Spout shared DX11 texture. No CPU readback on send.
+Under the hood: by default UE copies the source into a plugin-owned slot texture (the render
+thread waits at most 1 s for that copy) and the plugin's native D3D11 device copies the slot into
+the Spout shared DX11 texture. With `r.Spout.SharedSlotInterop 0` the UE D3D12 source texture is
+instead wrapped as a D3D11 texture through a D3D11-on-D3D12 device. No CPU readback on send.
 
 Performance: cost scales with resolution; use a timer when full frame rate is not needed; the
-shared texture and wrap are cached while size and format are stable.
+shared texture and the slot (or wrap) are cached while size and format are stable.
 
 Constraint: no sender-side colour conversion. The pixel bytes and alpha are copied unchanged, and
 every 8-bit source is published as plain `_UNORM`, never `_UNORM_SRGB`, because Spout 2.007's
@@ -235,8 +240,9 @@ Finding senders: use Spout Info to list active names, widths, and heights. Names
 exactly. The receiver reconnects automatically when the sender appears or changes size.
 
 Receive paths: selected by `r.Spout.GPUReceiver`. `1` (default) is GPU-direct - the shared
-texture is copied straight into the UE destination via D3D11-on-12, with no staging texture and
-no CPU copy. `0` is the legacy CPU readback path, kept for debugging and more expensive at high
+texture is copied into the UE destination on the GPU (by default through a plugin-owned slot,
+with the render thread waiting at most 100 ms for the native copy; via D3D11-on-12 with
+`r.Spout.SharedSlotInterop 0`), with no staging texture and no CPU copy. `0` is the legacy CPU readback path, kept for debugging and more expensive at high
 resolution. Both look identical. Set the CVar in the console, in `DefaultEngine.ini` under
 `[SystemSettings]`, with `-ExecCmds`, or from a Blueprint Execute Console Command. It is read
 once per receive call, so changes apply on the next call.
@@ -490,7 +496,7 @@ rebuild.
 - Update rate matters. Use a timer instead of Tick when you do not need full frame-rate output.
 - Leave `r.Spout.GPUReceiver` at its default of `1`. The legacy CPU readback path (`0`) adds a
   full-frame copy, map, and upload each frame.
-- The send path is a GPU copy through the interop device; there is no CPU readback on send.
+- The send path is a GPU copy through the interop path; there is no CPU readback on send.
 - Keep per-frame Blueprint logic around the send and receive calls minimal.
 - Watch large textures specifically. A 4K stream at full frame rate is far more expensive than a
   1080p stream.
@@ -655,7 +661,11 @@ goes against the spirit of the project.
 - SceneCapture2D: an Unreal actor that renders a view into a render target.
 - RHI: Rendering Hardware Interface, Unreal's graphics API abstraction.
 - D3D12: DirectX 12, the graphics API Unreal uses; required by this plugin.
-- D3D11-on-D3D12: an interop layer that exposes D3D12 resources to D3D11 code (here, Spout).
+- D3D11-on-D3D12: an interop layer that exposes D3D12 resources to D3D11 code; used by the
+  plugin's fallback interop path (`r.Spout.SharedSlotInterop 0`).
+- Shared slot: a texture the plugin creates on UE's D3D12 device in a shared heap and opens on its
+  native D3D11 device, used by the default interop path to move pixels without wrapping UE's
+  textures.
 - Shared texture: a GPU texture exposed via a shared handle so another process can read it.
 
 ## Operational limits and status

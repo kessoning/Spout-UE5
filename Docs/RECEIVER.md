@@ -31,7 +31,7 @@ The receiver has two implementations, selected at runtime by the console variabl
 
 | Value | Path | Behavior |
 |---|---|---|
-| `1` (default) | GPU-direct | Opens the sender's shared DX11 texture and copies it straight into the UE RHI destination through D3D11-on-12 wrapping. No staging texture, no Map/Unmap, no per-frame CPU copy. |
+| `1` (default) | GPU-direct | Opens the sender's shared DX11 texture and copies it into the UE RHI destination on the GPU: by default the plugin's native DX11 device copies it into a plugin-owned slot and Unreal copies the slot into the destination (the render thread waits at most 100 ms for the native copy); with `r.Spout.SharedSlotInterop 0`, through D3D11-on-12 wrapping (see [Limitations](LIMITATIONS.md#interop-path)). No staging texture, no Map/Unmap, no per-frame CPU copy. |
 | `0` | Legacy CPU readback | Copies into a CPU-readable staging texture, maps it, and uploads via `FRHICommandList::UpdateTexture2D`. Kept for debugging and parity with older builds. More expensive at high resolution. |
 
 Both paths produce visually identical output. The difference is performance only. Unless you

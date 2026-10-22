@@ -249,7 +249,7 @@ mt.setStyle(TableStyle([("FONT",(0,0),(0,-1),"Helvetica-Bold",10),("FONT",(1,0),
     ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
     ("LINEBELOW",(0,0),(-1,-1),0.4,RULE),("LEFTPADDING",(0,0),(-1,-1),10)]))
 story.append(mt); story.append(Spacer(1,2.0*cm))
-story.append(Paragraph("GPU texture sharing between Unreal Engine and external real-time applications such as TouchDesigner, via a D3D11-on-D3D12 bridge.",S("CoverNote",fontName="Helvetica",fontSize=9.5,leading=14,textColor=MUTE,alignment=TA_CENTER)))
+story.append(Paragraph("GPU texture sharing between Unreal Engine and external real-time applications such as TouchDesigner, bridging Direct3D 12 and Spout's Direct3D 11 shared textures.",S("CoverNote",fontName="Helvetica",fontSize=9.5,leading=14,textColor=MUTE,alignment=TA_CENTER)))
 story.append(NextPageTemplate("body")); story.append(PageBreak())
 
 story.append(Paragraph("Table of Contents",toc_title))
@@ -265,7 +265,7 @@ P("Follow the text steps in this guide. Optional editor illustrations are includ
 H1("1. What SpoutPlugin Is")
 P("Spout is a Windows technology for sharing GPU textures between real-time applications with no disk or network transfer. One application publishes a texture (a <b>sender</b>) and another reads it live (a <b>receiver</b>). It is widely used to move video between tools such as TouchDesigner, Resolume, Notch, and OBS.")
 P("SpoutPlugin brings Spout into Unreal Engine 5. It sends Unreal's rendered output, or any render target, to other Spout applications, and receives Spout streams back into Unreal as textures and materials. The default transfer path stays on the GPU; CPU receiver fallback uses system memory for readback and upload.")
-P("The technical problem it solves: Spout shares DirectX 11 textures, but modern UE5 runs on the DirectX 12 RHI. The plugin stands up a D3D11-on-D3D12 interop device and bridges UE's D3D12 textures to Spout's D3D11 shared textures. You do not interact with any of this directly - it is why DirectX 12 is required and why the plugin is Windows-only.")
+P("The technical problem it solves: Spout shares DirectX 11 textures, but modern UE5 runs on the DirectX 12 RHI. The plugin bridges UE's D3D12 textures to Spout's D3D11 shared textures on the GPU. By default (the shared-slot path) it copies through plugin-owned slot textures with its own native D3D11 device and never wraps UE's textures; the earlier D3D11-on-D3D12 path remains selectable with <font face='Courier'>r.Spout.SharedSlotInterop 0</font> (see Limitations). You do not interact with any of this directly - it is why DirectX 12 is required and why the plugin is Windows-only.")
 H3("Typical use cases")
 B("Send an Unreal scene or camera into TouchDesigner for compositing, projection mapping, or LED output.")
 B("Receive a live feed from another tool into Unreal and map it onto a mesh or use it in a material.")
@@ -277,7 +277,7 @@ P("<b>Does not:</b> it is not a video codec, not a network streaming solution, a
 H1("2. Requirements")
 B("Windows 64-bit.")
 B("Unreal Engine 5 (5.3 through 5.8).")
-B("DirectX 12 RHI enabled. The plugin creates a D3D11-on-D3D12 device and will not initialize on any other RHI; it logs <font face='Courier'>SpoutPlugin requires DX12 RHI.</font> and stops.")
+B("DirectX 12 RHI enabled. The plugin creates its D3D11 interop devices on UE's D3D12 device and will not initialize on any other RHI; it logs <font face='Courier'>SpoutPlugin requires DX12 RHI.</font> and stops.")
 B("<font face='Courier'>Spout.dll</font>, bundled under <font face='Courier'>ThirdParty/Spout/lib/amd64/</font> and staged to the plugin's <font face='Courier'>Binaries/Win64/</font> at build time.")
 B("For source builds and for packaging a game (the supported workflow): Visual Studio 2022 with the C++ workload and toolchain and a Windows SDK supported by your engine version. Opening a project with the prebuilt plugin in a matching editor does not need a compiler.")
 B("Install into your project's <font face='Courier'>Plugins/</font> folder, the qualified consumer layout. Qualify engine-wide installations separately.")
@@ -373,7 +373,8 @@ H3("Lifetime")
 P("Call the sender on Tick or a timer to publish changing images. The last image remains advertised while the sender is paused. The shared texture is created and resized when the source size or format changes. Call <b>Close Sender</b> to stop advertising; it affects only the sender entry, leaving any receiver with the same name open.")
 H3("Performance")
 B("Cost scales with resolution. Use a timer when full frame rate is not needed.")
-B("The shared texture and the interop wrap are cached and reused while size and format are stable.")
+B("By default UE copies the source into a plugin-owned slot texture (the render thread waits at most 1 s for that copy) and the plugin's native D3D11 device copies the slot into the Spout shared texture; with <font face='Courier'>r.Spout.SharedSlotInterop 0</font> the source is wrapped through a D3D11-on-D3D12 device instead.")
+B("The shared texture and the slot (or wrap) are cached and reused while size and format are stable.")
 B("No CPU readback happens on the send path - it is a GPU-to-GPU copy.")
 H3("Colour space and access")
 B("No sender-side colour correction is applied: the pixel bytes and alpha are copied unchanged. Every 8-bit source is published as plain _UNORM, never _UNORM_SRGB, because Spout 2.007's OpenGL receivers (such as the Spout 2.007 Demo Receiver) refuse B8G8R8A8_UNORM_SRGB.")
@@ -396,7 +397,7 @@ P("<b>Sampling:</b> the receiver copies at most once per Unreal frame and gets t
 H3("Receive paths (CVar r.Spout.GPUReceiver)")
 P("The receiver has two implementations, selected at runtime by a console variable. Both produce identical images; the difference is performance only.")
 table([["Value","Path","Behavior"],
-    ["1 (default)","GPU-direct","Shared texture copied straight into the UE destination via D3D11-on-12. No staging texture, no CPU copy."],
+    ["1 (default)","GPU-direct","Shared texture copied into the UE destination on the GPU: by default through a plugin-owned slot (the render thread waits at most 100 ms for the native copy), via D3D11-on-12 with r.Spout.SharedSlotInterop 0. No staging texture, no CPU copy."],
     ["0","Legacy CPU readback","Copies to a staging texture, maps it, uploads via RHIUpdateTexture2D. For debugging; more expensive at high resolution."]],
     [2.4*cm,3.2*cm,10.4*cm])
 SP(6)
@@ -515,7 +516,7 @@ H1("14. Performance Notes")
 B("Cost scales with texture resolution on both send and receive. Start lower and raise as needed.")
 B("Use a timer instead of Tick when you do not need full frame-rate output.")
 B("Leave <font face='Courier'>r.Spout.GPUReceiver</font> at its default of 1. The legacy path (0) adds a full-frame copy, map, and upload each frame.")
-B("The send path is a GPU copy through the interop device; there is no CPU readback on send.")
+B("The send path is a GPU copy through the interop path; there is no CPU readback on send.")
 B("Keep per-frame Blueprint logic around the send and receive calls minimal.")
 B("Watch large textures: a 4K stream at full frame rate is far more expensive than 1080p.")
 
@@ -593,7 +594,8 @@ table([["Term","Meaning"],
     ["SceneCapture2D","An Unreal actor that renders a view into a render target."],
     ["RHI","Rendering Hardware Interface, Unreal's graphics API abstraction."],
     ["D3D12","DirectX 12, the graphics API Unreal uses; required by this plugin."],
-    ["D3D11-on-D3D12","An interop layer exposing D3D12 resources to D3D11 code (here, Spout)."],
+    ["D3D11-on-D3D12","An interop layer exposing D3D12 resources to D3D11 code; used by the fallback interop path (r.Spout.SharedSlotInterop 0)."],
+    ["Shared slot","A texture the plugin creates on UE's D3D12 device in a shared heap and opens on its native D3D11 device; the default interop path moves pixels through it."],
     ["Shared texture","A GPU texture exposed via a shared handle so another process can read it."]],
     [4*cm,12*cm])
 available_figures = [(fid, details) for fid, details in FIGURES.items()

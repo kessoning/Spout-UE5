@@ -6,7 +6,18 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ## OCTOBER 2026 UPDATES
 
-This month is all groundwork. The new pieces stay switched off unless you turn them on.
+This month is mostly groundwork. One change is on for everyone, the new way pictures travel between
+Unreal and Spout; everything else stays switched off unless you turn it on.
+
+The big one first. Spout and Unreal speak slightly different graphics dialects, so the plugin has
+always needed a go-between to hand pictures from one to the other. Until now that go-between worked
+directly on Unreal's own pictures, which tied it closely to what Unreal was doing at the same moment.
+Now the plugin keeps its own little set of holding pictures and hands images through those instead,
+so it never reaches into Unreal's pictures directly. The pixels you get are the same, colours and
+transparency included. Every wait along the way has a short time limit, so a stuck picture can't
+freeze things for long: it just gets skipped and the next one goes through. The old go-between is
+still there as a fallback setting if you ever need it, and the log tells you which one a session is
+using.
 
 I've been chasing the last bit of stutter you can get when Unreal and the other app both run at the
 same frame rate. Their timing drifts, and every now and then Unreal asks for the picture a hair

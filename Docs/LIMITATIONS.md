@@ -13,6 +13,31 @@ accepted work, not proof that a foreign application displayed a frame.
 - Supported source/API range is UE 5.3 through 5.8. Match the plugin binary to the exact engine
   build; a declared range is not evidence that every release archive has passed qualification.
 
+## Interop path
+
+Spout shares Direct3D 11 textures; Unreal renders with Direct3D 12. The plugin has two ways to move
+pixels between them, chosen once per process:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| r.Spout.SharedSlotInterop | 1 | 1: the shared-slot path. 0: the D3D11-on-12 path of earlier releases. Read once, when the process first uses Spout; a later change applies at the next process start |
+
+- **Shared-slot path (default).** The plugin does not wrap any of Unreal's textures for Direct3D 11.
+  It creates its own "slot" textures on Unreal's Direct3D 12 device, opens them on a separate native
+  Direct3D 11 device on the same adapter, and orders the two devices with fences. A receive copies
+  the sender's texture into a slot on the native device and Unreal copies the slot into its
+  destination; the render thread waits at most 100 ms for the native copy. A send copies the source
+  into a slot on Unreal's queue, waits at most 1 s for that copy, and the native device copies the
+  slot into the Spout texture under the stream's access lock. A copy that does not finish in time is
+  not published, and a stream whose slot objects fail stops transferring and logs why. There is no
+  live switching and no automatic fallback to the other path.
+- **D3D11-on-12 path (`r.Spout.SharedSlotInterop 0`).** Unreal's textures are wrapped for Direct3D 11
+  through a D3D11-on-12 device that shares the engine's graphics queue, as in earlier releases. It is
+  kept as a fallback. The release qualification of this version runs the default path; qualify the
+  fallback in your own workload before relying on it.
+- The log names the path the process latched: `Spout interop path latched for this process: ...`.
+  The D3D11-on-12 device is still created at startup on both paths.
+
 ## Formats and color
 
 - GPU and CPU receiver paths accept BGRA8, RGBA8, RGB10A2 and RGBA16F, including supported
@@ -145,6 +170,8 @@ of this release.
 - Same safety rules as the synchronous receive: the sender's texture is only read under its access
   lock, every GPU wait is bounded, a copy that did not finish is never delivered, and a closed
   receiver leaves no worker thread behind.
+- It runs on either [interop path](#interop-path). Its tests and the measurement above used the
+  default shared-slot path; the D3D11-on-12 path was exercised only by targeted checks.
 
 Viewport requests coalesce by name until presentation. Estimates reserve three image equivalents per
 received output (CPU mip plus GPU recreation overlap), two per sender resource, four per receiver native state (shared/staging/upload/cache
@@ -229,9 +256,13 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
   access contention can still lose frames, and Spout has no per-frame acknowledgement.
 - A keyed-mutex sender (one that shares its texture with a DXGI keyed mutex instead of Spout's
   named access mutex) that holds its texture for long periods can cause runs of consecutive skipped
-  frames, with or without the access wait. Unreal's receive path acquires keyed textures through
-  its D3D11-on-12 device, which shares the engine's graphics queue, so a long keyed hold also delays
-  Unreal's own GPU work on that texture. Tested scope: one 1080p 60 fps keyed sender (a native test
+  frames, with or without the access wait. On the D3D11-on-12 path (`r.Spout.SharedSlotInterop 0`)
+  Unreal's receive path acquires keyed textures through its D3D11-on-12 device, which shares the
+  engine's graphics queue, so a long keyed hold also delays Unreal's own GPU work on that texture. On
+  the default shared-slot path the plugin's native Direct3D 11 device acquires them, and a long hold
+  delays the native copy the render thread waits for (at most 100 ms). The figures below were
+  measured on the D3D11-on-12 path of an earlier 1.0.0 build and were not repeated on the
+  shared-slot path. Tested scope: one 1080p 60 fps keyed sender (a native test
   application) received by a UE 5.8 packaged game at 60 fps. Holding the texture 20 ms on every
   tenth frame delivered 84 % of distinct frames at the default wait, with up to 14 consecutive
   frames skipped, in a 60-second run; a run alternating the setting every 5 seconds delivered 89 %

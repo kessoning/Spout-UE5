@@ -42,16 +42,21 @@ to fill the render target is with a `SceneCapture2D` - see [SCENECAPTURE2D.md](S
 
 ## How the copy works
 
-The plugin runs UE on the DirectX 12 RHI but Spout shares DirectX 11 textures. A process-wide
-D3D11-on-D3D12 interop device wraps the UE D3D12 source texture as a D3D11 texture, then issues
-a `CopyResource` into a Spout-owned shared DX11 texture. No CPU readback and no disk or network
-transfer are involved on the send path.
+The plugin runs UE on the DirectX 12 RHI but Spout shares DirectX 11 textures. By default (the
+shared-slot path) Unreal copies the source texture into a plugin-owned "slot" texture with an
+ordinary RHI copy and the render thread waits at most 1 s for that copy; the plugin's native
+DirectX 11 device, on the same adapter, then copies the slot into the Spout-owned shared DX11
+texture under the stream's access lock. No Unreal texture is wrapped for DirectX 11. With
+`r.Spout.SharedSlotInterop 0` the earlier path is used instead: a process-wide D3D11-on-D3D12
+interop device wraps the UE D3D12 source texture and copies it into the shared texture. The choice
+is made once per process; see [Limitations](LIMITATIONS.md#interop-path). No CPU readback and no
+disk or network transfer are involved on the send path.
 
 ## Performance notes
 
 - Cost scales with resolution. Larger textures cost more GPU copy time and bandwidth per frame.
 - Use a timer instead of Tick when you do not need full frame-rate updates.
-- The shared texture and the D3D11 wrap are cached and reused while geometry and format are
+- The shared texture and the slot (or, on the D3D11-on-12 path, the D3D11 wrap) are cached and reused while geometry and format are
   stable, so steady-state sending avoids reallocations.
 - Keep per-frame Blueprint logic around the send call minimal.
 

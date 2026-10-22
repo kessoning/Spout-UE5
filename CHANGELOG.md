@@ -14,6 +14,26 @@ from the August preparation.
 
 ### Production-readiness fixes and release testing (September 2026)
 
+#### Shared-slot interop (October 2026, the default)
+- The sender and the synchronous receiver no longer wrap Unreal's textures for Direct3D 11. The plugin
+  creates its own "slot" textures on Unreal's Direct3D 12 device in a shared heap, opens them on a
+  separate native Direct3D 11 device on the same adapter, and orders the two devices with fences:
+  a receive copies the Spout texture into a slot on the native device and Unreal copies the slot into
+  its destination; a send copies the source into a slot on Unreal's queue and the native device copies
+  the slot into the Spout texture under the stream's access lock. Pixel bytes, formats, alpha and
+  the colour policy are unchanged.
+- Every wait is bounded on the CPU: the render thread waits at most 100 ms for a receive's native
+  copy and at most 1 s for Unreal's copy into a send slot; a copy that does not finish in time is not
+  published. No queue waits on a fence value that was not already observed complete. Objects whose
+  GPU work may still run are released only once fences prove it finished.
+- `r.Spout.SharedSlotInterop` (default 1) selects the path once per process, at the first Spout use.
+  `0` restores the D3D11-on-12 path of earlier 1.0.0 builds as a fallback; there is no live
+  switching and no automatic fallback. The log names the path the process latched. The earlier
+  entries below that describe D3D11-on-12 wrapping describe that fallback path.
+- With the default path, keyed-mutex textures are acquired by the plugin's native Direct3D 11 device
+  rather than through the D3D11-on-12 device that shares Unreal's graphics queue.
+- See `Docs/LIMITATIONS.md` (Interop path).
+
 #### Async Receive (Beta) (October 2026, off by default, not qualified)
 - Added an opt-in **Async Receive (Beta)** setting per receiver: a `bAsyncReceive` input (default
   false, advanced pin, display name "Async Receive (Beta)") on `SpoutReceiver` and

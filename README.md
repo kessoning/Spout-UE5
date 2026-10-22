@@ -2,7 +2,7 @@
 
 # SpoutPlugin (UE5)
 
-Windows-only Unreal Engine 5 plugin that sends and receives textures via Spout using a DX11-on-DX12 bridge.
+Windows-only Unreal Engine 5 plugin that sends and receives textures via Spout, bridging Unreal's Direct3D 12 renderer and Spout's Direct3D 11 shared textures.
 
 ## Introduction
 This plugin started from a real production need rather than as a polished, ready-made solution.
@@ -12,7 +12,7 @@ So I decided to build my own solution. I strongly believe in the idea that shari
 
 Although I am comfortable working with C++, DirectX 11, and DirectX 12, this tool was developed primarily from the perspective of an artist and technical user rather than a traditional software engineer. The focus is therefore on solving real workflow problems and enabling practical integration, rather than building a perfectly abstracted or enterprise-grade system.
 
-The goal of this project is to provide a clear and debuggable bridge between Unreal Engine and Spout, without hiding complexity, especially when dealing with DX11-on-DX12 interop and GPU resource sharing.
+The goal of this project is to provide a clear and debuggable bridge between Unreal Engine and Spout, without hiding complexity, especially when dealing with DX11/DX12 interop and GPU resource sharing.
 
 This plugin should not be considered fully production-ready. However, depending on your use case and with enough testing, it can be reliable enough. At least, it has been for my own projects.
 
@@ -34,12 +34,15 @@ If you need a production-ready, paid solution with more features beyond Spout, c
   - Provides a dynamic material instance ready to be applied to meshes
 
 - **Rendering and Interop**
-  - D3D11-on-DX12 interoperability layer built on top of Unreal Engine 5’s D3D12 RHI
+  - GPU bridge between Unreal Engine 5's D3D12 RHI and Spout's D3D11 shared textures. By default
+    (the shared-slot path) pixels move through plugin-owned slot textures and a native D3D11
+    device, without wrapping Unreal's textures; the earlier D3D11-on-12 path stays selectable with
+    `r.Spout.SharedSlotInterop 0` (see [Limitations](Docs/LIMITATIONS.md#interop-path))
   - GPU-based texture sharing via Spout, without disk or network transfer
 
 ## Requirements
 - Windows 64-bit
-- Unreal Engine 5 with D3D12 RHI enabled (Spout requires D3D11 interop)
+- Unreal Engine 5 with D3D12 RHI enabled (Spout shares D3D11 textures; the plugin bridges them to D3D12)
 - Spout runtime (bundled `Spout.dll` and `Spout.lib` under `ThirdParty/Spout`)
 
 ## Install, build and package
@@ -238,7 +241,7 @@ naming it, rather than being published as something it is not.
   (default 2 ms) for it to finish. If it is still busy after that, the frame is skipped rather than
   overwritten mid-read, the next frame is published once the texture is free, and the skip is logged
   (at most one line per stream every 5 seconds).
-- This workflow is Windows-only and relies on DX11-on-DX12 GPU interop.
+- This workflow is Windows-only and relies on GPU interop between Direct3D 12 and Direct3D 11.
 
 
 ---
@@ -357,7 +360,9 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
 ## Notes and Limitations
 
 - This plugin is **Windows-only** and requires Unreal Engine to run with the **D3D12 RHI** enabled.  
-  Internally, a D3D11-on-DX12 device is created to support Spout interoperability.
+  Internally, the plugin moves pixels between Unreal's D3D12 textures and Spout's D3D11 shared
+  textures on the GPU; the interop path is chosen once per process (see
+  [Limitations](Docs/LIMITATIONS.md#interop-path)).
 
 - At the moment, only a **limited set of texture formats** is supported.  
   Support for additional formats is still a work in progress.
@@ -370,8 +375,11 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
 
 - Shared-texture access is held until the GPU copy completes. This prevents handing a texture
   to another process while it is still being read or written, but can stall Unreal's render
-  thread. UE 5.3 additionally waits for GPU idle at the Unreal-to-interop boundary; UE 5.4+
-  uses a submission-order barrier. Measure frame time in your target workload.
+  thread. On the default shared-slot path the render thread waits at most 100 ms for a receive's
+  native copy and at most 1 s for Unreal's copy into a send slot; a copy that does not finish in
+  time is not published. On the D3D11-on-12 path (`r.Spout.SharedSlotInterop 0`) UE 5.3 waits for
+  GPU idle at the Unreal-to-interop boundary and UE 5.4+ uses a submission-order barrier. Measure
+  frame time in your target workload.
 
 - Disable **Auto Generate Mips** on send sources and optional receive render targets.
   Transfers require one mip, one array slice and one sample. An optional target with an

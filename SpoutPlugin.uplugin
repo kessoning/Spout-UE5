@@ -3,7 +3,7 @@
 	"Version": 6,
 	"VersionName": "1.0.0",
 	"FriendlyName": "Spout Plugin",
-	"Description": "Windows-only Unreal Engine 5 plugin for sending and receiving GPU textures via Spout using DX11-on-DX12 interoperability.",
+	"Description": "Windows-only Unreal Engine 5 plugin for sending and receiving GPU textures via Spout, bridging Unreal's Direct3D 12 renderer and Spout's Direct3D 11 shared textures.",
 	"Category": "Rendering",
 	"CreatedBy": "Kesson",
 	"CreatedByURL": "https://kesson.io",
