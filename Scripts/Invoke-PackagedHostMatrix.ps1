@@ -372,7 +372,10 @@ foreach ($version in $EngineVersions)
             '-nodebuginfo',
             '-utf8output',
             '-unattended',
-            '-nocompileuat'
+            '-nocompileuat',
+            # The cooker is an editor process: without this it starts UnrealTraceServer detached, and the
+            # process outlives the row.
+            '-AdditionalCookerOptions=-notraceserver'
         )
 
         $row.UatCommand = ('"{0}" {1}' -f $engine.RunUAT, ($uatArgs -join ' '))
