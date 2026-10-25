@@ -273,6 +273,27 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
   actual workload.
 - Once access is acquired, GPU completion is required before handing the shared resource back.
   This can stall the render thread, independently of the access wait.
+- Sending waits for its copy. A send copies the source into a slot on Unreal's queue and waits for
+  that copy before the native device publishes it (see Interop path). In a scene that keeps the
+  GPU busy, that copy runs behind the frame's own rendering, so the wait lengthens the frame.
+  - Measured on an RTX 2060 laptop, UE 5.8 packaged, in a scene that ran at 40 to 43 fps with no
+    Spout activity.
+  - Sending one 1080p stream at 60 fps lowered the scene to about 35 fps, while the GPU time rose
+    only about 1 ms. The waiting is inferred from those figures, not timed directly.
+  - Receiving one 1080p 60 fps stream lowered the scene to about 39.5 fps.
+  - In a light scene at 60 fps on the same laptop, neither had a measurable cost.
+  Measure your own scene with and without the streams.
+- A sender that keeps its texture locked while it waits for its own GPU work makes receive attempts
+  wait or skip whenever that GPU work is queued behind other work. On a busy GPU this can be on
+  most frames.
+  - Measured in the laptop scene above with the plugin's native test sender, which holds Spout's
+    access lock until its GPU work completes, at the default 2 ms wait and 1080p 60 fps.
+  - The sender held the texture longer than 2 ms on 29 to 45 % of its frames, and the receiver
+    skipped 4.7 to 6.7 % of the sender's frames (counted as `AccessMisses`).
+  - Up to 22 consecutive Unreal frames, about half a second, passed before a skip was recovered.
+    Every skip was recovered, and no corrupt frame was observed: the previous frame stays on screen.
+  Raising `r.Spout.AccessWaitMs` trades skips for render-thread waiting (above). Qualify such a
+  sender with your actual workload.
 - When frame counting reports no new frame, the receiver avoids another upstream copy. Discovery,
   bookkeeping and render-command processing still have cost; a new/recreated destination may need
   a local copy of the cached frame. Without peer frame counting, each request copies conservatively.
@@ -281,8 +302,8 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
 - Native connect/registration failures retry with backoff from 10 ms to 1 second. A changed native
   identity resets that backoff. Repeated diagnostics are throttled; unsupported RHI is latched.
 - Closing and reopening a stream reuses a pooled SDK frame-synchronisation object instead of
-  constructing one, which measured about 15 ms per role on the tested machine. The pool is bounded
-  (64 objects) and holds no kernel handles; native shared textures are never pooled.
+  constructing one, which measured about 15 ms per role on the RTX 4090 development desktop. The
+  pool is bounded (64 objects) and holds no kernel handles; native shared textures are never pooled.
 - Get Spout Stream Status exposes accepted queued requests, queue rejections, submitted frames,
   access misses and native failures. Get Spout Runtime Status exposes active roles, queue peaks and
   reservation totals/rejections. These are snapshots, not cross-process delivery acknowledgments.

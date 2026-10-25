@@ -14,6 +14,23 @@ from the August preparation.
 
 ### Production-readiness fixes and release testing (September 2026)
 
+#### Release testing on an RTX 2060 laptop (October 2026)
+- `Docs/RELEASE_READINESS.md` names an RTX 2060 laptop as the performance machine. The 60 Hz
+  scenario matrix runs there with its 90 % delivery and zero-corruption gates.
+- The 30-minute release test's scene does not reach 60 fps on that laptop at its default (Epic)
+  quality, even with no Spout activity. The test runs at the highest standard scalability level at
+  which the scene alone meets the test's frame-pacing limits; that level is measured and fixed
+  before the run. The test's numeric limits are unchanged.
+- The same scene is also measured at its default quality with no Spout activity, sending, receiving
+  and both, as a measurement, not a gate.
+- `Docs/LIMITATIONS.md` adds two measured limits from that laptop:
+  - in a GPU-bound scene, a 1080p 60 fps send lowered about 40 fps to about 35, and a receive to about
+    39.5 (the send's wait for its copy is inferred, not timed);
+  - a sender that keeps its texture locked while its own GPU work completes made the receiver skip
+    4.7 to 6.7 % of its frames in that scene.
+- Measurements in the documentation that were taken on an RTX 4090 desktop are labelled as such.
+  No code changed.
+
 #### Shared-slot interop (October 2026, the default)
 - The sender and the synchronous receiver no longer wrap Unreal's textures for Direct3D 11. The plugin
   creates its own "slot" textures on Unreal's Direct3D 12 device in a shared heap, opens them on a

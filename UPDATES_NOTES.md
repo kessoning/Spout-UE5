@@ -9,6 +9,20 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 This month is mostly groundwork. One change is on for everyone, the new way pictures travel between
 Unreal and Spout; everything else stays switched off unless you turn it on.
 
+I also did my release testing this month on my gaming laptop, an RTX 2060 machine, because it's
+much closer to what a lot of you have. The good news: the standard tests, sending and receiving at
+normal and 4K sizes, several streams at once, and starting and stopping, all hold a smooth 60
+frames per second there, meet their delivery targets and never showed a damaged picture. I didn't
+relax any of the pass marks to get that.
+
+The honest news: in a heavier test scene that already keeps the laptop's graphics card busy, sending a
+stream out of Unreal costs real frame rate. That scene ran at about 40 frames per second on its own,
+and about 35 while sending. Receiving cost much less, about half a frame per second. If you build heavy scenes on
+a laptop, measure with and without your streams. I also found that some sending apps hold on to the
+shared picture until their own graphics work is done, and on a busy card that makes Unreal skip a few
+frames (it shows the previous one, nothing breaks). Both are written up in the limitations document.
+No code changed for any of this, just the documentation.
+
 The big one first. Spout and Unreal speak slightly different graphics dialects, so the plugin has
 always needed a go-between to hand pictures from one to the other. Until now that go-between worked
 directly on Unreal's own pictures, which tied it closely to what Unreal was doing at the same moment.

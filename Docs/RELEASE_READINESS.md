@@ -20,16 +20,24 @@ For 1.0.0 the release pipeline:
   travel between levels and compare pixels in both directions with an independent native Spout
   process;
 - measures a packaged UE 5.8 Development host built from the exact UE 5.8 archive at a 60 Hz work
-  rate on one development machine (NVIDIA RTX 4090, Windows 11): 1080p and 4K send and receive,
-  four simultaneous 1080p streams, CPU receive fallback, an idle receiver, resize churn and the
-  paced close/reopen workload below. A scenario passes only when at least 90% of publication
-  opportunities and of the 60 Hz target are observed with zero corrupt pixels;
-- runs the 30-minute release test (at least 30 minutes) on a packaged UE 5.8 Development build made
-  from the exact UE 5.8 archive: a 1080p 60 fps BGRA8 stream in each direction, consumed by external
-  Spout processes, judged against acceptance criteria that are fixed before the run.
+  rate on one development laptop (NVIDIA GeForce RTX 2060 laptop GPU, Intel Core i7-10750H,
+  Windows 11): 1080p and 4K send and receive, four simultaneous 1080p streams, CPU receive
+  fallback, an idle receiver, resize churn and the paced close/reopen workload below. A scenario
+  passes only when at least 90% of publication opportunities and of the 60 Hz target are observed
+  with zero corrupt pixels;
+- runs the 30-minute release test (at least 30 minutes) on the same laptop, on a packaged UE 5.8
+  Development build made from the exact UE 5.8 archive: a 1080p 60 fps BGRA8 stream in each
+  direction, consumed by external Spout processes, judged against acceptance criteria that are fixed
+  before the run. The release test's scene does not reach 60 fps on that laptop at its default
+  (Epic) quality, even with no Spout activity. The release test therefore runs at the highest
+  standard Unreal scalability level at which the scene alone meets the release test's frame-pacing
+  limits; that level is chosen by measurement and fixed before the run;
+- measures the same scene at its default quality with no Spout activity, with one stream sent,
+  with one received, and with both. This shows the plugin's cost in a scene that keeps the GPU busy
+  (see [limitations](LIMITATIONS.md)). It is a measurement, not a gate.
 
 The measurements include a serialized pixel observer and queue drain. They are not a claim about
-other hardware, about isolated plugin cost or about unobserved asynchronous throughput.
+other hardware, other scenes, isolated plugin cost or unobserved asynchronous throughput.
 
 ## Close and reopen
 
@@ -39,12 +47,13 @@ clearing its references at close, at the default `r.Spout.MaxRetainedMiB` and Un
 garbage-collection interval, for 60 and 180 seconds. It is not a general safe restart rate.
 
 Closed receiver outputs stay reserved until Unreal collects them, so budget pressure depends on
-garbage-collection timing, resolution, format, concurrent streams and caller-held textures. On the
-tested machine, closing and reopening one 1080p stream twice per second exhausted the default budget
-after about 20 seconds, and new receiver outputs were then refused until the next collection. That
-stress case stays in the pipeline, fails its delivery gate at the default budget and is not supported
-at that budget. It passed with a 4 GiB diagnostic budget, which is a comparison, not a changed
-default. A receiver that stays open while its sender restarts is unaffected. See
+garbage-collection timing, resolution, format, concurrent streams and caller-held textures. On an
+RTX 4090 development desktop, closing and reopening one 1080p stream twice per second exhausted the
+default budget after about 20 seconds, and new receiver outputs were then refused until the next
+collection; the same case passed with a 4 GiB diagnostic budget, which is a comparison, not a
+changed default. That stress case stays in the pipeline and fails its delivery gate at the default
+budget on the laptop too; it is not supported at that budget. A receiver that stays open while its
+sender restarts is unaffected. See
 [limitations](LIMITATIONS.md) for the retention contract and the options available to an application.
 
 ## Not covered by automated qualification
