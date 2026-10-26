@@ -20,6 +20,9 @@ target_include_directories(SpoutSlotPoolTests PRIVATE "${SPOUT_REPO}/Source/Spou
 # Engine-free completion rules of the shared-slot path (SpoutSlotRules.h). No GPU and no Spout library.
 add_executable(SpoutSlotRulesTests SpoutSlotRulesTests.cpp)
 target_include_directories(SpoutSlotRulesTests PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private")
+# Engine-free bookkeeping of the asynchronous render-target sender (SpoutSendRing.h). No GPU and no Spout library.
+add_executable(SpoutSendRingTests SpoutSendRingTests.cpp)
+target_include_directories(SpoutSendRingTests PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private")
 # Engine-free phases of the T1 viewport check (Tests/SpoutT1ViewportSequence.h). No GPU and no Spout library.
 add_executable(SpoutT1ViewportSequenceTests SpoutT1ViewportSequenceTests.cpp)
 target_include_directories(SpoutT1ViewportSequenceTests PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private")
@@ -34,4 +37,5 @@ add_test(NAME NotificationStateAndPredictor COMMAND SpoutNotificationTests)
 add_test(NAME AsyncSlotPoolAndTransferGate COMMAND SpoutSlotPoolTests)
 add_test(NAME SharedSlotCompletionRules COMMAND SpoutSlotRulesTests)
 add_test(NAME T1ViewportSequence COMMAND SpoutT1ViewportSequenceTests)
-set_tests_properties(SDKOwnershipAndAbandonedMutex WindowsWrappedResourceProbe NotificationStateAndPredictor AsyncSlotPoolAndTransferGate SharedSlotCompletionRules T1ViewportSequence PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+add_test(NAME AsyncSendRing COMMAND SpoutSendRingTests)
+set_tests_properties(SDKOwnershipAndAbandonedMutex WindowsWrappedResourceProbe NotificationStateAndPredictor AsyncSlotPoolAndTransferGate SharedSlotCompletionRules T1ViewportSequence AsyncSendRing PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
