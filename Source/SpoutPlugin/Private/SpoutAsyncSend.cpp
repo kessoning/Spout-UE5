@@ -253,20 +253,17 @@ namespace
 				bHeaderWritten = true;
 				if (IFileManager::Get().FileSize(*Path) <= 0)
 				{
-					Text += FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u qpcFrequency=%.0f openedQpc=%llu openedUtc=%s
-"),
+					Text += FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u qpcFrequency=%.0f openedQpc=%llu openedUtc=%s\n"),
 						FPlatformProcess::GetCurrentProcessId(), 1.0 / FPlatformTime::GetSecondsPerCycle64(), FPlatformTime::Cycles64(),
 						*FDateTime::UtcNow().ToIso8601());
 					Text += TEXT("kind,stream,streamObject,set,frame,sendTick,sendQpc,renderFrame,acceptQpc,readyQpc,firstAttemptQpc,acquiredQpc,publishQpc,resolvedQpc,")
-						TEXT("outcome,attempts,failedAttempts,frameEndValue,frameEndFallback,detail
-");
+						TEXT("outcome,attempts,failedAttempts,frameEndValue,frameEndFallback,detail\n");
 				}
 			}
 			for (const FString& L : Lines)
 			{
 				Text += L;
-				Text += TEXT("
-");
+				Text += TEXT("\n");
 			}
 			if (!FFileHelper::SaveStringToFile(Text, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append))
 			{
