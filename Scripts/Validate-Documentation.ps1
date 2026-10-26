@@ -680,7 +680,10 @@ if (-not $SkipGeneratedDocs)
         $actual = "$pdfWrite"
         $fresh = ($null -eq $newestInput) -or ($pdfWrite -ge $newestInput)
         $recordPath = "$pdfPath.inputs.json"
-        if (Test-Path -LiteralPath $recordPath -PathType Leaf)
+        # A generator that writes the record makes it required: its absence means it was lost, and the
+        # modification times would then decide by checkout order.
+        $recordRequired = ((Get-TextOrEmpty $generatorPath) -match '\.inputs\.json')
+        if ($recordRequired -or (Test-Path -LiteralPath $recordPath))
         {
             $freshnessBasis = 'recorded input content'
             $contentHash = {
@@ -699,18 +702,25 @@ if (-not $SkipGeneratedDocs)
             $inputCount = 0
             try
             {
-                $recordText = [IO.File]::ReadAllText($recordPath)
+                $recordText = ''
+                if (Test-Path -LiteralPath $recordPath -PathType Leaf) { $recordText = [IO.File]::ReadAllText($recordPath) }
+                elseif (Test-Path -LiteralPath $recordPath) { throw 'its path is not a file' }
+                else { $problemsFound += 'the record is missing (the generator writes one)' }
                 $record = $null
                 if (-not [string]::IsNullOrWhiteSpace($recordText)) { $record = $recordText | ConvertFrom-Json }
                 $field = { param($Object, [string] $Name) if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { $Object.$Name } else { $null } }
                 $pdfEntry = & $field $record 'pdf'
                 $pdfSha = & $field $pdfEntry 'sha256'
                 $inputEntries = & $field $record 'inputs'
-                $absentEntries = & $field $record 'absent'
-                if ($null -eq $record) { $problemsFound += 'the record is empty' }
-                elseif ([string]::IsNullOrEmpty("$pdfSha") -or $null -eq $inputEntries -or $null -eq $record.PSObject.Properties['absent'])
+                # The list itself, not the pipeline's unrolling of it (an empty list is valid).
+                $absentEntries = $(if ($null -ne $record -and $record.PSObject.Properties['absent']) { $record.PSObject.Properties['absent'].Value } else { $null })
+                $absentValid = ($absentEntries -is [System.Array]) -and
+                    (@($absentEntries | Where-Object { -not ($_ -is [string] -and $_ -like 'Docs/manual_screenshots/?*') }).Count -eq 0)
+                if ($problemsFound.Count -gt 0) { }
+                elseif ($null -eq $record) { $problemsFound += 'the record is empty' }
+                elseif ([string]::IsNullOrEmpty("$pdfSha") -or $null -eq $inputEntries -or -not $absentValid)
                 {
-                    $problemsFound += 'the record is incomplete (it needs pdf.sha256, inputs and absent)'
+                    $problemsFound += 'the record is incomplete (it needs pdf.sha256, inputs and absent, a list of screenshot paths)'
                 }
                 else
                 {
@@ -727,10 +737,20 @@ if (-not $SkipGeneratedDocs)
                         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $problemsFound += "$name is missing" }
                         elseif ((& $contentHash $path) -ne "$($inputEntries.$name)") { $problemsFound += "$name changed since the PDF was generated" }
                     }
-                    foreach ($name in @($absentEntries))
+                    foreach ($name in $absentEntries)
                     {
-                        if ($null -eq $name) { continue }
-                        if (Test-Path -LiteralPath (Join-Path $RepoRoot ("$name" -replace '/', '\'))) { $problemsFound += "$name appeared since the PDF was generated" }
+                        if (Test-Path -LiteralPath (Join-Path $RepoRoot ($name -replace '/', '\'))) { $problemsFound += "$name appeared since the PDF was generated" }
+                    }
+                    # Whatever the list says: an image in the screenshots folder that the record does not name
+                    # as an input was not in the PDF, and the generator would embed it if FIGURES names it.
+                    $shotsDir = Join-Path $RepoRoot 'Docs\manual_screenshots'
+                    if (Test-Path -LiteralPath $shotsDir -PathType Container)
+                    {
+                        foreach ($image in @(Get-ChildItem -LiteralPath $shotsDir -File | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' }))
+                        {
+                            $imageName = "Docs/manual_screenshots/$($image.Name)"
+                            if ($recorded -notcontains $imageName -and $absentEntries -notcontains $imageName) { $problemsFound += "$imageName is not in the record" }
+                        }
                     }
                 }
             }

@@ -30,6 +30,29 @@ OUT = os.path.join(ROOT, "2026-06-05-SpoutPlugin-User-Manual.pdf")
 SHOTS = os.path.join(ROOT, "manual_screenshots")
 
 
+def _content_sha256(path):
+    """SHA-256 of a file's content; text with CRLF read as LF, so a checkout's line endings do not matter."""
+    import hashlib
+    data = open(path, "rb").read()
+    if not path.lower().endswith((".png", ".jpg", ".jpeg", ".pdf")):
+        data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
+
+
+def _tree_state():
+    """The content of every file the manual can be generated from: this script, the manual source, the descriptor,
+    build.ps1 and whatever is in the screenshots folder. Taken before anything is read and again at the end."""
+    repo = os.path.dirname(ROOT)
+    files = [os.path.abspath(__file__), os.path.join(ROOT, "USER_MANUAL_SOURCE.md"), os.path.join(repo, "SpoutPlugin.uplugin"),
+             os.path.join(repo, "build.ps1")]
+    if os.path.isdir(SHOTS):
+        files += [os.path.join(SHOTS, f) for f in sorted(os.listdir(SHOTS))]
+    return {p: _content_sha256(p) for p in files if os.path.isfile(p)}
+
+
+_STATE_BEFORE = _tree_state()
+
+
 def _read_plugin_version():
     """Reads VersionName from SpoutPlugin.uplugin.
 
@@ -615,14 +638,10 @@ embedded=sum(1 for fid in FIGURES if os.path.exists(os.path.join(SHOTS,FIGURES[f
 print("WROTE",OUT,os.path.getsize(OUT),"bytes |",embedded,"of",len(FIGURES),"screenshots embedded")
 
 
-def _content_sha256(path):
-    """SHA-256 of a file's content; text with CRLF read as LF, so a checkout's line endings do not matter."""
-    import hashlib
-    data = open(path, "rb").read()
-    if not path.lower().endswith((".png", ".jpg", ".jpeg", ".pdf")):
-        data = data.replace(b"\r\n", b"\n")
-    return hashlib.sha256(data).hexdigest()
-
+# Nothing the PDF was made from may have changed while it was made: otherwise the record would name content the PDF
+# does not reflect. The PDF is then left as written, without a record that names it.
+if _tree_state() != _STATE_BEFORE:
+    raise SystemExit("An input of the manual changed while it was generated; no record was written. Run the generator again.")
 
 # The record Scripts/Validate-Documentation.ps1 judges the PDF's freshness by: this PDF's bytes, the content of
 # every file it was generated from (this script, the manual source's date, the descriptor's version, build.ps1's
@@ -634,14 +653,17 @@ def _rel(p):
 _inputs = [os.path.abspath(__file__), os.path.join(ROOT, "USER_MANUAL_SOURCE.md"), os.path.join(_repo, "SpoutPlugin.uplugin"),
            os.path.join(_repo, "build.ps1")]
 _shots = [os.path.join(SHOTS, d[0]) for fid, d in sorted(FIGURES.items())]
-_inputs += [p for p in _shots if os.path.exists(p)]
-# Every hash is taken before the record is opened, and the record replaces the old one in one step, so a failure
-# leaves the previous record (which then no longer names this PDF) rather than an empty one.
+# Looked up without regard to case, as Windows finds the files.
+_before = {os.path.normcase(p): h for p, h in _STATE_BEFORE.items()}
+_inputs += [p for p in _shots if os.path.normcase(p) in _before]
+# The content recorded is the content read before the build (unchanged since, as checked above). Every hash is taken
+# before the record is opened, and the record replaces the old one in one step, so a failure leaves the previous
+# record (which then no longer names this PDF) rather than an empty one.
 _record = json.dumps({"what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them",
                       "basis": "generated",
                       "pdf": {"path": _rel(OUT), "sha256": _content_sha256(OUT)},
-                      "inputs": {_rel(p): _content_sha256(p) for p in _inputs},
-                      "absent": sorted(_rel(p) for p in _shots if not os.path.exists(p))}, indent=1, sort_keys=True) + "\n"
+                      "inputs": {_rel(p): _before[os.path.normcase(p)] for p in _inputs},
+                      "absent": sorted(_rel(p) for p in _shots if os.path.normcase(p) not in _before)}, indent=1, sort_keys=True) + "\n"
 with open(OUT + ".inputs.json.tmp", "w", encoding="utf-8", newline="\n") as _f:
     _f.write(_record)
 os.replace(OUT + ".inputs.json.tmp", OUT + ".inputs.json")
