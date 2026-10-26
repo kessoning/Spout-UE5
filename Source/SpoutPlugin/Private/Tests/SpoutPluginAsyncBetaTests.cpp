@@ -705,7 +705,8 @@ bool FSpoutAsyncBetaFailedSignal::RunTest(const FString&)
 		FSpoutAsyncDevice::Get().ReenableForTest();
 	};
 	AddExpectedMessage(TEXT("asynchronous receive is off for this process"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
-	AddExpectedMessage(TEXT("Async Receive (Beta) stopped (a written-fence signal failed"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	// The pattern is a regular expression: no parentheses.
+	AddExpectedMessage(TEXT("stopped .a written-fence signal failed"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
 	const int32 WorkersBefore = FSpoutAsyncStream::GetLiveStreams();
 	const FName Name = AB::UniqueName(TEXT("FailedSignal"));
 	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
