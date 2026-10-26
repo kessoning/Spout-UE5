@@ -218,6 +218,8 @@ public:
 	FSpoutLogThrottle RegistrationLogThrottle;
 	FSpoutLogThrottle FormatLogThrottle;
 	FSpoutLogThrottle OpenLogThrottle;
+	/** A synchronous send refused because the entry has an asynchronous sender (its own, so it never hides the installer's warnings). */
+	FSpoutLogThrottle RefusedSendLogThrottle;
 
 	// Cached D3D11 wrapper for a D3D12 resource.
 	// - Sender role: wraps the source UE RHI texture (state = COPY_SOURCE).

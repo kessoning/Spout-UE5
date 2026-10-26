@@ -412,7 +412,7 @@ bool FSpoutAsyncSendWaitsForAccess::RunTest(const FString&)
 	if (!AS::RequireSharedSlot(*this)) return false;
 	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
 	// The plugin's access-unavailable wording, which log analysis counts as such (at least once).
-	AddExpectedMessage(TEXT("sender '.*': shared-texture access was unavailable because a receiver still held it"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
+	AddExpectedMessage(TEXT("sender '.*': shared-texture access was unavailable because a receiver still held it.*\\(asynchronous send\\)"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	const FName Name = AS::UniqueName(TEXT("Wait"));
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
 	AS::Upload(Source.Get(), 1);
@@ -1066,26 +1066,30 @@ bool FSpoutAsyncSendOutcomeLogPath::RunTest(const FString&)
 	const FSpoutAsyncSendStats Final = AS::Stats(Name);
 	AS::CloseSender(Name);
 	Log->Set(TEXT(""), ECVF_SetByConsole);         // off: what was queued is written first
-	auto Count = [this, &Name](const FString& File, int32& OutFrames, int32& OutHeaders, int32& OutSummaries)
+	auto Count = [this, &Name](const FString& File, int32& OutFrames, int32& OutHeaders, int32& OutSummaries, int32& OutMeta)
 	{
 		TArray<FString> Lines;
 		FFileHelper::LoadFileToStringArray(Lines, *File);
 		const FString Quoted = FString::Printf(TEXT("\"%s\","), *Name.ToString());
-		OutFrames = OutHeaders = OutSummaries = 0;
+		const FString Meta = FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u "), FPlatformProcess::GetCurrentProcessId());
+		OutFrames = OutHeaders = OutSummaries = OutMeta = 0;
 		for (const FString& L : Lines)
 		{
 			OutHeaders += L.StartsWith(TEXT("kind,stream,"));
 			OutFrames += L.StartsWith(TEXT("F,") + Quoted);
 			OutSummaries += L.StartsWith(TEXT("S,") + Quoted);
+			OutMeta += L.StartsWith(Meta);
 		}
 	};
-	int32 FramesA, HeadersA, SummariesA, FramesB, HeadersB, SummariesB;
-	Count(FileA, FramesA, HeadersA, SummariesA);
-	Count(FileB, FramesB, HeadersB, SummariesB);
+	int32 FramesA, HeadersA, SummariesA, MetaA, FramesB, HeadersB, SummariesB, MetaB;
+	Count(FileA, FramesA, HeadersA, SummariesA, MetaA);
+	Count(FileB, FramesB, HeadersB, SummariesB, MetaB);
 	TestEqual(TEXT("six frames accepted"), Final.Accepted, int64(6));
 	TestEqual(TEXT("every frame has exactly one row across the two files"), int64(FramesA + FramesB), Final.Accepted);
 	TestTrue(TEXT("rows went to the file that was set when they were queued"), FramesA >= 3 && FramesB >= 1);
 	TestEqual(TEXT("each file has its header once"), HeadersA * 10 + HeadersB, 11);
+	// A meta line each time this process starts writing to a file: A twice (it came back to A), B once.
+	TestEqual(TEXT("a meta line marks each start of writing"), MetaA * 10 + MetaB, 21);
 	TestEqual(TEXT("the summary row was written once, after the stream stopped"), SummariesA + SummariesB, 1);
 	return true;
 }

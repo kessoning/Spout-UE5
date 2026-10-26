@@ -150,9 +150,11 @@ namespace
 	 * Mutex, a leaf held only to append one row or to swap the queue out (no other allocation under it); the log's own
 	 * thread appends the queue to the file every 200 ms, as do Flush and the module's shutdown. FileMutex serializes the
 	 * appends and every change of the path: rows queued before a change go to the old file, rows queued after it to the
-	 * new one, and none is dropped while a path is set. A path's file gets the meta line and the column header once,
-	 * when it is empty or new. A stream that started before the log was turned on has no start row: its rows cannot be
-	 * reconciled with the counters.
+	 * new one, and none is dropped while a path is set. Each process writes its own meta line to a path before its first
+	 * rows there; the column header is written only to an empty or new file. A stream that started before the log was
+	 * turned on has no start row, and one that ran while the log was off has no rows for that time: neither can be
+	 * reconciled with the counters. The module's shutdown turns the log off, so a
+	 * restart sets the path again and starts a writer.
 	 */
 	class FSpoutSendOutcomeLog final : public FRunnable
 	{
@@ -215,7 +217,7 @@ namespace
 			WriteLocked(Lines);
 		}
 
-		/** Module shutdown: writes what is queued and stops the writer. */
+		/** Module shutdown: writes what is queued, stops the writer and turns the log off (a restart sets the path again). */
 		void Shutdown()
 		{
 			bExit = true;
@@ -228,7 +230,16 @@ namespace
 				FPlatformProcess::ReturnSynchEventToPool(Wake);
 				Wake = nullptr;
 			}
-			Flush();
+			FScopeLock FileLock(&FileMutex);
+			TArray<FString> Lines;
+			{
+				FScopeLock Lock(&Mutex);
+				Swap(Lines, Pending);
+				bOn = false;
+			}
+			WriteLocked(Lines);
+			Path.Empty();
+			bHeaderWritten = false;
 		}
 
 		void RequestFlush()
@@ -240,7 +251,10 @@ namespace
 		}
 
 	private:
-		/** FileMutex held: appends Lines to Path, with the header first when the file is new or empty. */
+		/**
+		 * FileMutex held: appends Lines to Path. Before this process's first rows in the file, its meta line (pid, clock,
+		 * time), and the column header too when the file is new or empty; both are tried again after a failed write.
+		 */
 		void WriteLocked(const TArray<FString>& Lines)
 		{
 			if (Path.IsEmpty() || Lines.Num() == 0)
@@ -250,12 +264,11 @@ namespace
 			FString Text;
 			if (!bHeaderWritten)
 			{
-				bHeaderWritten = true;
+				Text += FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u qpcFrequency=%.0f openedQpc=%llu openedUtc=%s\n"),
+					FPlatformProcess::GetCurrentProcessId(), 1.0 / FPlatformTime::GetSecondsPerCycle64(), FPlatformTime::Cycles64(),
+					*FDateTime::UtcNow().ToIso8601());
 				if (IFileManager::Get().FileSize(*Path) <= 0)
 				{
-					Text += FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u qpcFrequency=%.0f openedQpc=%llu openedUtc=%s\n"),
-						FPlatformProcess::GetCurrentProcessId(), 1.0 / FPlatformTime::GetSecondsPerCycle64(), FPlatformTime::Cycles64(),
-						*FDateTime::UtcNow().ToIso8601());
 					Text += TEXT("kind,stream,streamObject,set,frame,sendTick,sendQpc,renderFrame,acceptQpc,readyQpc,firstAttemptQpc,acquiredQpc,publishQpc,resolvedQpc,")
 						TEXT("outcome,attempts,failedAttempts,frameEndValue,frameEndFallback,detail\n");
 				}
@@ -265,7 +278,11 @@ namespace
 				Text += L;
 				Text += TEXT("\n");
 			}
-			if (!FFileHelper::SaveStringToFile(Text, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append))
+			if (FFileHelper::SaveStringToFile(Text, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append))
+			{
+				bHeaderWritten = true;
+			}
+			else
 			{
 				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout: the asynchronous send outcome log could not be written to %s; %d rows are lost (the log is then incomplete and is not evidence)."),
 					*Path, Lines.Num());
