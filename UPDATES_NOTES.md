@@ -81,6 +81,14 @@ used for a stream, for example because the other app sends a picture format it d
 the receiver keeps working the normal way, and the log and the stream status tell you which mode is
 really running and why.
 
+Later in the month I fixed a safety gap in that Beta mode. When its background copy took unusually
+long, or the graphics card failed to confirm it, the receiver let go of the other app's picture
+before it was sure it had finished reading it. Nothing broken ever reached your screen, because those
+copies were thrown away, but the other app could start drawing into a picture that was still being
+read. Now the receiver keeps hold until the copy has really finished, just like the normal receive
+mode always has. The trade-off: if the graphics card gets stuck, closing that receiver or stopping
+the game waits for it too, and the log says so every few seconds while it waits.
+
 ---
 
 ## SEPTEMBER 2026 UPDATES

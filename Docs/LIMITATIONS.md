@@ -168,8 +168,18 @@ of this release.
   better frame p99, at most 1 ms / 1.5 ms worse image age) were not met. Measure it in your own
   project before relying on it.
 - Same safety rules as the synchronous receive: the sender's texture is only read under its access
-  lock, every GPU wait is bounded, a copy that did not finish is never delivered, and a closed
-  receiver leaves no worker thread behind.
+  lock, and the lock is given back only once the worker's copy is proven finished on the GPU (or
+  the worker's device was removed), however long that takes. A copy that finished later than
+  100 ms is discarded, never delivered, and repeated late copies stop the asynchronous path for that
+  stream. A copy whose completion signal fails is proven by a GPU query instead, and then turns the
+  asynchronous path off for the process (the stream continues synchronously, as before).
+- What that means for stalls and shutdown (changed in late October 2026; before, the lock was given
+  back after 100 ms, or at once after a failed signal, while the copy might still be reading the
+  sender's texture): a GPU that stalls without being removed keeps the sender waiting for the lock,
+  as the synchronous receive does. Close Receiver, Close All Streams and engine shutdown wait for a
+  copy in progress before they return, and the log warns every 5 seconds while a wait goes on. The
+  worker's GPU objects are released only once their work is proven finished. A closed receiver
+  leaves no worker thread behind.
 - It runs on either [interop path](#interop-path). Its tests and the measurement above used the
   default shared-slot path; the D3D11-on-12 path was exercised only by targeted checks.
 

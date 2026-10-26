@@ -80,6 +80,19 @@ from the August preparation.
 - Performance is a trade-off, not an improvement: one measured pair under GPU load on one laptop
   showed a much shorter render-thread receive call and complete delivery, but a worse frame-time
   p99 and an older image. See Docs/LIMITATIONS.md.
+- Correction (late October 2026): the worker no longer gives the sender's access lock back before
+  its copy is proven finished. Before, it released the lock after 100 ms without proof, and at once
+  after a failed fence signal, while the native copy might still read the sender's texture. Now the
+  lock is held until the copy's fence is reached, the event query issued after a failed signal
+  reports done, or the worker's device is removed; the 100 ms bound only classifies a copy as late
+  (discarded, never published, and counted toward the stream's stop after repeated late copies).
+  A failed signal still ends the stream and turns the asynchronous path off for the process, once
+  the query has proven the copy. Destroying a stream joins its worker, which may wait for a copy in
+  progress (a warning every 5 s), and hands its objects to the retirement list with the fence values
+  and query that prove their work, instead of releasing them directly. Close Receiver, Close All
+  Streams and shutdown can therefore wait as long as a stalled GPU copy, as on the synchronous path.
+  New automation tests cover a late copy, a failed signal, and a close and a session stop with a
+  copy outstanding.
 
 #### Experimental receive settings (October 2026, off by default, not yet qualified)
 - Added four experimental console variables for the receive path: `r.Spout.FrameCountRecheck`,
