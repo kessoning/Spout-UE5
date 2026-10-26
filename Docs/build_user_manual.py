@@ -624,15 +624,25 @@ def _content_sha256(path):
     return hashlib.sha256(data).hexdigest()
 
 
-# The record Scripts/Validate-Documentation.ps1 judges the PDF's freshness by: this PDF's bytes and the content of
-# every input it was generated from.
+# The record Scripts/Validate-Documentation.ps1 judges the PDF's freshness by: this PDF's bytes, the content of
+# every file it was generated from (this script, the manual source's date, the descriptor's version, build.ps1's
+# engine list, the screenshots it embedded), and the screenshots it looked for and did not find: one added later
+# would be embedded, so its appearance makes the PDF stale too.
 _repo = os.path.dirname(ROOT)
-_inputs = [os.path.abspath(__file__), os.path.join(ROOT, "USER_MANUAL_SOURCE.md"), os.path.join(_repo, "SpoutPlugin.uplugin")]
-_inputs += [os.path.join(SHOTS, d[0]) for fid, d in sorted(FIGURES.items()) if os.path.exists(os.path.join(SHOTS, d[0]))]
-with open(OUT + ".inputs.json", "w", encoding="utf-8", newline="\n") as _f:
-    json.dump({"what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them",
-               "basis": "generated",
-               "pdf": {"path": os.path.relpath(OUT, _repo).replace(os.sep, "/"), "sha256": _content_sha256(OUT)},
-               "inputs": {os.path.relpath(p, _repo).replace(os.sep, "/"): _content_sha256(p) for p in _inputs}}, _f, indent=1, sort_keys=True)
-    _f.write("\n")
+def _rel(p):
+    return os.path.relpath(p, _repo).replace(os.sep, "/")
+_inputs = [os.path.abspath(__file__), os.path.join(ROOT, "USER_MANUAL_SOURCE.md"), os.path.join(_repo, "SpoutPlugin.uplugin"),
+           os.path.join(_repo, "build.ps1")]
+_shots = [os.path.join(SHOTS, d[0]) for fid, d in sorted(FIGURES.items())]
+_inputs += [p for p in _shots if os.path.exists(p)]
+# Every hash is taken before the record is opened, and the record replaces the old one in one step, so a failure
+# leaves the previous record (which then no longer names this PDF) rather than an empty one.
+_record = json.dumps({"what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them",
+                      "basis": "generated",
+                      "pdf": {"path": _rel(OUT), "sha256": _content_sha256(OUT)},
+                      "inputs": {_rel(p): _content_sha256(p) for p in _inputs},
+                      "absent": sorted(_rel(p) for p in _shots if not os.path.exists(p))}, indent=1, sort_keys=True) + "\n"
+with open(OUT + ".inputs.json.tmp", "w", encoding="utf-8", newline="\n") as _f:
+    _f.write(_record)
+os.replace(OUT + ".inputs.json.tmp", OUT + ".inputs.json")
 print("WROTE", OUT + ".inputs.json")

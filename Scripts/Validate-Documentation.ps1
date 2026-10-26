@@ -664,14 +664,16 @@ if (-not $SkipGeneratedDocs)
     {
         # A rendered PDF cannot be diffed. Its freshness is judged by content: Docs/build_user_manual.py
         # writes, beside the PDF, the SHA-256 of the PDF it wrote and of every input it read (the
-        # generator, the manual source, the descriptor and the screenshots it embedded; text inputs with
-        # CRLF read as LF, so a checkout's line endings do not matter). The PDF is fresh when that record
-        # names this PDF's bytes and every recorded input still has its recorded content. Modification
-        # times and commit times are not used: a checkout writes files in path order, and an equal or
-        # later commit time says nothing about which file was generated from which. Without the record
-        # (an older tree) the modification times decide.
+        # generator, the manual source, the descriptor, build.ps1 and the screenshots it embedded; text
+        # inputs with CRLF read as LF, so a checkout's line endings do not matter), and the screenshots it
+        # looked for and did not find. The PDF is fresh when that record names this PDF's bytes, every
+        # recorded input still has its recorded content and no absent screenshot has appeared. A record
+        # that is empty, not JSON or incomplete fails the check. Modification times and commit times are
+        # not used: a checkout writes files in path order, and an equal or later commit time says nothing
+        # about which file was generated from which. Without the record (an older tree) the modification
+        # times decide.
         $pdfWrite = (Get-Item -LiteralPath $pdfPath).LastWriteTimeUtc
-        $inputs = @($generatorPath, $manualSourcePath, $descriptorPath) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+        $inputs = @($generatorPath, $manualSourcePath, $descriptorPath, $buildPs1Path) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
         $newestInput = ($inputs | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } | Sort-Object -Descending | Select-Object -First 1)
         $freshnessBasis = 'modification time'
         $expected = "newer than $newestInput"
@@ -694,28 +696,54 @@ if (-not $SkipGeneratedDocs)
                 try { return (-join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })) } finally { $sha.Dispose() }
             }
             $problemsFound = @()
-            try { $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json } catch { $record = $null; $problemsFound += 'the record is not valid JSON' }
-            if ($record)
+            $inputCount = 0
+            try
             {
-                if ((& $contentHash $pdfPath) -ne "$($record.pdf.sha256)") { $problemsFound += 'the PDF is not the one the record names' }
-                $recorded = @($record.inputs.PSObject.Properties | ForEach-Object Name)
-                foreach ($required in 'Docs/build_user_manual.py', 'Docs/USER_MANUAL_SOURCE.md', 'SpoutPlugin.uplugin')
+                $recordText = [IO.File]::ReadAllText($recordPath)
+                $record = $null
+                if (-not [string]::IsNullOrWhiteSpace($recordText)) { $record = $recordText | ConvertFrom-Json }
+                $field = { param($Object, [string] $Name) if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { $Object.$Name } else { $null } }
+                $pdfEntry = & $field $record 'pdf'
+                $pdfSha = & $field $pdfEntry 'sha256'
+                $inputEntries = & $field $record 'inputs'
+                $absentEntries = & $field $record 'absent'
+                if ($null -eq $record) { $problemsFound += 'the record is empty' }
+                elseif ([string]::IsNullOrEmpty("$pdfSha") -or $null -eq $inputEntries -or $null -eq $record.PSObject.Properties['absent'])
                 {
-                    if ($recorded -notcontains $required) { $problemsFound += "the record does not name $required" }
+                    $problemsFound += 'the record is incomplete (it needs pdf.sha256, inputs and absent)'
                 }
-                foreach ($name in $recorded)
+                else
                 {
-                    $path = Join-Path $RepoRoot ($name -replace '/', '\')
-                    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $problemsFound += "$name is missing" }
-                    elseif ((& $contentHash $path) -ne "$($record.inputs.$name)") { $problemsFound += "$name changed since the PDF was generated" }
+                    if ((& $contentHash $pdfPath) -ne "$pdfSha") { $problemsFound += 'the PDF is not the one the record names' }
+                    $recorded = @($inputEntries.PSObject.Properties | ForEach-Object Name)
+                    $inputCount = $recorded.Count
+                    foreach ($required in 'Docs/build_user_manual.py', 'Docs/USER_MANUAL_SOURCE.md', 'SpoutPlugin.uplugin', 'build.ps1')
+                    {
+                        if ($recorded -notcontains $required) { $problemsFound += "the record does not name $required" }
+                    }
+                    foreach ($name in $recorded)
+                    {
+                        $path = Join-Path $RepoRoot ($name -replace '/', '\')
+                        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $problemsFound += "$name is missing" }
+                        elseif ((& $contentHash $path) -ne "$($inputEntries.$name)") { $problemsFound += "$name changed since the PDF was generated" }
+                    }
+                    foreach ($name in @($absentEntries))
+                    {
+                        if ($null -eq $name) { continue }
+                        if (Test-Path -LiteralPath (Join-Path $RepoRoot ("$name" -replace '/', '\'))) { $problemsFound += "$name appeared since the PDF was generated" }
+                    }
                 }
             }
+            catch
+            {
+                $problemsFound += "the record could not be read: $($_.Exception.Message)"
+            }
             $fresh = ($problemsFound.Count -eq 0)
-            $expected = 'the PDF and every input recorded in Docs/2026-06-05-SpoutPlugin-User-Manual.pdf.inputs.json unchanged'
-            $actual = $(if ($fresh) { "unchanged ($(@($record.inputs.PSObject.Properties).Count) inputs)" } else { $problemsFound -join '; ' })
+            $expected = 'the PDF, every input recorded in Docs/2026-06-05-SpoutPlugin-User-Manual.pdf.inputs.json and every screenshot it lists as absent unchanged'
+            $actual = $(if ($fresh) { "unchanged ($inputCount inputs)" } else { $problemsFound -join '; ' })
         }
         Add-Check -Name 'generatedDocs.pdfFreshness' -Passed $fresh `
-            -Detail "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf matches its inputs, by $freshnessBasis (regenerate with: python Docs/build_user_manual.py)" `
+            -Detail "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf checked against its inputs, by $freshnessBasis (regenerate with: python Docs/build_user_manual.py)" `
             -Expected $expected -Actual $actual
 
         $generatedDocs += [ordered] @{ Path = 'Docs/2026-06-05-SpoutPlugin-User-Manual.pdf'; Kind = 'pdf'; Fresh = $fresh }

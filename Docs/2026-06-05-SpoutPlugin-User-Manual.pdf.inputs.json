@@ -2,7 +2,7 @@
  "basis": "recorded for the committed PDF: the manual was regenerated from these inputs and its text compared page by page with the committed PDF (pypdf 6.19.0): identical on all 17 pages; the committed PDF's bytes are kept",
  "inputs": {
   "Docs/USER_MANUAL_SOURCE.md": "9c349df1d7b39a21c1e41ebcdf1623b10c69ef49f861129d8096d73f9e7bd845",
-  "Docs/build_user_manual.py": "bd3dc297edea9953c2b65ca5b55e7b47d8c593b522a99ba69328a460c4993ee6",
+  "Docs/build_user_manual.py": "93daeb875db62532d82ea813d8501bbb35b76ba54cb2dcf9aa08760b54c3fd19",
   "SpoutPlugin.uplugin": "2423d19cbdb4c9c43cca0876b5c574846ce773f2caf0db9f2a79667adfcca018"
  },
  "pdf": {
