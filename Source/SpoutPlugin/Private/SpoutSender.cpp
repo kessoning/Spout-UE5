@@ -406,7 +406,8 @@ namespace
 	 * over (accepted or counted as not accepted) or its token is no longer current (nothing queued, as the synchronous
 	 * path does).
 	 */
-	bool SendThroughAsyncStream(const FSpoutStreamToken& Token, const FTextureRHIRef& SourceRHI, FRHICommandListImmediate& RHICmdList, DXGI_FORMAT SharedFormat)
+	bool SendThroughAsyncStream(const FSpoutStreamToken& Token, const FTextureRHIRef& SourceRHI, FRHICommandListImmediate& RHICmdList, DXGI_FORMAT SharedFormat,
+		const FSpoutSendOrigin& Origin)
 	{
 		TSharedPtr<FSpoutSharedSender> Sender;
 		if (!FSpoutSession::Get().ExecuteIfCurrent(Token, [&]() { Sender = FSpoutSenderRegistry::Get().FindOrAdd(Token.Name, ESpoutType::Sender); }) || !Sender)
@@ -444,7 +445,7 @@ namespace
 		Identity.Height = static_cast<uint32>(SourceRHI->GetDesc().Extent.Y);
 		Identity.Format = SharedFormat;
 		Identity.PixelFormat = SourceRHI->GetFormat();
-		Stream->Send(Token, RHICmdList, SourceRHI, SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::SenderRenderTarget), Identity);
+		Stream->Send(Token, RHICmdList, SourceRHI, SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::SenderRenderTarget), Identity, Origin);
 		// If a close removed the entry meanwhile, this is its last reference: its destructor stops the stream here,
 		// which resolves the frame just accepted (its fill is already dispatched) before the worker exits.
 		return true;
@@ -457,7 +458,8 @@ namespace
 		FRHICommandListImmediate& RHICmdList,
 		FSpoutWrapCache* SourceWrapCache,
 		TUniquePtr<FSpoutSlotSend>* SourceSlot,
-		FSpoutSlotSend::FIdentity* SourceSlotRefusedFor)
+		FSpoutSlotSend::FIdentity* SourceSlotRefusedFor,
+		const FSpoutSendOrigin& Origin = FSpoutSendOrigin())
 	{
 		if (Tokens.Num() == 0 || !SourceRHI.IsValid())
 		{
@@ -566,7 +568,7 @@ namespace
 		// asynchronous sender alive, nothing of this runs.
 		if (!bIsViewport && SpoutInterop::IsSharedSlot() && LiveTokens.Num() == 1
 			&& (SpoutLimits::DevAsyncSend() || FSpoutAsyncSendStream::GetLiveStreams() > 0)
-			&& SendThroughAsyncStream(LiveTokens[0], SourceRHI, RHICmdList, Format))
+			&& SendThroughAsyncStream(LiveTokens[0], SourceRHI, RHICmdList, Format, Origin))
 		{
 			return;
 		}
@@ -1537,8 +1539,12 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 	// it so the Send/Close-in-one-frame case stays correct: the command checks the token before it
 	// creates a registry entry or registers the name.
 	FSpoutSession::Get().MarkQueued(Token);
+	// Where this send came from, for the asynchronous sender's development outcome log: this game frame and now.
+	FSpoutSendOrigin Origin;
+	Origin.Tick = static_cast<int64>(GFrameCounter);
+	Origin.Qpc = FPlatformTime::Cycles64();
 	ENQUEUE_RENDER_COMMAND(SpoutSenderCmd)(
-		[Token, SendSource, QueuedWork](FRHICommandListImmediate& RHICmdList)
+		[Token, SendSource, QueuedWork, Origin](FRHICommandListImmediate& RHICmdList)
 		{
 			if (!FSpoutSession::Get().IsCurrent(Token) || !SendSource.Resource)
 			{
@@ -1554,7 +1560,8 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 				RHICmdList,
 				nullptr,
 				nullptr,
-				nullptr
+				nullptr,
+				Origin
 			);
 		});
 

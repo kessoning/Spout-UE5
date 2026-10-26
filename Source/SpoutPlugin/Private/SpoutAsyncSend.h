@@ -44,6 +44,12 @@
  * Memory: each slot set reserves two frames against r.Spout.MaxRetainedMiB (the shared texture keeps its own two);
  * a set given up when its identity changes keeps its reservation until FSpoutGpuRetirement releases it. A refused
  * reservation makes that send Not accepted (budget) and is tried again on the next send.
+ *
+ * Development outcome log (r.Spout.Dev.AsyncSend.OutcomeLog <path>, empty by default): one CSV row per accepted frame
+ * when it is resolved (stream, stream object, slot set, frame, the originating send's game frame and QPC, the render
+ * frame, the QPC of acceptance, readiness, first attempt, access and resolution, outcome, attempts), one per send that
+ * was not accepted, one when a stream starts and one summary when it stops, so that the rows can be reconciled with the
+ * counters. Written by its own thread; no file work on the render thread or a worker.
  */
 #pragma once
 
@@ -71,6 +77,13 @@ class FRHICommandListImmediate;
 class FSpoutSharedSender;
 class FSpoutResourceReservation;
 class FEvent;
+
+/** Where a send came from, for the development outcome log: the game frame and QPC of its SpoutSender call. */
+struct FSpoutSendOrigin
+{
+	int64 Tick = -1;   // GFrameCounter on the game thread at the call; -1 when unknown
+	uint64 Qpc = 0;    // FPlatformTime::Cycles64() at the call (the QPC on Windows); 0 when unknown
+};
 
 /** A stream's counters, read on any thread (a snapshot under the state lock). Internal: no public fields. */
 struct FSpoutAsyncSendStats
@@ -147,7 +160,8 @@ public:
 	 * RHICmdList, dispatches them and hands the frame to the worker, or queues nothing (Not accepted, counted). Never
 	 * waits. Bracket gives the source's states, as for the synchronous send.
 	 */
-	void Send(const FSpoutStreamToken& Token, FRHICommandListImmediate& RHICmdList, FRHITexture* Source, const SpoutRHIState::FCopyBracket& Bracket, const FIdentity& Identity);
+	void Send(const FSpoutStreamToken& Token, FRHICommandListImmediate& RHICmdList, FRHITexture* Source, const SpoutRHIState::FCopyBracket& Bracket, const FIdentity& Identity,
+		const FSpoutSendOrigin& Origin = FSpoutSendOrigin());
 
 	/**
 	 * Any thread but the worker, once no render command can call Send any more (the entry's last reference is being
@@ -174,10 +188,33 @@ public:
 	/** Module startup and shutdown (game thread). */
 	static void RegisterHooks();
 	static void UnregisterHooks();
+	/** Writes the outcome log's queued rows now (tests). */
+	static void FlushOutcomeLog();
 
 private:
 	struct FSet;
 	struct FWork;
+
+	/** A frame's timestamps for the outcome log (state lock): one per unresolved frame, in acceptance order. */
+	struct FFrameTrace
+	{
+		uint64 Id = 0;
+		FSpoutSendOrigin Origin;
+		uint64 RenderFrame = 0;
+		uint64 AcceptQpc = 0;
+		uint64 ReadyQpc = 0;
+		uint64 FirstAttemptQpc = 0;
+		uint64 AcquiredQpc = 0;
+		uint64 PublishQpc = 0;
+		int32 Attempts = 0;
+		bool bFrameEndFallback = false;
+	};
+	/** State lock: the trace of frame Id, or null. */
+	FFrameTrace* FindTraceLocked(uint64 Id);
+	/** State lock: resolves the oldest frame (Ring.Resolve) and writes its outcome row. */
+	bool ResolveLocked(uint64 Id, SpoutSendRing::EOutcome Outcome);
+	/** State lock: counts a send that was not accepted and writes its row. */
+	void NotAcceptedLocked(SpoutSendRing::ENotAccepted Why, const FSpoutSendOrigin& Origin);
 
 	FSpoutAsyncSendStream(FSpoutSharedSender& InEntry, FInstaller InInstaller);
 	bool Initialize(FString& OutWhy);
@@ -203,9 +240,14 @@ private:
 	FSpoutSharedSender& Entry;
 	const FInstaller Installer;
 	const FString What;
+	/** Never reused in the process: tells stream objects of one name apart in the outcome log. */
+	const uint64 StreamObject;
+	/** The stream's name, quoted for the outcome log's rows. */
+	const FString LogName;
 
 	mutable FCriticalSection StateMutex;
 	SpoutSendRing::FRing Ring{SlotsPerSet};
+	TArray<FFrameTrace> Traces;
 	TArray<TSharedPtr<FSet, ESPMode::ThreadSafe>> Sets;
 	FSpoutStreamToken Token;
 	bool bStopRequested = false;

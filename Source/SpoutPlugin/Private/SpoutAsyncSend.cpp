@@ -21,8 +21,12 @@
 #include "SpoutSenderRegistry.h"
 #include "SpoutSharedSlot.h"
 #include "HAL/Event.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
+#include "Misc/DateTime.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
 #include "ID3D12DynamicRHI.h"
 #include "Misc/CoreDelegates.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -111,6 +115,191 @@ namespace
 #endif
 
 	double Ms(double Seconds) { return Seconds * 1000.0; }
+
+	std::atomic<uint64> GNextStreamObject{1};
+
+	const TCHAR* OutcomeName(EOutcome O)
+	{
+		switch (O)
+		{
+		case EOutcome::Published: return TEXT("Published");
+		case EOutcome::Superseded: return TEXT("Superseded");
+		case EOutcome::AccessAbandoned: return TEXT("AccessAbandoned");
+		case EOutcome::FailedFill: return TEXT("FailedFill");
+		case EOutcome::FailedInstall: return TEXT("FailedInstall");
+		case EOutcome::FailedDrain: return TEXT("FailedDrain");
+		case EOutcome::FailedRemoved: return TEXT("FailedRemoved");
+		default: return TEXT("None");
+		}
+	}
+
+	const TCHAR* NotAcceptedName(ENotAccepted W)
+	{
+		switch (W)
+		{
+		case ENotAccepted::NoSlot: return TEXT("NoSlot");
+		case ENotAccepted::Stopping: return TEXT("Stopping");
+		case ENotAccepted::Budget: return TEXT("Budget");
+		case ENotAccepted::Unpublishable: return TEXT("Unpublishable");
+		default: return TEXT("Unknown");
+		}
+	}
+
+	/**
+	 * The development outcome log (r.Spout.Dev.AsyncSend.OutcomeLog). Rows are queued under a leaf lock by the render
+	 * thread and the workers and appended to the file by this object's own thread every 200 ms, and on Flush; nothing
+	 * else touches the file. A new path starts a new file with a meta line and the column header; an empty path stops
+	 * the log after writing what was queued.
+	 */
+	class FSpoutSendOutcomeLog final : public FRunnable
+	{
+	public:
+		static FSpoutSendOutcomeLog& Get()
+		{
+			static FSpoutSendOutcomeLog Instance;
+			return Instance;
+		}
+
+		bool IsOn() const { return bOn.load(); }
+
+		/** Game thread (the variable's change, module startup). */
+		void SetPath(const FString& NewPath)
+		{
+			Flush();
+			{
+				FScopeLock Lock(&Mutex);
+				if (NewPath == Path)
+				{
+					return;
+				}
+				Path = NewPath;
+				bHeaderWritten = false;
+				bOn = !Path.IsEmpty();
+			}
+			if (bOn.load() && !Thread)
+			{
+				Wake = FPlatformProcess::GetSynchEventFromPool(false);
+				Thread = FRunnableThread::Create(this, TEXT("SpoutAsyncSendOutcomeLog"), 0, TPri_BelowNormal);
+			}
+			if (bOn.load())
+			{
+				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: asynchronous send outcome log (development): %s"), *NewPath);
+			}
+		}
+
+		void Push(FString&& Line)
+		{
+			FScopeLock Lock(&Mutex);
+			if (!Path.IsEmpty())
+			{
+				Pending.Add(MoveTemp(Line));
+			}
+		}
+
+		/** Writes what is queued now, on the calling thread (serialized with the writer). */
+		void Flush()
+		{
+			FScopeLock FileLock(&FileMutex);
+			TArray<FString> Lines;
+			FString Target;
+			bool bHeader = false;
+			{
+				FScopeLock Lock(&Mutex);
+				Lines = MoveTemp(Pending);
+				Pending.Reset();
+				Target = Path;
+				bHeader = !bHeaderWritten && !Target.IsEmpty();
+				bHeaderWritten = bHeaderWritten || bHeader;
+			}
+			if (Target.IsEmpty() || (Lines.Num() == 0 && !bHeader))
+			{
+				return;
+			}
+			FString Text;
+			if (bHeader)
+			{
+				Text += FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u qpcFrequency=%.0f openedQpc=%llu openedUtc=%s\n"),
+					FPlatformProcess::GetCurrentProcessId(), 1.0 / FPlatformTime::GetSecondsPerCycle64(), FPlatformTime::Cycles64(),
+					*FDateTime::UtcNow().ToIso8601());
+				Text += TEXT("kind,stream,streamObject,set,frame,sendTick,sendQpc,renderFrame,acceptQpc,readyQpc,firstAttemptQpc,acquiredQpc,publishQpc,resolvedQpc,")
+					TEXT("outcome,attempts,failedAttempts,frameEndValue,frameEndFallback,detail\n");
+			}
+			for (const FString& L : Lines)
+			{
+				Text += L;
+				Text += TEXT("\n");
+			}
+			if (!FFileHelper::SaveStringToFile(Text, *Target, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append))
+			{
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout: the asynchronous send outcome log could not be written to %s; %d rows are lost (the log is then incomplete and is not evidence)."),
+					*Target, Lines.Num());
+			}
+		}
+
+		/** Module shutdown: writes what is queued and stops the writer. */
+		void Shutdown()
+		{
+			bExit = true;
+			if (Thread)
+			{
+				Wake->Trigger();
+				Thread->WaitForCompletion();
+				delete Thread;
+				Thread = nullptr;
+				FPlatformProcess::ReturnSynchEventToPool(Wake);
+				Wake = nullptr;
+			}
+			Flush();
+		}
+
+		void RequestFlush()
+		{
+			if (Wake)
+			{
+				Wake->Trigger();
+			}
+		}
+
+	private:
+		virtual uint32 Run() override
+		{
+			while (!bExit.load())
+			{
+				Wake->Wait(200);
+				Flush();
+			}
+			return 0;
+		}
+
+		FCriticalSection Mutex;       // leaf: Pending, Path
+		FCriticalSection FileMutex;   // serializes the file appends
+		TArray<FString> Pending;
+		FString Path;
+		bool bHeaderWritten = false;
+		std::atomic<bool> bOn{false};
+		std::atomic<bool> bExit{false};
+		FRunnableThread* Thread = nullptr;
+		FEvent* Wake = nullptr;
+	};
+
+	void OnOutcomeLogChanged(IConsoleVariable* Variable)
+	{
+		if (IsInGameThread())
+		{
+			FSpoutSendOutcomeLog::Get().SetPath(Variable ? Variable->GetString() : FString());
+		}
+	}
+
+	TAutoConsoleVariable<FString> GSpoutDevAsyncSendOutcomeLog(TEXT("r.Spout.Dev.AsyncSend.OutcomeLog"), TEXT(""),
+		TEXT("Development switch, not a supported setting. A file path: the asynchronous sender appends one CSV row per frame (and per send it did not accept, ")
+		TEXT("per stream start and stop) to it. Empty (default): off."),
+		FConsoleVariableDelegate::CreateStatic(&OnOutcomeLogChanged), ECVF_Default);
+
+	/** Quoted for a CSV field. */
+	FString Quoted(const FString& Text)
+	{
+		return TEXT("\"") + Text.Replace(TEXT("\""), TEXT("\"\"")) + TEXT("\"");
+	}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -121,9 +310,62 @@ FSpoutAsyncSendStream::FSpoutAsyncSendStream(FSpoutSharedSender& InEntry, FInsta
 	: Entry(InEntry)
 	, Installer(MoveTemp(InInstaller))
 	, What(FString::Printf(TEXT("sender '%s'"), *InEntry.Name.ToString()))
+	, StreamObject(GNextStreamObject.fetch_add(1))
+	, LogName(Quoted(InEntry.Name.ToString()))
 {
 	GLiveSendStreams.fetch_add(1);
 	CreatedAt = FPlatformTime::Seconds();
+	if (FSpoutSendOutcomeLog::Get().IsOn())
+	{
+		FSpoutSendOutcomeLog::Get().Push(FString::Printf(TEXT("C,%s,%llu,0,0,-1,0,%llu,%llu,0,0,0,0,0,Created,0,0,0,0,"),
+			*LogName, StreamObject, static_cast<uint64>(GFrameCounterRenderThread), FPlatformTime::Cycles64()));
+	}
+}
+
+FSpoutAsyncSendStream::FFrameTrace* FSpoutAsyncSendStream::FindTraceLocked(uint64 Id)
+{
+	for (FFrameTrace& T : Traces)
+	{
+		if (T.Id == Id)
+		{
+			return &T;
+		}
+	}
+	return nullptr;
+}
+
+bool FSpoutAsyncSendStream::ResolveLocked(uint64 Id, EOutcome Outcome)
+{
+	const FRingFrame* F = Ring.Find(Id);
+	const FRingFrame Frame = F ? *F : FRingFrame();
+	if (!Ring.Resolve(Id, Outcome))
+	{
+		return false;
+	}
+	const uint64 ResolvedQpc = FPlatformTime::Cycles64();
+	const int32 Index = Traces.IndexOfByPredicate([Id](const FFrameTrace& T) { return T.Id == Id; });
+	if (Index != INDEX_NONE)
+	{
+		const FFrameTrace& T = Traces[Index];
+		if (FSpoutSendOutcomeLog::Get().IsOn())
+		{
+			FSpoutSendOutcomeLog::Get().Push(FString::Printf(TEXT("F,%s,%llu,%llu,%llu,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s,%d,%d,%llu,%d,"),
+				*LogName, StreamObject, Frame.SetGeneration, Id, T.Origin.Tick, T.Origin.Qpc, T.RenderFrame, T.AcceptQpc, T.ReadyQpc, T.FirstAttemptQpc,
+				T.AcquiredQpc, T.PublishQpc, ResolvedQpc, OutcomeName(Outcome), T.Attempts, Frame.FailedAttempts, Frame.FrameEndValue, T.bFrameEndFallback ? 1 : 0));
+		}
+		Traces.RemoveAt(Index);
+	}
+	return true;
+}
+
+void FSpoutAsyncSendStream::NotAcceptedLocked(ENotAccepted Why, const FSpoutSendOrigin& Origin)
+{
+	Ring.NotAccepted(Why);
+	if (FSpoutSendOutcomeLog::Get().IsOn())
+	{
+		FSpoutSendOutcomeLog::Get().Push(FString::Printf(TEXT("N,%s,%llu,0,0,%lld,%llu,%llu,%llu,0,0,0,0,0,NotAccepted%s,0,0,0,0,"),
+			*LogName, StreamObject, Origin.Tick, Origin.Qpc, static_cast<uint64>(GFrameCounterRenderThread), FPlatformTime::Cycles64(), NotAcceptedName(Why)));
+	}
 }
 
 int32 FSpoutAsyncSendStream::GetLiveStreams()
@@ -247,7 +489,8 @@ TSharedPtr<FSpoutAsyncSendStream::FSet, ESPMode::ThreadSafe> FSpoutAsyncSendStre
 	return Set;
 }
 
-void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandListImmediate& RHICmdList, FRHITexture* Source, const SpoutRHIState::FCopyBracket& Bracket, const FIdentity& Identity)
+void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandListImmediate& RHICmdList, FRHITexture* Source, const SpoutRHIState::FCopyBracket& Bracket, const FIdentity& Identity,
+	const FSpoutSendOrigin& Origin)
 {
 	check(IsInRenderingThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncSendAccept);
@@ -277,7 +520,7 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 		else if (bFailed.load()) Refusal = ENotAccepted::Unpublishable;
 		else if (Current && Current->bFailed) Refusal = ENotAccepted::Unpublishable;
 		else if (Now < NextInstallProbe) Refusal = ENotAccepted::Unpublishable;
-		if (Refusal != ENotAccepted::Count) Ring.NotAccepted(Refusal);
+		if (Refusal != ENotAccepted::Count) NotAcceptedLocked(Refusal, Origin);
 	}
 	RetireSets(Unused);
 	if (Refusal != ENotAccepted::Count)
@@ -290,7 +533,7 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 		if (RefusedFor == Identity)
 		{
 			FScopeLock Lock(&StateMutex);
-			Ring.NotAccepted(ENotAccepted::Unpublishable);
+			NotAcceptedLocked(ENotAccepted::Unpublishable, Origin);
 			return;
 		}
 		FString Why;
@@ -306,7 +549,7 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 			}
 			FScopeLock Lock(&StateMutex);
 			// A budget refusal is counted and tried again on the next send, never latched.
-			Ring.NotAccepted(bBudget ? ENotAccepted::Budget : ENotAccepted::Unpublishable);
+			NotAcceptedLocked(bBudget ? ENotAccepted::Budget : ENotAccepted::Unpublishable, Origin);
 			return;
 		}
 		RefusedFor = FIdentity();
@@ -324,7 +567,7 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 		if (Slot < 0)
 		{
 			// Every slot holds a frame that is not resolved yet: the render thread does not wait.
-			Ring.NotAccepted(Why);
+			NotAcceptedLocked(Why, Origin);
 			return;
 		}
 	}
@@ -356,6 +599,14 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 		Current->Outstanding.QueueSignalQueued(FillValue);
 		const uint64 Id = Ring.Accept(Slot, FillValue, FrameEndValue, Now);
 		ensureMsgf(Id != 0, TEXT("Spout %s: a fill was queued into a slot the asynchronous send's bookkeeping refused"), *What);
+		if (Id != 0)
+		{
+			FFrameTrace& T = Traces.AddDefaulted_GetRef();
+			T.Id = Id;
+			T.Origin = Origin;
+			T.RenderFrame = GFrameCounterRenderThread;
+			T.AcceptQpc = FPlatformTime::Cycles64();
+		}
 	}
 	// Hand the fill to the RHI thread now, without waiting for it: the worker waits for the fence on the CPU, and a
 	// close on this thread right after this command must find the fill on its way to the GPU.
@@ -398,7 +649,7 @@ bool FSpoutAsyncSendStream::Step()
 		FScopeLock Lock(&StateMutex);
 		while (const FRingFrame* F = Ring.Oldest())
 		{
-			if (!Ring.Resolve(F->Id, static_cast<EOutcome>(FailedOutcome.load())))
+			if (!ResolveLocked(F->Id, static_cast<EOutcome>(FailedOutcome.load())))
 			{
 				break;
 			}
@@ -508,6 +759,10 @@ void FSpoutAsyncSendStream::WaitForFill(const FWork& W)
 			{
 				FScopeLock Lock(&StateMutex);
 				++FrameEndFallbacks;
+				if (FFrameTrace* T = FindTraceLocked(W.Frame.Id))
+				{
+					T->bFrameEndFallback = true;
+				}
 				break;
 			}
 			// A whole millisecond: shorter sleeps become SwitchToThread on Windows, a spin.
@@ -517,6 +772,10 @@ void FSpoutAsyncSendStream::WaitForFill(const FWork& W)
 	}
 	FScopeLock Lock(&StateMutex);
 	Ring.MarkReady(W.Frame.Id, FPlatformTime::Seconds());
+	if (FFrameTrace* T = FindTraceLocked(W.Frame.Id))
+	{
+		T->ReadyQpc = FPlatformTime::Cycles64();
+	}
 }
 
 void FSpoutAsyncSendStream::WorkReady(const FWork& W)
@@ -594,6 +853,9 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 
 	// One access attempt of r.Spout.AccessWaitMs, on this thread (Windows mutexes are thread-affine).
 	const double AttemptAt = FPlatformTime::Seconds();
+	const uint64 AttemptQpc = FPlatformTime::Cycles64();
+	uint64 AcquiredQpc = 0;
+	uint64 PublishQpc = 0;
 	if (FirstAttemptFor != Id)
 	{
 		FirstAttemptFor = Id;
@@ -611,6 +873,7 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 		if (bAcquired)
 		{
 			AcquiredAt = FPlatformTime::Seconds();
+			AcquiredQpc = FPlatformTime::Cycles64();
 			TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncSendDrain);
 			FSpoutAsyncDevice& Async = FSpoutAsyncDevice::Get();
 			HRESULT SignalResult = S_OK;
@@ -649,6 +912,7 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 				{
 					TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SendPublishFrame);
 					Entry.FrameSync.PublishFrame();
+					PublishQpc = FPlatformTime::Cycles64();
 					++Entry.SlotTransfers;
 				}
 			}
@@ -676,6 +940,11 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 		{
 			FScopeLock Lock(&StateMutex);
 			Ring.NoteAttempt(Id, false);
+			if (FFrameTrace* T = FindTraceLocked(Id))
+			{
+				T->FirstAttemptQpc = T->FirstAttemptQpc ? T->FirstAttemptQpc : AttemptQpc;
+				++T->Attempts;
+			}
 		}
 		if (AccessLogThrottle.ShouldLog())
 		{
@@ -705,6 +974,13 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 	{
 		FScopeLock Lock(&StateMutex);
 		Ring.NoteAttempt(Id, true);
+		if (FFrameTrace* T = FindTraceLocked(Id))
+		{
+			T->FirstAttemptQpc = T->FirstAttemptQpc ? T->FirstAttemptQpc : AttemptQpc;
+			T->AcquiredQpc = AcquiredQpc;
+			T->PublishQpc = PublishQpc;
+			++T->Attempts;
+		}
 		if (bSubmitted)
 		{
 			Ring.BeginDrain(Id);
@@ -732,7 +1008,7 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 			AccessWaitMsSum += AccessWait;
 			AccessWaitMsMax = FMath::Max(AccessWaitMsMax, AccessWait);
 		}
-		Ring.Resolve(Id, Outcome);
+		ResolveLocked(Id, Outcome);
 		TakeUnusedSetsLocked(Unused);
 	}
 	RetireSets(Unused);
@@ -752,7 +1028,7 @@ void FSpoutAsyncSendStream::ResolveOldest(uint64 Id, EOutcome Outcome)
 	TArray<TSharedPtr<FSet, ESPMode::ThreadSafe>> Unused;
 	{
 		FScopeLock Lock(&StateMutex);
-		Ring.Resolve(Id, Outcome);
+		ResolveLocked(Id, Outcome);
 		TakeUnusedSetsLocked(Unused);
 	}
 	RetireSets(Unused);
@@ -780,7 +1056,7 @@ void FSpoutAsyncSendStream::FailStream(const FString& Why, EOutcome OwedOutcome)
 		FScopeLock Lock(&StateMutex);
 		while (const FRingFrame* F = Ring.Oldest())
 		{
-			if (!Ring.Resolve(F->Id, OwedOutcome))
+			if (!ResolveLocked(F->Id, OwedOutcome))
 			{
 				break;
 			}
@@ -920,6 +1196,26 @@ void FSpoutAsyncSendStream::Stop()
 	{
 		LogSummary();
 	}
+	if (FSpoutSendOutcomeLog::Get().IsOn())
+	{
+		// The counters the rows must reconcile with, and the frames still traced (always none after the join).
+		const FSpoutAsyncSendStats S = GetStats();
+		int32 Untraced = 0;
+		{
+			FScopeLock Lock(&StateMutex);
+			Untraced = Traces.Num();
+		}
+		FSpoutSendOutcomeLog::Get().Push(FString::Printf(TEXT("S,%s,%llu,0,0,-1,0,0,0,0,0,0,0,%llu,Summary,%lld,%lld,0,0,")
+			TEXT("accepted=%lld;published=%lld;superseded=%lld;accessAbandoned=%lld;failedFill=%lld;failedInstall=%lld;failedDrain=%lld;failedRemoved=%lld;inFlight=%lld;")
+			TEXT("notAcceptedNoSlot=%lld;notAcceptedStopping=%lld;notAcceptedBudget=%lld;notAcceptedUnpublishable=%lld;frameEndFallbacks=%lld;setsCreated=%lld;setsRetired=%lld;")
+			TEXT("ruleViolations=%lld;untracedFrames=%d;failure=%s"),
+			*LogName, StreamObject, FPlatformTime::Cycles64(), S.Attempts, S.FailedAttempts,
+			S.Accepted, S.Published(), S.Superseded(), S.AccessAbandoned(), S.Outcomes[static_cast<int32>(EOutcome::FailedFill)],
+			S.Outcomes[static_cast<int32>(EOutcome::FailedInstall)], S.Outcomes[static_cast<int32>(EOutcome::FailedDrain)],
+			S.Outcomes[static_cast<int32>(EOutcome::FailedRemoved)], S.InFlight, S.NotAccepted[0], S.NotAccepted[1], S.NotAccepted[2], S.NotAccepted[3],
+			S.FrameEndFallbacks, S.SetsCreated, S.SetsRetired, S.RuleViolations, Untraced, *GetFailure().Replace(TEXT(","), TEXT(" ")).Replace(TEXT(";"), TEXT(" "))));
+		FSpoutSendOutcomeLog::Get().RequestFlush();
+	}
 	FSpoutAsyncDevice::Get().ReportDebugLayer();
 }
 
@@ -1023,6 +1319,13 @@ void FSpoutAsyncSendStream::RegisterHooks()
 	{
 		GEndFrameHandle = FCoreDelegates::OnEndFrame.AddStatic(&FSpoutAsyncSendStream::QueueFrameEndSignal);
 	}
+	// A path set before the module registered the variable (an ini file, the command line) does not call its delegate.
+	FSpoutSendOutcomeLog::Get().SetPath(GSpoutDevAsyncSendOutcomeLog.GetValueOnGameThread());
+}
+
+void FSpoutAsyncSendStream::FlushOutcomeLog()
+{
+	FSpoutSendOutcomeLog::Get().Flush();
 }
 
 void FSpoutAsyncSendStream::UnregisterHooks()
@@ -1032,6 +1335,8 @@ void FSpoutAsyncSendStream::UnregisterHooks()
 	FCoreDelegates::OnEndFrame.Remove(GEndFrameHandle);
 	GFlushEndHandle.Reset();
 	GEndFrameHandle.Reset();
+	// Every stream stopped during the module's shutdown and queued its summary: write everything and stop the writer.
+	FSpoutSendOutcomeLog::Get().Shutdown();
 	// Every stream is gone by now (the module's shutdown closed them and flushed rendering). The fence may still be
 	// signalled by Unreal's queue: it is released only once its last value is observed reached; otherwise it is kept
 	// for the rest of the process, never released early.

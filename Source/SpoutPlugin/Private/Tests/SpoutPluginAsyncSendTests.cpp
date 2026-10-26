@@ -16,6 +16,8 @@
 //                a long native copy, a refused installation, a stream that cannot start
 //   streams      two senders with one blocked; Unreal receiving its own asynchronous send
 //   frame end    r.Spout.Dev.AsyncSend.DrainAfter 1, with and without a frame end
+//   outcome log  r.Spout.Dev.AsyncSend.OutcomeLog: one row per frame and per refused send, reconciled with the stream's
+//                summary row and its counters; ordered, contiguous and timestamped
 //
 // Nothing here is a performance statement.
 #include "Misc/AutomationTest.h"
@@ -32,7 +34,10 @@
 #include "Engine/TextureRenderTarget2D.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
+#include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "RenderCommandFence.h"
 #include "RenderingThread.h"
@@ -945,6 +950,91 @@ bool FSpoutAsyncSendFrameEnd::RunTest(const FString&)
 	TestEqual(TEXT("without another fallback"), AS::Stats(Name).FrameEndFallbacks, int64(1));
 	AS::CheckIdentity(*this, Name, TEXT("after frame-end drains"));
 	AS::CloseSender(Name);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendOutcomeLog, "SpoutPlugin.AsyncSend.TheOutcomeLogReconcilesWithTheCounters", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendOutcomeLog::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	const FString File = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),
+		FString::Printf(TEXT("SpoutAsyncSendOutcomesTest-%s.csv"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
+	ON_SCOPE_EXIT { IFileManager::Get().Delete(*File, false, true, true); };
+	const FName Name = AS::UniqueName(TEXT("Outcomes"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Next(AS::MakeSource(64, 32));
+	AS::Upload(Source.Get(), 1);
+	AS::Upload(Next.Get(), 2);
+	FSpoutAsyncSendStats Final;
+	uint64 Object = 0;
+	{
+		AS::FScopedVariable Log(TEXT("r.Spout.Dev.AsyncSend.OutcomeLog"), *File);
+		const uint64 FrameBefore = GFrameCounter;
+		AS::Send(Name, Source.Get());              // published
+		{
+			AS::FAccessHolder Holder(Name);
+			AS::SendNoFlush(Name, Source.Get());   // abandoned at its deadline, or ended by the next one
+			AS::WaitUntil([&] { return AS::Stats(Name).FailedAttempts > 0; }, 1.0);
+			AS::SendNoFlush(Name, Next.Get());
+			AS::SendNoFlush(Name, Next.Get());     // both slots in use: not accepted (no slot), or accepted if one ended
+			AS::WaitUntil([&] { return AS::Stats(Name).InFlight <= 1; }, 1.0);
+		}
+		FlushRenderingCommands();
+		AS::Send(Name, Source.Get());              // published
+		Final = AS::Stats(Name);
+		TestTrue(TEXT("the frames include a published and an access-abandoned or superseded one"), Final.Published() >= 2 && Final.AccessAbandoned() + Final.Superseded() >= 1);
+		TestTrue(TEXT("sends were made in this test's game frames"), GFrameCounter >= FrameBefore);
+		AS::CloseSender(Name);                     // the stream stops: its summary row
+		FSpoutAsyncSendStream::FlushOutcomeLog();
+	}
+	TArray<FString> Lines;
+	if (!TestTrue(TEXT("the outcome log was written"), FFileHelper::LoadFileToStringArray(Lines, *File) && Lines.Num() > 2)) return false;
+	TestTrue(TEXT("it starts with its meta line"), Lines[0].StartsWith(TEXT("# SpoutAsyncSendOutcomes/1 pid=")) && Lines[0].Contains(TEXT("qpcFrequency=")));
+	TestTrue(TEXT("then its column header"), Lines[1].StartsWith(TEXT("kind,stream,streamObject,set,frame,sendTick,sendQpc")));
+	const FString Quoted = FString::Printf(TEXT("\"%s\""), *Name.ToString());
+	TArray<TArray<FString>> Frames, Refused, Summary, Created;
+	for (int32 I = 2; I < Lines.Num(); ++I)
+	{
+		TArray<FString> C;
+		Lines[I].ParseIntoArray(C, TEXT(","), false);
+		if (C.Num() < 20 || C[1] != Quoted) continue;
+		if (C[0] == TEXT("F")) Frames.Add(C);
+		else if (C[0] == TEXT("N")) Refused.Add(C);
+		else if (C[0] == TEXT("S")) Summary.Add(C);
+		else if (C[0] == TEXT("C")) Created.Add(C);
+	}
+	TestEqual(TEXT("one stream object started"), Created.Num(), 1);
+	if (!TestEqual(TEXT("and one summary row"), Summary.Num(), 1)) return false;
+	Object = FCString::Strtoui64(*Summary[0][2], nullptr, 10);
+	TestEqual(TEXT("one row per accepted frame"), int64(Frames.Num()), Final.Accepted);
+	TestEqual(TEXT("one row per refused send"), int64(Refused.Num()), Final.NotAccepted[0] + Final.NotAccepted[1] + Final.NotAccepted[2] + Final.NotAccepted[3]);
+	TMap<FString, int64> ByOutcome;
+	uint64 PreviousResolved = 0;
+	bool bContiguous = true, bOrdered = true, bTimed = true, bOrigin = true;
+	for (int32 I = 0; I < Frames.Num(); ++I)
+	{
+		const TArray<FString>& C = Frames[I];
+		bContiguous &= FCString::Strtoui64(*C[4], nullptr, 10) == uint64(I + 1) && FCString::Strtoui64(*C[2], nullptr, 10) == Object;
+		const uint64 SendQpc = FCString::Strtoui64(*C[6], nullptr, 10), Accept = FCString::Strtoui64(*C[8], nullptr, 10);
+		const uint64 Acquired = FCString::Strtoui64(*C[11], nullptr, 10), Publish = FCString::Strtoui64(*C[12], nullptr, 10), Resolved = FCString::Strtoui64(*C[13], nullptr, 10);
+		bOrigin &= FCString::Atoi64(*C[5]) > 0 && SendQpc > 0 && SendQpc <= Accept;
+		bTimed &= Accept > 0 && Resolved >= Accept && (C[14] != TEXT("Published") || (Acquired >= Accept && Publish >= Acquired && Resolved >= Publish));
+		bOrdered &= Resolved >= PreviousResolved;
+		PreviousResolved = Resolved;
+		ByOutcome.FindOrAdd(C[14]) += 1;
+	}
+	TestTrue(TEXT("frame rows are contiguous from 1, all of one stream object"), bContiguous);
+	TestTrue(TEXT("each carries its originating game frame and QPC, before its acceptance"), bOrigin);
+	TestTrue(TEXT("acceptance, access, announcement and resolution are in order"), bTimed);
+	TestTrue(TEXT("frames are resolved in acceptance order"), bOrdered);
+	TestEqual(TEXT("published rows equal the counter"), ByOutcome.FindRef(TEXT("Published")), Final.Published());
+	TestEqual(TEXT("superseded rows equal the counter"), ByOutcome.FindRef(TEXT("Superseded")), Final.Superseded());
+	TestEqual(TEXT("abandoned rows equal the counter"), ByOutcome.FindRef(TEXT("AccessAbandoned")), Final.AccessAbandoned());
+	const FString Detail = Summary[0][19];
+	TestTrue(TEXT("the summary row carries the same counters"), Detail.Contains(FString::Printf(TEXT("accepted=%lld;published=%lld;superseded=%lld;accessAbandoned=%lld;"),
+		Final.Accepted, Final.Published(), Final.Superseded(), Final.AccessAbandoned())) && Detail.Contains(TEXT("inFlight=0;")) && Detail.Contains(TEXT("untracedFrames=0;")));
 	return true;
 }
 
