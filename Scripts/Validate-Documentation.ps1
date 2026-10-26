@@ -662,13 +662,14 @@ if (-not $SkipGeneratedDocs)
     $pdfPath = Join-Path $RepoRoot 'Docs\2026-06-05-SpoutPlugin-User-Manual.pdf'
     if (Test-Path -LiteralPath $pdfPath -PathType Leaf)
     {
-        # A rendered PDF cannot be diffed, so freshness is judged without parsing it: it must not be
-        # older than any input it is generated from. When the PDF and its inputs are committed and
-        # unmodified, their commit history decides: a checkout writes files in path order, so their
-        # modification times only say in which order git wrote them (the PDF, under Docs/2..., is
-        # written before Docs/USER_MANUAL_SOURCE.md, Docs/build_user_manual.py and the descriptor, and
-        # so would look stale in every fresh checkout). Otherwise (no git, or an uncommitted change to any
-        # of them) the modification times decide.
+        # A rendered PDF cannot be diffed. Its freshness is judged by content: Docs/build_user_manual.py
+        # writes, beside the PDF, the SHA-256 of the PDF it wrote and of every input it read (the
+        # generator, the manual source, the descriptor and the screenshots it embedded; text inputs with
+        # CRLF read as LF, so a checkout's line endings do not matter). The PDF is fresh when that record
+        # names this PDF's bytes and every recorded input still has its recorded content. Modification
+        # times and commit times are not used: a checkout writes files in path order, and an equal or
+        # later commit time says nothing about which file was generated from which. Without the record
+        # (an older tree) the modification times decide.
         $pdfWrite = (Get-Item -LiteralPath $pdfPath).LastWriteTimeUtc
         $inputs = @($generatorPath, $manualSourcePath, $descriptorPath) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
         $newestInput = ($inputs | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } | Sort-Object -Descending | Select-Object -First 1)
@@ -676,25 +677,45 @@ if (-not $SkipGeneratedDocs)
         $expected = "newer than $newestInput"
         $actual = "$pdfWrite"
         $fresh = ($null -eq $newestInput) -or ($pdfWrite -ge $newestInput)
-        $git = Get-Command git -ErrorAction SilentlyContinue
-        if ($git -and @($inputs).Count -gt 0)
+        $recordPath = "$pdfPath.inputs.json"
+        if (Test-Path -LiteralPath $recordPath -PathType Leaf)
         {
-            $tracked = @($pdfPath) + @($inputs)
-            $dirty = @(& git -C $RepoRoot status --porcelain -- $tracked 2>$null)
-            $statusOk = ($LASTEXITCODE -eq 0)
-            $commitTimes = @(foreach ($f in $tracked) { $t = (& git -C $RepoRoot log -1 --format=%ct -- $f 2>$null); if ($LASTEXITCODE -eq 0 -and "$t" -match '^\d+$') { [long]"$t" } else { $null } })
-            if ($statusOk -and $dirty.Count -eq 0 -and -not ($commitTimes -contains $null))
-            {
-                $freshnessBasis = 'git history'
-                $pdfCommit = $commitTimes[0]
-                $newestInputCommit = ($commitTimes | Select-Object -Skip 1 | Measure-Object -Maximum).Maximum
-                $fresh = ($pdfCommit -ge $newestInputCommit)
-                $expected = "last committed no earlier than its inputs (newest input commit time $newestInputCommit)"
-                $actual = "PDF commit time $pdfCommit"
+            $freshnessBasis = 'recorded input content'
+            $contentHash = {
+                param([string] $Path)
+                $bytes = [IO.File]::ReadAllBytes($Path)
+                if ($Path -notmatch '\.(png|jpe?g|pdf)$')
+                {
+                    $out = New-Object System.Collections.Generic.List[byte] ($bytes.Length)
+                    for ($i = 0; $i -lt $bytes.Length; $i++) { if (-not ($bytes[$i] -eq 13 -and $i + 1 -lt $bytes.Length -and $bytes[$i + 1] -eq 10)) { $out.Add($bytes[$i]) } }
+                    $bytes = $out.ToArray()
+                }
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { return (-join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })) } finally { $sha.Dispose() }
             }
+            $problemsFound = @()
+            try { $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json } catch { $record = $null; $problemsFound += 'the record is not valid JSON' }
+            if ($record)
+            {
+                if ((& $contentHash $pdfPath) -ne "$($record.pdf.sha256)") { $problemsFound += 'the PDF is not the one the record names' }
+                $recorded = @($record.inputs.PSObject.Properties | ForEach-Object Name)
+                foreach ($required in 'Docs/build_user_manual.py', 'Docs/USER_MANUAL_SOURCE.md', 'SpoutPlugin.uplugin')
+                {
+                    if ($recorded -notcontains $required) { $problemsFound += "the record does not name $required" }
+                }
+                foreach ($name in $recorded)
+                {
+                    $path = Join-Path $RepoRoot ($name -replace '/', '\')
+                    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $problemsFound += "$name is missing" }
+                    elseif ((& $contentHash $path) -ne "$($record.inputs.$name)") { $problemsFound += "$name changed since the PDF was generated" }
+                }
+            }
+            $fresh = ($problemsFound.Count -eq 0)
+            $expected = 'the PDF and every input recorded in Docs/2026-06-05-SpoutPlugin-User-Manual.pdf.inputs.json unchanged'
+            $actual = $(if ($fresh) { "unchanged ($(@($record.inputs.PSObject.Properties).Count) inputs)" } else { $problemsFound -join '; ' })
         }
         Add-Check -Name 'generatedDocs.pdfFreshness' -Passed $fresh `
-            -Detail "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf is not older than its inputs, by $freshnessBasis (regenerate with: python Docs/build_user_manual.py)" `
+            -Detail "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf matches its inputs, by $freshnessBasis (regenerate with: python Docs/build_user_manual.py)" `
             -Expected $expected -Actual $actual
 
         $generatedDocs += [ordered] @{ Path = 'Docs/2026-06-05-SpoutPlugin-User-Manual.pdf'; Kind = 'pdf'; Fresh = $fresh }

@@ -613,3 +613,26 @@ doc.addPageTemplates([PageTemplate(id="title",frames=[frame_title],onPage=blank)
 doc.multiBuild(story)
 embedded=sum(1 for fid in FIGURES if os.path.exists(os.path.join(SHOTS,FIGURES[fid][0])))
 print("WROTE",OUT,os.path.getsize(OUT),"bytes |",embedded,"of",len(FIGURES),"screenshots embedded")
+
+
+def _content_sha256(path):
+    """SHA-256 of a file's content; text with CRLF read as LF, so a checkout's line endings do not matter."""
+    import hashlib
+    data = open(path, "rb").read()
+    if not path.lower().endswith((".png", ".jpg", ".jpeg", ".pdf")):
+        data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
+
+
+# The record Scripts/Validate-Documentation.ps1 judges the PDF's freshness by: this PDF's bytes and the content of
+# every input it was generated from.
+_repo = os.path.dirname(ROOT)
+_inputs = [os.path.abspath(__file__), os.path.join(ROOT, "USER_MANUAL_SOURCE.md"), os.path.join(_repo, "SpoutPlugin.uplugin")]
+_inputs += [os.path.join(SHOTS, d[0]) for fid, d in sorted(FIGURES.items()) if os.path.exists(os.path.join(SHOTS, d[0]))]
+with open(OUT + ".inputs.json", "w", encoding="utf-8", newline="\n") as _f:
+    json.dump({"what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them",
+               "basis": "generated",
+               "pdf": {"path": os.path.relpath(OUT, _repo).replace(os.sep, "/"), "sha256": _content_sha256(OUT)},
+               "inputs": {os.path.relpath(p, _repo).replace(os.sep, "/"): _content_sha256(p) for p in _inputs}}, _f, indent=1, sort_keys=True)
+    _f.write("\n")
+print("WROTE", OUT + ".inputs.json")
