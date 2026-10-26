@@ -319,6 +319,38 @@ namespace SpoutAsyncSendTestHooks
 	extern std::atomic<int32> FailInstalls;
 	/** The next stream creation is refused, as if its worker thread could not be started. */
 	extern std::atomic<int32> FailCreations;
+
+	/** Flush requests holding the log's lock now (RequestOutcomeLogFlushHolding); requests that triggered the wake event. */
+	extern std::atomic<int32> FlushRequestsHolding;
+	extern std::atomic<int32> FlushRequestsTriggered;
+	/** Called by the outcome log's shutdown (game thread) after its writer is joined, before its wake event is cleared. */
+	extern TFunction<void()> OnOutcomeLogWriterJoined;
+	/** Wake events the outcome log took from Unreal's pool and gave back (counted since the process started). */
+	extern std::atomic<int32> OutcomeLogEventsTaken;
+	extern std::atomic<int32> OutcomeLogEventsReturned;
+
+	struct FOutcomeLogState
+	{
+		bool bOn = false;
+		bool bWriter = false;
+		bool bWake = false;
+		bool bClosed = false;
+	};
+
+	/** The outcome log as the module's shutdown and startup drive it (game thread). */
+	void CloseOutcomeLog();
+	void ReopenOutcomeLog();
+	/** A flush request as a stream's Stop makes it (any thread). */
+	void RequestOutcomeLogFlush();
+	/**
+	 * The same request, holding the log's lock (under which it reads and triggers the wake event) HoldMs milliseconds
+	 * before it triggers the event. Only this call holds; it blocks the log's other users meanwhile (rows, the writer).
+	 */
+	void RequestOutcomeLogFlushHolding(int32 HoldMs);
+	/** Queues one row as a stream does; dropped while the log is off. */
+	void PushOutcomeLogRow(const FString& Row);
+	/** Game thread. */
+	FOutcomeLogState GetOutcomeLogState();
 }
 #endif
 

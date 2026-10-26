@@ -145,6 +145,11 @@ namespace
 		}
 	}
 
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Set by SpoutAsyncSendTestHooks::RequestOutcomeLogFlushHolding for its own request: how long it holds Mutex. */
+	thread_local int32 GHoldThisFlushRequestMs = 0;
+#endif
+
 	/**
 	 * The development outcome log (r.Spout.Dev.AsyncSend.OutcomeLog). The render thread and the workers queue rows under
 	 * Mutex, a leaf held only to append one row or to swap the queue out (no other allocation under it); the log's own
@@ -156,6 +161,14 @@ namespace
 	 * reconciled with the counters. The module's shutdown turns the log off and
 	 * closes it until the next startup (a change of the variable in between starts no writer); the startup sets the
 	 * path again and starts a writer.
+	 *
+	 * The writer's wake event: RequestFlush runs on any thread but a worker (Stream::Stop), while the game thread takes
+	 * the event (SetPath) and gives it back (Shutdown); giving it back deletes the handle Wake points to (Unreal's event
+	 * pool, 5.3 and 5.8, deletes the FSafeRecyclableEvent wrapper and keeps the inner event for reuse). So Wake is set and
+	 * cleared only under Mutex, RequestFlush triggers it only under Mutex, and Shutdown gives it back only after clearing
+	 * it: no request can hold a handle that is given back. Trigger takes no lock of the plugin (FEventWin: its stats
+	 * message, then SetEvent), so Mutex stays a leaf. The writer reads Wake without the lock: it is set before the writer
+	 * starts and cleared only after the writer is joined.
 	 */
 	class FSpoutSendOutcomeLog final : public FRunnable
 	{
@@ -199,7 +212,15 @@ namespace
 			if (bOn.load() && !Thread)
 			{
 				bExit = false;
-				Wake = FPlatformProcess::GetSynchEventFromPool(false);
+				if (!Wake)
+				{
+					FEvent* Event = FPlatformProcess::GetSynchEventFromPool(false);
+#if WITH_DEV_AUTOMATION_TESTS
+					SpoutAsyncSendTestHooks::OutcomeLogEventsTaken.fetch_add(1);
+#endif
+					FScopeLock Lock(&Mutex);
+					Wake = Event;
+				}
 				Thread = FRunnableThread::Create(this, TEXT("SpoutAsyncSendOutcomeLog"), 0, TPri_Normal);
 			}
 			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: asynchronous send outcome log (development): %s"), NewPath.IsEmpty() ? TEXT("off") : *NewPath);
@@ -232,33 +253,81 @@ namespace
 			bExit = true;
 			if (Thread)
 			{
-				Wake->Trigger();
+				Wake->Trigger();   // the game thread is the only one that sets or clears it
 				Thread->WaitForCompletion();
 				delete Thread;
 				Thread = nullptr;
-				FPlatformProcess::ReturnSynchEventToPool(Wake);
-				Wake = nullptr;
 			}
-			FScopeLock FileLock(&FileMutex);
-			TArray<FString> Lines;
+#if WITH_DEV_AUTOMATION_TESTS
+			if (SpoutAsyncSendTestHooks::OnOutcomeLogWriterJoined)
 			{
-				FScopeLock Lock(&Mutex);
-				Swap(Lines, Pending);
-				bOn = false;
+				SpoutAsyncSendTestHooks::OnOutcomeLogWriterJoined();
 			}
-			WriteLocked(Lines);
-			Path.Empty();
-			bHeaderWritten = false;
-			bClosed = true;
+#endif
+			FEvent* Retired = nullptr;
+			{
+				FScopeLock FileLock(&FileMutex);
+				TArray<FString> Lines;
+				{
+					FScopeLock Lock(&Mutex);
+					Swap(Lines, Pending);
+					bOn = false;
+					// Cleared where RequestFlush triggers it: from here on no request holds it, and it can be given back.
+					Retired = Wake;
+					Wake = nullptr;
+				}
+				WriteLocked(Lines);
+				Path.Empty();
+				bHeaderWritten = false;
+				bClosed = true;
+			}
+			if (Retired)
+			{
+				FPlatformProcess::ReturnSynchEventToPool(Retired);
+#if WITH_DEV_AUTOMATION_TESTS
+				SpoutAsyncSendTestHooks::OutcomeLogEventsReturned.fetch_add(1);
+#endif
+			}
 		}
 
+		/** Any thread but a worker (a stream's Stop). Wakes the writer, if one runs. */
 		void RequestFlush()
 		{
-			if (Wake)
+			FScopeLock Lock(&Mutex);
+			if (!Wake)
 			{
-				Wake->Trigger();
+				return;
 			}
+#if WITH_DEV_AUTOMATION_TESTS
+			if (GHoldThisFlushRequestMs > 0)
+			{
+				SpoutAsyncSendTestHooks::FlushRequestsHolding.fetch_add(1);
+				FPlatformProcess::SleepNoStats(GHoldThisFlushRequestMs / 1000.0f);
+				SpoutAsyncSendTestHooks::FlushRequestsHolding.fetch_sub(1);
+			}
+#endif
+			Wake->Trigger();
+#if WITH_DEV_AUTOMATION_TESTS
+			SpoutAsyncSendTestHooks::FlushRequestsTriggered.fetch_add(1);
+#endif
 		}
+
+#if WITH_DEV_AUTOMATION_TESTS
+		SpoutAsyncSendTestHooks::FOutcomeLogState GetStateForTest()
+		{
+			check(IsInGameThread());
+			SpoutAsyncSendTestHooks::FOutcomeLogState State;
+			State.bWriter = Thread != nullptr;
+			{
+				FScopeLock FileLock(&FileMutex);
+				State.bClosed = bClosed;
+			}
+			FScopeLock Lock(&Mutex);
+			State.bOn = bOn.load();
+			State.bWake = Wake != nullptr;
+			return State;
+		}
+#endif
 
 	private:
 		/**
@@ -309,7 +378,7 @@ namespace
 			return 0;
 		}
 
-		FCriticalSection Mutex;       // leaf: Pending and bOn's changes
+		FCriticalSection Mutex;       // leaf: Pending, bOn's changes, Wake (set, cleared and triggered under it)
 		FCriticalSection FileMutex;   // the appends and Path; never taken under Mutex
 		TArray<FString> Pending;
 		FString Path;                 // FileMutex
@@ -317,8 +386,8 @@ namespace
 		bool bClosed = false;         // FileMutex: from the module's shutdown to its next startup
 		std::atomic<bool> bOn{false};
 		std::atomic<bool> bExit{false};
-		FRunnableThread* Thread = nullptr;
-		FEvent* Wake = nullptr;
+		FRunnableThread* Thread = nullptr;  // game thread
+		FEvent* Wake = nullptr;             // Mutex for other threads; the game thread changes it, the writer reads it
 	};
 
 	void OnOutcomeLogChanged(IConsoleVariable* Variable)
@@ -1433,6 +1502,46 @@ namespace SpoutAsyncSendTestHooks
 	std::atomic<int32> DelayDrainMs{0};
 	std::atomic<int32> FailInstalls{0};
 	std::atomic<int32> FailCreations{0};
+	std::atomic<int32> FlushRequestsHolding{0};
+	std::atomic<int32> FlushRequestsTriggered{0};
+	std::atomic<int32> OutcomeLogEventsTaken{0};
+	std::atomic<int32> OutcomeLogEventsReturned{0};
+	TFunction<void()> OnOutcomeLogWriterJoined;
+
+	void CloseOutcomeLog()
+	{
+		check(IsInGameThread());
+		FSpoutSendOutcomeLog::Get().Shutdown();
+	}
+
+	void ReopenOutcomeLog()
+	{
+		check(IsInGameThread());
+		FSpoutSendOutcomeLog::Get().Open();
+		FSpoutSendOutcomeLog::Get().SetPath(GSpoutDevAsyncSendOutcomeLog.GetValueOnGameThread());
+	}
+
+	void RequestOutcomeLogFlush()
+	{
+		FSpoutSendOutcomeLog::Get().RequestFlush();
+	}
+
+	void RequestOutcomeLogFlushHolding(int32 HoldMs)
+	{
+		GHoldThisFlushRequestMs = HoldMs;
+		FSpoutSendOutcomeLog::Get().RequestFlush();
+		GHoldThisFlushRequestMs = 0;
+	}
+
+	void PushOutcomeLogRow(const FString& Row)
+	{
+		FSpoutSendOutcomeLog::Get().Push(CopyTemp(Row));
+	}
+
+	FOutcomeLogState GetOutcomeLogState()
+	{
+		return FSpoutSendOutcomeLog::Get().GetStateForTest();
+	}
 }
 #endif
 

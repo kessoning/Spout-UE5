@@ -17,7 +17,8 @@
 //   streams      two senders with one blocked; Unreal receiving its own asynchronous send
 //   frame end    r.Spout.Dev.AsyncSend.DrainAfter 1, with and without a frame end
 //   outcome log  r.Spout.Dev.AsyncSend.OutcomeLog: one row per frame and per refused send, reconciled with the stream's
-//                summary row and its counters; ordered, contiguous and timestamped
+//                summary row and its counters; ordered, contiguous and timestamped; its wake event outlives every flush
+//                request, and the log restarts after the module's shutdown
 //
 // Nothing here is a performance statement.
 #include "Misc/AutomationTest.h"
@@ -90,6 +91,7 @@ namespace SpoutAsyncSendTests
 			SpoutAsyncSendTestHooks::DelayDrainMs = 0;
 			SpoutAsyncSendTestHooks::FailInstalls = 0;
 			SpoutAsyncSendTestHooks::FailCreations = 0;
+			SpoutAsyncSendTestHooks::OnOutcomeLogWriterJoined = nullptr;
 		}
 	};
 
@@ -1091,6 +1093,151 @@ bool FSpoutAsyncSendOutcomeLogPath::RunTest(const FString&)
 	// A meta line each time this process starts writing to a file: A twice (it came back to A), B once.
 	TestEqual(TEXT("a meta line marks each start of writing"), MetaA * 10 + MetaB, 21);
 	TestEqual(TEXT("the summary row was written once, after the stream stopped"), SummariesA + SummariesB, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendOutcomeLogWake, "SpoutPlugin.AsyncSend.TheOutcomeLogGivesBackItsWakeEventOnlyAfterAFlushRequestUsingIt", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendOutcomeLogWake::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	namespace H = SpoutAsyncSendTestHooks;
+	AS::FHooksReset Reset;
+	const FString File = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),
+		FString::Printf(TEXT("SpoutAsyncSendOutcomesWake-%s.csv"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
+	ON_SCOPE_EXIT { IFileManager::Get().Delete(*File, false, true, true); };
+	ON_SCOPE_EXIT { H::ReopenOutcomeLog(); };   // declared first: runs after the variable is given back, as a module startup
+	AS::FScopedVariable Log(TEXT("r.Spout.Dev.AsyncSend.OutcomeLog"), *File);
+	if (!TestNotNull(TEXT("the outcome log variable exists"), Log.Variable)) return false;
+	// A stream's Stop makes its own flush requests: none may run beside the test's.
+	if (!TestEqual(TEXT("no asynchronous send stream is alive"), FSpoutAsyncSendStream::GetLiveStreams(), 0)) return false;
+	const H::FOutcomeLogState On = H::GetOutcomeLogState();
+	if (!TestTrue(TEXT("the log is on, with its writer and its wake event"), On.bOn && On.bWriter && On.bWake && !On.bClosed)) return false;
+
+	// (a) A flush request (as a stream's Stop makes it, here on another thread) is using the event when the module's
+	// shutdown starts.
+	int32 Triggered = H::FlushRequestsTriggered.load(), Returned = H::OutcomeLogEventsReturned.load();
+	TFuture<void> Request = Async(EAsyncExecution::Thread, [] { H::RequestOutcomeLogFlushHolding(300); });
+	ON_SCOPE_EXIT { Request.Wait(); };
+	if (!TestTrue(TEXT("(a) the request on another thread holds the log's lock"), AS::WaitUntil([] { return H::FlushRequestsHolding.load() > 0; }, 5.0) > 0.0)) return false;
+	double Start = FPlatformTime::Seconds();
+	H::CloseOutcomeLog();
+	double ShutdownMs = (FPlatformTime::Seconds() - Start) * 1000.0;
+	TestEqual(TEXT("(a) the shutdown returned only after the request had triggered the event"), H::FlushRequestsTriggered.load() - Triggered, 1);
+	TestEqual(TEXT("(a) and then gave the event back, once"), H::OutcomeLogEventsReturned.load() - Returned, 1);
+	TestTrue(FString::Printf(TEXT("(a) the shutdown waited for the request (%.0f ms of its 300 ms hold)"), ShutdownMs), ShutdownMs >= 100.0);
+	Request.Wait();
+
+	// (b) A flush request arrives after the shutdown joined the writer and before it clears and gives back the event:
+	// the shutdown's own order, with no writer left to wait for.
+	H::ReopenOutcomeLog();
+	const H::FOutcomeLogState Again = H::GetOutcomeLogState();
+	if (!TestTrue(TEXT("(b) the log is on again, with a writer and an event"), Again.bOn && Again.bWriter && Again.bWake && !Again.bClosed)) return false;
+	Triggered = H::FlushRequestsTriggered.load();
+	Returned = H::OutcomeLogEventsReturned.load();
+	TFuture<void> Late;
+	bool bLateHeld = false;
+	ON_SCOPE_EXIT { H::OnOutcomeLogWriterJoined = nullptr; if (Late.IsValid()) Late.Wait(); };
+	H::OnOutcomeLogWriterJoined = [&Late, &bLateHeld]
+	{
+		Late = Async(EAsyncExecution::Thread, [] { H::RequestOutcomeLogFlushHolding(300); });
+		bLateHeld = SpoutAsyncSendTests::WaitUntil([] { return H::FlushRequestsHolding.load() > 0; }, 5.0) > 0.0;
+	};
+	Start = FPlatformTime::Seconds();
+	H::CloseOutcomeLog();
+	ShutdownMs = (FPlatformTime::Seconds() - Start) * 1000.0;
+	H::OnOutcomeLogWriterJoined = nullptr;
+	if (!TestTrue(TEXT("(b) the request held the log's lock once the writer was joined"), bLateHeld)) return false;
+	TestEqual(TEXT("(b) the shutdown returned only after the request had triggered the event"), H::FlushRequestsTriggered.load() - Triggered, 1);
+	TestEqual(TEXT("(b) and then gave the event back, once"), H::OutcomeLogEventsReturned.load() - Returned, 1);
+	TestTrue(FString::Printf(TEXT("(b) the shutdown waited for the request (%.0f ms of its 300 ms hold)"), ShutdownMs), ShutdownMs >= 100.0);
+	Late.Wait();
+
+	const H::FOutcomeLogState Closed = H::GetOutcomeLogState();
+	TestTrue(TEXT("after the shutdown the log is off and closed, with no writer and no event"), !Closed.bOn && !Closed.bWriter && !Closed.bWake && Closed.bClosed);
+	H::RequestOutcomeLogFlush();
+	TestEqual(TEXT("a request after the shutdown triggers nothing"), H::FlushRequestsTriggered.load() - Triggered, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendOutcomeLogRestart, "SpoutPlugin.AsyncSend.TheOutcomeLogRestartsAfterAShutdownUnderConcurrentFlushRequests", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendOutcomeLogRestart::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	namespace H = SpoutAsyncSendTestHooks;
+	AS::FHooksReset Reset;
+	const FString File = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),
+		FString::Printf(TEXT("SpoutAsyncSendOutcomesRestart-%s.csv"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
+	ON_SCOPE_EXIT { IFileManager::Get().Delete(*File, false, true, true); };
+	ON_SCOPE_EXIT { H::ReopenOutcomeLog(); };   // declared first: runs after the variable is given back, as a module startup
+	AS::FScopedVariable Log(TEXT("r.Spout.Dev.AsyncSend.OutcomeLog"), *File);
+	if (!TestNotNull(TEXT("the outcome log variable exists"), Log.Variable)) return false;
+	const FString Tag = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+
+	// The module's shutdown writes what was queued and closes the log; a change of the variable then starts nothing;
+	// the next startup writes again, after a new meta line and without a second header.
+	H::PushOutcomeLogRow(FString::Printf(TEXT("X,before,%s"), *Tag));
+	H::CloseOutcomeLog();
+	Log.Variable->Set(*(File + TEXT(".closed.csv")), ECVF_SetByConsole);
+	Log.Variable->Set(*File, ECVF_SetByConsole);
+	const H::FOutcomeLogState Closed = H::GetOutcomeLogState();
+	TestTrue(TEXT("while closed, a change of the variable starts no writer"), !Closed.bOn && !Closed.bWriter && !Closed.bWake && Closed.bClosed);
+	H::PushOutcomeLogRow(FString::Printf(TEXT("X,closed,%s"), *Tag));
+	H::ReopenOutcomeLog();
+	const H::FOutcomeLogState Reopened = H::GetOutcomeLogState();
+	TestTrue(TEXT("the startup starts the writer again"), Reopened.bOn && Reopened.bWriter && Reopened.bWake && !Reopened.bClosed);
+	H::PushOutcomeLogRow(FString::Printf(TEXT("X,reopened,%s"), *Tag));
+	FSpoutAsyncSendStream::FlushOutcomeLog();
+	TArray<FString> Lines;
+	FFileHelper::LoadFileToStringArray(Lines, *File);
+	const FString Meta = FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u "), FPlatformProcess::GetCurrentProcessId());
+	int32 Metas = 0, Headers = 0, Before = 0, WhileClosed = 0, After = 0;
+	for (const FString& L : Lines)
+	{
+		Metas += L.StartsWith(Meta);
+		Headers += L.StartsWith(TEXT("kind,stream,"));
+		Before += L == FString::Printf(TEXT("X,before,%s"), *Tag);
+		WhileClosed += L == FString::Printf(TEXT("X,closed,%s"), *Tag);
+		After += L == FString::Printf(TEXT("X,reopened,%s"), *Tag);
+	}
+	TestEqual(TEXT("the row queued before the shutdown was written by it"), Before, 1);
+	TestEqual(TEXT("the row queued while closed was dropped"), WhileClosed, 0);
+	TestEqual(TEXT("the row queued after the restart was written"), After, 1);
+	TestEqual(TEXT("a meta line for each start of writing, the header once"), Metas * 10 + Headers, 21);
+	TestFalse(TEXT("nothing was written to the path set while closed"), IFileManager::Get().FileExists(*(File + TEXT(".closed.csv"))));
+
+	// Flush requests from another thread while the game thread turns the log off and on and shuts it down and starts it:
+	// a smoke check of the restarts and of the events' count (the lifetime itself is the previous test's).
+	const int32 Taken = H::OutcomeLogEventsTaken.load(), Returned = H::OutcomeLogEventsReturned.load();
+	std::atomic<bool> bStop{false};
+	std::atomic<int32> Requests{0};
+	TFuture<void> Requester = Async(EAsyncExecution::Thread, [&bStop, &Requests]
+	{
+		while (!bStop.load())
+		{
+			H::RequestOutcomeLogFlush();
+			Requests.fetch_add(1);
+		}
+	});
+	ON_SCOPE_EXIT { bStop = true; Requester.Wait(); };
+	if (!TestTrue(TEXT("the requesting thread runs"), AS::WaitUntil([&Requests] { return Requests.load() > 0; }, 5.0) > 0.0)) return false;
+	int32 Shutdowns = 0;
+	for (int32 I = 0; I < 40; ++I)
+	{
+		Log.Variable->Set(I % 2 ? *File : TEXT(""), ECVF_SetByConsole);
+		if (I % 4 == 3)
+		{
+			H::CloseOutcomeLog();
+			H::ReopenOutcomeLog();
+			++Shutdowns;
+		}
+		FPlatformProcess::SleepNoStats(0.002f);
+	}
+	bStop = true;
+	Requester.Wait();
+	TestEqual(TEXT("each shutdown gave its event back, and each startup took one"),
+		(H::OutcomeLogEventsTaken.load() - Taken) * 100 + (H::OutcomeLogEventsReturned.load() - Returned), Shutdowns * 100 + Shutdowns);
+	const H::FOutcomeLogState End = H::GetOutcomeLogState();
+	TestTrue(TEXT("the log ends on, with one writer and its event"), End.bOn && End.bWriter && End.bWake && !End.bClosed);
 	return true;
 }
 
