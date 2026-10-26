@@ -712,8 +712,10 @@ if (-not $SkipGeneratedDocs)
                 $pdfEntry = & $field $record 'pdf'
                 $pdfSha = & $field $pdfEntry 'sha256'
                 $inputEntries = & $field $record 'inputs'
-                # The list itself, not the pipeline's unrolling of it (an empty list is valid).
-                $absentEntries = $(if ($null -ne $record -and $record.PSObject.Properties['absent']) { $record.PSObject.Properties['absent'].Value } else { $null })
+                # The list itself, assigned directly: an output expression would unroll an empty list to $null and
+                # a one-item list to its item (an empty list is valid).
+                $absentEntries = $null
+                if ($null -ne $record -and $record.PSObject.Properties['absent']) { $absentEntries = $record.PSObject.Properties['absent'].Value }
                 $absentValid = ($absentEntries -is [System.Array]) -and
                     (@($absentEntries | Where-Object { -not ($_ -is [string] -and $_ -like 'Docs/manual_screenshots/?*') }).Count -eq 0)
                 if ($problemsFound.Count -gt 0) { }
