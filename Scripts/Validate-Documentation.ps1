@@ -662,16 +662,40 @@ if (-not $SkipGeneratedDocs)
     $pdfPath = Join-Path $RepoRoot 'Docs\2026-06-05-SpoutPlugin-User-Manual.pdf'
     if (Test-Path -LiteralPath $pdfPath -PathType Leaf)
     {
-        # A rendered PDF cannot be diffed, so freshness is judged the only way that is reliable
-        # without parsing it: it must be newer than every input it is generated from.
+        # A rendered PDF cannot be diffed, so freshness is judged without parsing it: it must not be
+        # older than any input it is generated from. When the PDF and its inputs are committed and
+        # unmodified, their commit history decides: a checkout writes files in path order, so their
+        # modification times only say in which order git wrote them (the PDF, under Docs/2..., is
+        # written before Docs/USER_MANUAL_SOURCE.md, Docs/build_user_manual.py and the descriptor, and
+        # so would look stale in every fresh checkout). Otherwise (no git, or an uncommitted change to any
+        # of them) the modification times decide.
         $pdfWrite = (Get-Item -LiteralPath $pdfPath).LastWriteTimeUtc
         $inputs = @($generatorPath, $manualSourcePath, $descriptorPath) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
         $newestInput = ($inputs | ForEach-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } | Sort-Object -Descending | Select-Object -First 1)
-
+        $freshnessBasis = 'modification time'
+        $expected = "newer than $newestInput"
+        $actual = "$pdfWrite"
         $fresh = ($null -eq $newestInput) -or ($pdfWrite -ge $newestInput)
+        $git = Get-Command git -ErrorAction SilentlyContinue
+        if ($git -and @($inputs).Count -gt 0)
+        {
+            $tracked = @($pdfPath) + @($inputs)
+            $dirty = @(& git -C $RepoRoot status --porcelain -- $tracked 2>$null)
+            $statusOk = ($LASTEXITCODE -eq 0)
+            $commitTimes = @(foreach ($f in $tracked) { $t = (& git -C $RepoRoot log -1 --format=%ct -- $f 2>$null); if ($LASTEXITCODE -eq 0 -and "$t" -match '^\d+$') { [long]"$t" } else { $null } })
+            if ($statusOk -and $dirty.Count -eq 0 -and -not ($commitTimes -contains $null))
+            {
+                $freshnessBasis = 'git history'
+                $pdfCommit = $commitTimes[0]
+                $newestInputCommit = ($commitTimes | Select-Object -Skip 1 | Measure-Object -Maximum).Maximum
+                $fresh = ($pdfCommit -ge $newestInputCommit)
+                $expected = "last committed no earlier than its inputs (newest input commit time $newestInputCommit)"
+                $actual = "PDF commit time $pdfCommit"
+            }
+        }
         Add-Check -Name 'generatedDocs.pdfFreshness' -Passed $fresh `
-            -Detail "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf is newer than its inputs (regenerate with: python Docs/build_user_manual.py)" `
-            -Expected "newer than $newestInput" -Actual "$pdfWrite"
+            -Detail "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf is not older than its inputs, by $freshnessBasis (regenerate with: python Docs/build_user_manual.py)" `
+            -Expected $expected -Actual $actual
 
         $generatedDocs += [ordered] @{ Path = 'Docs/2026-06-05-SpoutPlugin-User-Manual.pdf'; Kind = 'pdf'; Fresh = $fresh }
     }
