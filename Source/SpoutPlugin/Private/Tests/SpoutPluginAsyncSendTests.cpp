@@ -425,7 +425,8 @@ bool FSpoutAsyncSendWaitsForAccess::RunTest(const FString&)
 		FSpoutAsyncSendStats S = AS::Stats(Name);
 		TestEqual(TEXT("the frame is still owed"), S.InFlight, int64(1));
 		TestEqual(TEXT("and not published"), S.Published(), int64(1));
-		TestTrue(TEXT("well within its 100 ms deadline"), FPlatformTime::Seconds() - SentAt < 0.08);
+		TestEqual(TEXT("and not abandoned"), S.AccessAbandoned(), int64(0));
+		static_cast<void>(SentAt);
 		Holder.Release();
 	}
 	TestTrue(TEXT("once access was free the frame was published"), AS::WaitUntil([&] { return AS::Stats(Name).Published() == 2; }, 1.0) > 0.0);
@@ -448,6 +449,8 @@ bool FSpoutAsyncSendDeadline::RunTest(const FString&)
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
 	AS::Upload(Source.Get(), 1);
 	AS::Send(Name, Source.Get());
+	const TSharedPtr<FSpoutSharedSender> E = AS::SenderEntry(Name);
+	const int64 Baseline = E ? int64(E->FrameSync.GetFailedAcquireCount()) - AS::Stats(Name).FailedAttempts : -1;
 	{
 		AS::FAccessHolder Holder(Name);
 		AS::Upload(Source.Get(), 2);
@@ -463,7 +466,8 @@ bool FSpoutAsyncSendDeadline::RunTest(const FString&)
 	AS::Upload(Source.Get(), 3);
 	AS::Send(Name, Source.Get());
 	TestEqual(TEXT("the next frame publishes once access is free"), AS::Stats(Name).Published(), int64(2));
-	AS::CheckIdentity(*this, Name, TEXT("after an abandoned frame"));
+	TestTrue(TEXT("the blocked frame made failed attempts"), AS::Stats(Name).FailedAttempts > 0);
+	AS::CheckIdentity(*this, Name, TEXT("after an abandoned frame"), Baseline);
 	AS::CloseSender(Name);
 	return true;
 }
@@ -481,6 +485,8 @@ bool FSpoutAsyncSendNewer::RunTest(const FString&)
 	AS::Send(Name, Source.Get());
 	AS::Upload(Source.Get(), 2);
 	AS::Upload(Next.Get(), 3);
+	const TSharedPtr<FSpoutSharedSender> E = AS::SenderEntry(Name);
+	const int64 Baseline = E ? int64(E->FrameSync.GetFailedAcquireCount()) - AS::Stats(Name).FailedAttempts : -1;
 	{
 		AS::FAccessHolder Holder(Name);
 		AS::SendNoFlush(Name, Source.Get());
@@ -494,7 +500,7 @@ bool FSpoutAsyncSendNewer::RunTest(const FString&)
 	TestTrue(TEXT("the newest frame is published"), AS::WaitUntil([&] { return AS::Stats(Name).Published() == 2; }, 1.0) > 0.0);
 	AS::FReceiver R;
 	TestTrue(TEXT("and its image is the one that arrives"), R.ReceiveExact(Name, Next.Get()));
-	AS::CheckIdentity(*this, Name, TEXT("after a newer frame"));
+	AS::CheckIdentity(*this, Name, TEXT("after a newer frame"), Baseline);
 	R.Close(Name);
 	AS::CloseSender(Name);
 	return true;
@@ -650,6 +656,7 @@ bool FSpoutAsyncSendBudget::RunTest(const FString&)
 		AS::SendNoFlush(Name, Big.Get());
 		AS::SendNoFlush(Name, Half.Get());
 		const FSpoutAsyncSendStats S = AS::Stats(Name);
+		TestEqual(TEXT("the old size's frame is still owed (its set in use)"), S.InFlight, int64(1));
 		TestEqual(TEXT("the new size's set did not fit while the old one was in use: not accepted (budget)"), AS::Refused(S, SpoutSendRing::ENotAccepted::Budget), int64(1));
 		TestTrue(TEXT("retained memory stayed within the budget"), SpoutLimits::RetainedBytes() <= BudgetMiB * MiB);
 		Holder.Release();
@@ -840,6 +847,8 @@ bool FSpoutAsyncSendTwoSenders::RunTest(const FString&)
 	AS::Upload(SourceB.Get(), 1);
 	AS::Send(A, SourceA.Get());
 	AS::Send(B, SourceB.Get());
+	const TSharedPtr<FSpoutSharedSender> EA = AS::SenderEntry(A);
+	const int64 BaselineA = EA ? int64(EA->FrameSync.GetFailedAcquireCount()) - AS::Stats(A).FailedAttempts : -1;
 	{
 		AS::FAccessHolder Holder(A);
 		AS::Upload(SourceA.Get(), 2);
@@ -853,7 +862,8 @@ bool FSpoutAsyncSendTwoSenders::RunTest(const FString&)
 	}
 	AS::FReceiver R;
 	TestTrue(TEXT("the free sender's image arrives exactly"), R.ReceiveExact(B, SourceB.Get()));
-	AS::CheckIdentity(*this, A, TEXT("blocked sender"));
+	TestTrue(TEXT("the blocked sender made failed attempts"), AS::Stats(A).FailedAttempts > 0);
+	AS::CheckIdentity(*this, A, TEXT("blocked sender"), BaselineA);
 	AS::CheckIdentity(*this, B, TEXT("free sender"));
 	R.Close(B);
 	AS::CloseSender(A);

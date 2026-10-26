@@ -11,6 +11,8 @@
  *     value reached, or the event query issued after it reported done), or the native device was removed;
  *   - no queue waits on a fence value not already observed complete on the CPU;
  *   - objects a submitted GPU operation may still use are handed to FSpoutGpuRetirement, never released directly.
+ * The synchronous slot path's failure injection (SpoutSlotTestHooks) is not taken by Signal and WaitForProof: each
+ * worker has its own hooks, so a failure injected for one path is never consumed by another path's worker.
  */
 #pragma once
 

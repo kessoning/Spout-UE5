@@ -392,6 +392,19 @@ uint32 FSpoutAsyncSendStream::Run()
 
 bool FSpoutAsyncSendStream::Step()
 {
+	if (bFailed.load())
+	{
+		// A frame the render thread accepted while the stream failed ends at once, with the stream's failure.
+		FScopeLock Lock(&StateMutex);
+		while (const FRingFrame* F = Ring.Oldest())
+		{
+			if (!Ring.Resolve(F->Id, static_cast<EOutcome>(FailedOutcome.load())))
+			{
+				break;
+			}
+		}
+		return false;
+	}
 	FWork W;
 	{
 		FScopeLock Lock(&StateMutex);
@@ -497,7 +510,8 @@ void FSpoutAsyncSendStream::WaitForFill(const FWork& W)
 				++FrameEndFallbacks;
 				break;
 			}
-			FPlatformProcess::SleepNoStats(0.0005f);
+			// A whole millisecond: shorter sleeps become SwitchToThread on Windows, a spin.
+			FPlatformProcess::SleepNoStats(0.001f);
 		}
 		static_cast<void>(bReached);
 	}
@@ -509,36 +523,32 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 {
 	const uint64 Id = W.Frame.Id;
 
-	// Newer frames whose fill is observed finished are ready: the supersession check. Fence reads outside the lock.
-	// The set (not a ComPtr: ComPtr breaks UE containers on 5.3) keeps the fence alive while it is read.
-	struct FNewer { uint64 Id; TSharedPtr<FSet, ESPMode::ThreadSafe> Set; uint64 Value; bool bReady; };
+	// The supersession check: is a newer frame ready, that is its fill observed finished and, when it drains after the
+	// frame end, that frame end reached too? Fence reads outside the lock. Newer frames are not marked ready here: each
+	// goes through its own fill and frame-end wait when it becomes the oldest. The set (not a ComPtr: ComPtr breaks UE
+	// containers on 5.3) keeps the fence alive while it is read.
+	struct FNewer { TSharedPtr<FSet, ESPMode::ThreadSafe> Set; uint64 FillValue; uint64 FrameEndValue; };
 	TArray<FNewer, TInlineAllocator<8>> Newer;
 	{
 		FScopeLock Lock(&StateMutex);
 		for (const FRingFrame& F : Ring.GetFrames())
 		{
 			if (F.Id <= Id) continue;
-			Newer.Add({F.Id, FindSetLocked(F.SetGeneration), F.FillValue, F.ReadyAt >= 0.0});
+			Newer.Add({FindSetLocked(F.SetGeneration), F.FillValue, F.FrameEndValue});
 		}
 	}
 	bool bNewerReady = false;
-	for (FNewer& N : Newer)
+	for (const FNewer& N : Newer)
 	{
 		ID3D12Fence* Fence = N.Set ? N.Set->FilledFence.Get() : nullptr;
-		if (!N.bReady && Fence && SpoutSlotRules::Reached(Fence->GetCompletedValue(), N.Value))
-		{
-			N.bReady = true;
-		}
-		bNewerReady |= N.bReady;
+		const bool bFilled = Fence && SpoutSlotRules::Reached(Fence->GetCompletedValue(), N.FillValue);
+		const bool bFrameEnded = N.FrameEndValue == 0 || !FrameEndFence || SpoutSlotRules::Reached(FrameEndFence->GetCompletedValue(), N.FrameEndValue);
+		bNewerReady |= bFilled && bFrameEnded;
 	}
 	EStep Next = EStep::Attempt;
 	{
 		FScopeLock Lock(&StateMutex);
 		const double Now = FPlatformTime::Seconds();
-		for (const FNewer& N : Newer)
-		{
-			if (N.bReady) Ring.MarkReady(N.Id, Now);
-		}
 		const FRingFrame* F = Ring.Oldest();
 		if (!F || F->Id != Id)
 		{
@@ -750,17 +760,21 @@ void FSpoutAsyncSendStream::ResolveOldest(uint64 Id, EOutcome Outcome)
 
 void FSpoutAsyncSendStream::FailStream(const FString& Why, EOutcome OwedOutcome)
 {
-	if (!bFailed.exchange(true))
+	if (!bFailed.load())
 	{
 		{
 			FScopeLock Lock(&FailureMutex);
 			Failure = Why;
 		}
+		FailedOutcome = static_cast<uint8>(OwedOutcome);
+		bFailed = true;
 		UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout %s: the asynchronous send stopped (%s). Nothing more is published by this sender until it is closed and sent again."),
 			*What, *Why);
 	}
 	// Every frame still owed ends now, in order. Fills still on Unreal's queue are recorded in their sets, which are
-	// retired with those values: nothing is released before they finish or a device was removed.
+	// retired with those values: nothing is released before they finish or a device was removed. The current set is
+	// left as it is: a send on the render thread may be between its checks and its acceptance and still use it (a frame
+	// it accepts then ends at the worker's next step); Stop retires it.
 	TArray<TSharedPtr<FSet, ESPMode::ThreadSafe>> Unused;
 	{
 		FScopeLock Lock(&StateMutex);
@@ -771,7 +785,6 @@ void FSpoutAsyncSendStream::FailStream(const FString& Why, EOutcome OwedOutcome)
 				break;
 			}
 		}
-		Ring.EndSet();
 		TakeUnusedSetsLocked(Unused);
 	}
 	RetireSets(Unused);
@@ -862,7 +875,7 @@ void FSpoutAsyncSendStream::ResolveOwed()
 				return;
 			}
 		}
-		FPlatformProcess::SleepNoStats(0.0002f);
+		FPlatformProcess::SleepNoStats(0.001f);
 	}
 }
 
@@ -1019,19 +1032,27 @@ void FSpoutAsyncSendStream::UnregisterHooks()
 	FCoreDelegates::OnEndFrame.Remove(GEndFrameHandle);
 	GFlushEndHandle.Reset();
 	GEndFrameHandle.Reset();
-	// Every stream is gone by now (the module's shutdown closed them). The fence is the render thread's: it is released
-	// there, behind any frame-end command still queued.
-	if (GIsRHIInitialized)
+	// Every stream is gone by now (the module's shutdown closed them and flushed rendering). The fence may still be
+	// signalled by Unreal's queue: it is released only once its last value is observed reached; otherwise it is kept
+	// for the rest of the process, never released early.
+	if (!GFrameEndFence)
 	{
-		ENQUEUE_RENDER_COMMAND(SpoutAsyncSendReleaseFrameEnd)([](FRHICommandListImmediate&)
-		{
-			GFrameEndFence.Reset();
-		});
-		FlushRenderingCommands();
+		return;
+	}
+	const uint64 Last = GFrameEndSignalled;
+	const double Until = FPlatformTime::Seconds() + 0.2;
+	while (!SpoutSlotRules::Reached(GFrameEndFence->GetCompletedValue(), Last) && FPlatformTime::Seconds() < Until)
+	{
+		FPlatformProcess::SleepNoStats(0.001f);
+	}
+	if (SpoutSlotRules::Reached(GFrameEndFence->GetCompletedValue(), Last))
+	{
+		GFrameEndFence.Reset();
 	}
 	else
 	{
-		GFrameEndFence.Reset();
+		UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: the asynchronous sender's frame-end fence is kept for the rest of the process: its last signal (%llu) is not observed reached."), Last);
+		static_cast<void>(GFrameEndFence.Detach()); // deliberately never released
 	}
 }
 

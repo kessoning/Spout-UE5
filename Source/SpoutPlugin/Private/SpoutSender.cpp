@@ -421,11 +421,9 @@ namespace
 		{
 			return false;
 		}
-		TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Stream;
-		{
-			FScopeLock SenderLock(&Sender->ResourceMutex);
-			Stream = Sender->AsyncSend;
-		}
+		// The render thread is the only writer of AsyncSend while the entry lives (the destructor runs when no command
+		// holds the entry), so it reads it without the entry's lock, which the worker holds while it installs.
+		TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Stream = Sender->AsyncSend;
 		if (!Stream)
 		{
 			FString Why;

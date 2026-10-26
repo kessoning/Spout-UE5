@@ -809,8 +809,9 @@ bool FSpoutAsyncBetaStopOutstanding::RunTest(const FString&)
 			(Stopped - Held) * 1000.0, DelayMs), (Stopped - Held) * 1000.0 >= DelayMs - 50.0);
 	}
 	TestTrue(TEXT("the sender's access is free once the stop returned"), AB::AccessFreeForAnotherHolder(Name));
-	TestTrue(TEXT("the stream's objects went to the retirement list"), FSpoutGpuRetirement::Get().GetStats().Retired >= Before.Retired + 1);
-	TestTrue(TEXT("and were released once their work was proven finished"), AB::WaitForReleases(Before.Released, 1, 5.0));
+	// The stop retires the sender's slot as well as the stream: two records at least.
+	TestTrue(TEXT("the stream's objects went to the retirement list"), FSpoutGpuRetirement::Get().GetStats().Retired >= Before.Retired + 2);
+	TestTrue(TEXT("and were released once their work was proven finished"), AB::WaitForReleases(Before.Released, 2, 5.0));
 	FlushRenderingCommands();
 	return true;
 }

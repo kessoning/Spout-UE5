@@ -32,6 +32,11 @@
  * The only unbounded class is a drain's proof (as on the synchronous send): a GPU that stalls without a removal
  * keeps the access, the flush, the close and the stop waiting; a warning says so every 5 s.
  *
+ * The render thread does not wait for the worker, with one bounded exception: while the worker installs a new identity
+ * (the first frame, a resize: shared-texture creation, FrameSync's open, the registration) it holds the session lock
+ * (FSpoutSession::ExecuteIfCurrent), so the render thread's token checks of every stream, and the game thread's
+ * OpenStream, wait for that installation. On the synchronous send the render thread spends that time installing.
+ *
  * Lock order: the entry's ResourceMutex (installation) and FSpoutFrameSync's lock (access) are taken by the worker
  * one at a time, never with the stream's state lock. The state lock is a leaf: one bookkeeping call, never across a
  * graphics call, a lock or a wait. The process's list of streams is a leaf too.
@@ -227,6 +232,8 @@ private:
 	FSpoutLogThrottle FillLogThrottle;
 
 	std::atomic<bool> bFailed{false};
+	/** The outcome of frames that end because the stream failed (FailedRemoved, or FailedFill for Unreal's device). */
+	std::atomic<uint8> FailedOutcome{static_cast<uint8>(SpoutSendRing::EOutcome::FailedRemoved)};
 	mutable FCriticalSection FailureMutex;
 	FString Failure;
 	std::atomic<bool> bStopped{false};

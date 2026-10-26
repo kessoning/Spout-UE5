@@ -261,17 +261,19 @@ namespace
 	 * issued again. While it waits, a warning says every 5 s that the peer's access is still held.
 	 */
 	ENativeProof WaitForNativeWork(ID3D12Fence* View, uint64 Value, bool bSignalled, ID3D11Query* Proof, uint32 BoundMs, HANDLE Event, const FString& What,
-		int32 TestNotBeforeMs = 0)
+		int32 TestNotBeforeMs = 0, bool bSlotTestHooks = true)
 	{
 		FSpoutAsyncDevice& Async = FSpoutAsyncDevice::Get();
 		const double Start = FPlatformTime::Seconds();
 		double NotBefore = Start;
 #if WITH_DEV_AUTOMATION_TESTS
 		// Tests: a GPU operation that takes this long. Completion is not accepted earlier; the real proof is still needed.
-		const int32 DelayMs = FMath::Max(SpoutSlotTestHooks::DelayNativeCompletionMs.exchange(0), TestNotBeforeMs);
+		// The synchronous slot path's hooks are taken only by its own waits; the workers bring their own (TestNotBeforeMs).
+		const int32 DelayMs = FMath::Max(bSlotTestHooks ? SpoutSlotTestHooks::DelayNativeCompletionMs.exchange(0) : 0, TestNotBeforeMs);
 		NotBefore += double(FMath::Max(DelayMs, 0)) / 1000.0;
 #else
 		static_cast<void>(TestNotBeforeMs);
+		static_cast<void>(bSlotTestHooks);
 #endif
 		auto IssueQuery = [&Async, Proof]()
 		{
@@ -331,7 +333,7 @@ namespace
 					QueryResult = Context ? Context->GetData(Proof, nullptr, 0, ProofQueryGetDataFlags) : DXGI_ERROR_DEVICE_REMOVED;
 				}
 #if WITH_DEV_AUTOMATION_TESTS
-				if (QueryResult == S_OK && TakeHook(SpoutSlotTestHooks::FailProofQueries))
+				if (QueryResult == S_OK && bSlotTestHooks && TakeHook(SpoutSlotTestHooks::FailProofQueries))
 				{
 					QueryResult = E_FAIL;
 				}
@@ -398,7 +400,7 @@ namespace SpoutNativeWork
 	ESpoutNativeProof WaitForProof(ID3D12Fence* View, uint64 Value, bool bSignalled, ID3D11Query* Proof, uint32 BoundMs, HANDLE Event,
 		const FString& What, int32 NotBeforeMs)
 	{
-		switch (WaitForNativeWork(View, Value, bSignalled, Proof, BoundMs, Event, What, NotBeforeMs))
+		switch (WaitForNativeWork(View, Value, bSignalled, Proof, BoundMs, Event, What, NotBeforeMs, false))
 		{
 		case ENativeProof::InTime: return ESpoutNativeProof::InTime;
 		case ENativeProof::Late:   return ESpoutNativeProof::Late;
@@ -408,7 +410,8 @@ namespace SpoutNativeWork
 
 	HRESULT Signal(ID3D11DeviceContext4* Context, ID3D11Fence* Fence, uint64 Value)
 	{
-		return SignalNative(Context, Fence, Value);
+		// Not SignalNative: the synchronous slot path's failure injection is not taken by the workers, which have their own.
+		return Context->Signal(Fence, Value);
 	}
 
 	HRESULT CreateProof(ComPtr<ID3D11Query>& Out)
