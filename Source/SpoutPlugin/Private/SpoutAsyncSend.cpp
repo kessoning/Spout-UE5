@@ -153,8 +153,9 @@ namespace
 	 * new one, and none is dropped while a path is set. Each process writes its own meta line to a path before its first
 	 * rows there; the column header is written only to an empty or new file. A stream that started before the log was
 	 * turned on has no start row, and one that ran while the log was off has no rows for that time: neither can be
-	 * reconciled with the counters. The module's shutdown turns the log off, so a
-	 * restart sets the path again and starts a writer.
+	 * reconciled with the counters. The module's shutdown turns the log off and
+	 * closes it until the next startup (a change of the variable in between starts no writer); the startup sets the
+	 * path again and starts a writer.
 	 */
 	class FSpoutSendOutcomeLog final : public FRunnable
 	{
@@ -167,12 +168,20 @@ namespace
 
 		bool IsOn() const { return bOn.load(); }
 
+		/** Module startup, before its SetPath: the log may run again after a shutdown. */
+		void Open()
+		{
+			FScopeLock FileLock(&FileMutex);
+			bClosed = false;
+		}
+
 		/** Game thread (the variable's change, module startup). */
 		void SetPath(const FString& NewPath)
 		{
 			{
 				FScopeLock FileLock(&FileMutex);
-				if (NewPath == Path)
+				// After the module's shutdown nothing would join a writer: the variable is read again at the next startup.
+				if (bClosed || NewPath == Path)
 				{
 					return;
 				}
@@ -240,6 +249,7 @@ namespace
 			WriteLocked(Lines);
 			Path.Empty();
 			bHeaderWritten = false;
+			bClosed = true;
 		}
 
 		void RequestFlush()
@@ -304,6 +314,7 @@ namespace
 		TArray<FString> Pending;
 		FString Path;                 // FileMutex
 		bool bHeaderWritten = false;  // FileMutex
+		bool bClosed = false;         // FileMutex: from the module's shutdown to its next startup
 		std::atomic<bool> bOn{false};
 		std::atomic<bool> bExit{false};
 		FRunnableThread* Thread = nullptr;
@@ -1351,6 +1362,7 @@ void FSpoutAsyncSendStream::RegisterHooks()
 		GEndFrameHandle = FCoreDelegates::OnEndFrame.AddStatic(&FSpoutAsyncSendStream::QueueFrameEndSignal);
 	}
 	// A path set before the module registered the variable (an ini file, the command line) does not call its delegate.
+	FSpoutSendOutcomeLog::Get().Open();
 	FSpoutSendOutcomeLog::Get().SetPath(GSpoutDevAsyncSendOutcomeLog.GetValueOnGameThread());
 }
 
