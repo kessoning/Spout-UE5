@@ -63,6 +63,15 @@ namespace
 		TEXT("1 (default): the sender and the synchronous receiver move pixels through plugin-owned shared textures on a native D3D11 device and never wrap Unreal's resources for D3D11. ")
 		TEXT("0: they wrap Unreal's resources with D3D11-on-12, as before. Read once per process, at the first Spout initialization: a later change takes effect at the next start."),
 		ECVF_Default);
+	// Development switches (SpoutLimits.h). Off by default; the console help says they are not supported settings.
+	TAutoConsoleVariable<int32> GSpoutDevAsyncSend(TEXT("r.Spout.Dev.AsyncSend"), 0,
+		TEXT("Development switch, not a supported setting. 1: render-target senders opened afterwards use the asynchronous sender (a worker takes the access lock and copies; ")
+		TEXT("the render thread does not wait). 0 (default): the synchronous send."),
+		ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutDevAsyncSendDrainAfter(TEXT("r.Spout.Dev.AsyncSend.DrainAfter"), 0,
+		TEXT("Development switch, not a supported setting. With r.Spout.Dev.AsyncSend 1: 0 (default) the worker copies a frame once its fill finished; ")
+		TEXT("1 also waits for the end of Unreal's frame on its GPU queue, at most 100 ms."),
+		ECVF_Default);
 	FCriticalSection GSpoutLimitBudgetMutex;
 	int64 GSpoutLimitReserved = 0, GSpoutLimitPeak = 0, GSpoutLimitRejected = 0;
 }
@@ -91,6 +100,8 @@ bool SpoutLimits::FrameCountRecheck() { return GSpoutFrameCountRecheck.GetValueO
 void SpoutLimits::WarnIfRetiredSettingsSet() { WarnRetiredAsyncReceive(GSpoutAsyncReceive.AsVariable()); }
 int32 SpoutLimits::AsyncReceiveGpuPriority() { return FMath::Clamp(GSpoutAsyncReceiveGpuPriority.GetValueOnAnyThread(),-7,7); }
 bool SpoutLimits::SharedSlotInteropRequested() { return GSpoutSharedSlotInterop.GetValueOnAnyThread() != 0; }
+bool SpoutLimits::DevAsyncSend() { return GSpoutDevAsyncSend.GetValueOnAnyThread() != 0; }
+int32 SpoutLimits::DevAsyncSendDrainAfter() { return GSpoutDevAsyncSendDrainAfter.GetValueOnAnyThread() != 0 ? 1 : 0; }
 int64 SpoutLimits::RetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitReserved; }
 int64 SpoutLimits::PeakRetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitPeak; }
 int64 SpoutLimits::RejectedAllocations() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitRejected; }

@@ -374,6 +374,8 @@ public:
 	int32 GetReleaseCount() const;
 	int32 GetFailedAcquireCount() const;
 	int32 GetPublishedFrameCount() const;
+	/** Bounded acquisition calls made, granted or not (unlike the failed count). Lock-free. */
+	int64 GetAcquireAttemptCount() const { return AcquireAttemptCount.load(); }
 	/** Lock-free; the two values are read separately, not as one atomic snapshot. */
 	void GetStatus(int64& OutFrames, int64& OutAccessMisses) const;
 
@@ -407,6 +409,7 @@ private:
 	// Written under Mutex; GetStatus reads them without it, because the render thread can hold
 	// Mutex for a whole bounded access wait and the game thread must not queue behind that.
 	std::atomic<int64> FailedAcquireCount{0};
+	std::atomic<int64> AcquireAttemptCount{0};
 	std::atomic<int64> PublishedFrameCount{0};
 	std::atomic<int64> ConsumedFrameCount{0};
 

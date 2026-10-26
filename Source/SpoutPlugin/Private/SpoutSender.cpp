@@ -9,6 +9,7 @@
  */
 #include "SpoutSender.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "SpoutAsyncSend.h"
 #include "SpoutD3DContext.h"
 #include "SpoutD3DUtils.h"
 #include "SpoutFormatPolicy.h"
@@ -363,6 +364,94 @@ namespace
 		)
 	}
 
+	/**
+	 * The asynchronous sender's installation (FSpoutAsyncSendStream::FInstaller), on its worker thread. An identity the
+	 * entry already publishes needs nothing (the synchronous send's EnsureSharedSenderTexture would only compare); a new
+	 * one is installed under ExecuteIfCurrent, exactly as the render thread installs it for the synchronous send, so a
+	 * close or a session stop prevents it.
+	 */
+	bool InstallForAsyncSend(FSpoutSharedSender& Sender, const FSpoutStreamToken& Token, const FSpoutAsyncSendStream::FIdentity& Identity, TRefCountPtr<ID3D11Texture2D>& OutTexture)
+	{
+		OutTexture = nullptr;
+		{
+			FScopeLock SenderLock(&Sender.ResourceMutex);
+			if (Sender.Registration.IsActive() && Sender.SharedTexture && Sender.Width == Identity.Width && Sender.Height == Identity.Height
+				&& Sender.SharedFormat == Identity.Format)
+			{
+				OutTexture = TRefCountPtr<ID3D11Texture2D>(Sender.SharedTexture.Get());
+				return true;
+			}
+		}
+		bool bInstalled = false;
+		FSpoutSession::Get().ExecuteIfCurrent(Token, [&]()
+		{
+			if (!EnsureSharedSenderTexture(Sender, Identity.Width, Identity.Height, Identity.Format, FSpoutD3DContext::Get()))
+			{
+				return;
+			}
+			FScopeLock SenderLock(&Sender.ResourceMutex);
+			if (Sender.Registration.IsActive() && Sender.SharedTexture)
+			{
+				OutTexture = TRefCountPtr<ID3D11Texture2D>(Sender.SharedTexture.Get());
+				bInstalled = true;
+			}
+		});
+		return bInstalled;
+	}
+
+	/**
+	 * Development switch r.Spout.Dev.AsyncSend (SpoutAsyncSend.h): a render-target send on the shared-slot path goes
+	 * to the entry's asynchronous sender. Returns false when the entry uses the synchronous send (the switch was off at
+	 * its first render-target send, or its asynchronous sender could not start), true otherwise: the send was handed
+	 * over (accepted or counted as not accepted) or its token is no longer current (nothing queued, as the synchronous
+	 * path does).
+	 */
+	bool SendThroughAsyncStream(const FSpoutStreamToken& Token, const FTextureRHIRef& SourceRHI, FRHICommandListImmediate& RHICmdList, DXGI_FORMAT SharedFormat)
+	{
+		TSharedPtr<FSpoutSharedSender> Sender;
+		if (!FSpoutSession::Get().ExecuteIfCurrent(Token, [&]() { Sender = FSpoutSenderRegistry::Get().FindOrAdd(Token.Name, ESpoutType::Sender); }) || !Sender)
+		{
+			return true;
+		}
+		if (Sender->AsyncSendMode < 0)
+		{
+			Sender->AsyncSendMode = SpoutLimits::DevAsyncSend() ? 1 : 0;
+		}
+		if (Sender->AsyncSendMode == 0)
+		{
+			return false;
+		}
+		TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Stream;
+		{
+			FScopeLock SenderLock(&Sender->ResourceMutex);
+			Stream = Sender->AsyncSend;
+		}
+		if (!Stream)
+		{
+			FString Why;
+			Stream = FSpoutAsyncSendStream::Create(*Sender, &InstallForAsyncSend, Why);
+			if (!Stream)
+			{
+				Sender->AsyncSendMode = 0;
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout sender '%s': the asynchronous send (r.Spout.Dev.AsyncSend) could not start (%s); this sender uses the synchronous send until it is closed."),
+					*Sender->Name.ToString(), *Why);
+				return false;
+			}
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout sender '%s': publishing through the asynchronous send (development switch r.Spout.Dev.AsyncSend)."), *Sender->Name.ToString());
+			FScopeLock SenderLock(&Sender->ResourceMutex);
+			Sender->AsyncSend = Stream;
+		}
+		FSpoutAsyncSendStream::FIdentity Identity;
+		Identity.Width = static_cast<uint32>(SourceRHI->GetDesc().Extent.X);
+		Identity.Height = static_cast<uint32>(SourceRHI->GetDesc().Extent.Y);
+		Identity.Format = SharedFormat;
+		Identity.PixelFormat = SourceRHI->GetFormat();
+		Stream->Send(Token, RHICmdList, SourceRHI, SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::SenderRenderTarget), Identity);
+		// If a close removed the entry meanwhile, this is its last reference: its destructor stops the stream here,
+		// which resolves the frame just accepted (its fill is already dispatched) before the worker exits.
+		return true;
+	}
+
 	void SendTextureOnRenderThread(
 		TConstArrayView<FSpoutStreamToken> Tokens,
 		const FTextureRHIRef& SourceRHI,
@@ -471,6 +560,16 @@ namespace
 					SpoutValidation::ToString(ExtentResult),
 					*LiveTokens[0].Name.ToString());
 			}
+			return;
+		}
+
+		// Development switch r.Spout.Dev.AsyncSend: a render-target send (always one name) may go to the entry's
+		// asynchronous sender, which installs the texture and registration on its own worker. With the switch off and no
+		// asynchronous sender alive, nothing of this runs.
+		if (!bIsViewport && SpoutInterop::IsSharedSlot() && LiveTokens.Num() == 1
+			&& (SpoutLimits::DevAsyncSend() || FSpoutAsyncSendStream::GetLiveStreams() > 0)
+			&& SendThroughAsyncStream(LiveTokens[0], SourceRHI, RHICmdList, Format))
+		{
 			return;
 		}
 

@@ -439,6 +439,7 @@ void FSpoutFrameSync::GetStatus(int64& OutFrames, int64& OutAccessMisses) const
 bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
 {
 	FScopeLock Lock(&Mutex);
+	++AcquireAttemptCount;
 
 	if (bAccessHeld)
 	{

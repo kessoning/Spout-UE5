@@ -13,6 +13,7 @@ FString FSpoutModule::GetBuildSourceIdentity()
 {
 	return UTF8_TO_TCHAR(SPOUT_BUILD_SOURCE_ID);
 }
+#include "SpoutAsyncSend.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutLimits.h"
 
@@ -134,6 +135,9 @@ void FSpoutModule::StartupModule()
 	// Explicitly load Spout.dll so its delay-loaded imports bind on first Spout call
 	// instead of crashing with 0xC06D007E.
 	SpoutDllHandle = LoadSpoutRuntime();
+	// The asynchronous sender's flush and frame-end hooks (development switch r.Spout.Dev.AsyncSend). They do nothing
+	// while no asynchronous sender exists.
+	FSpoutAsyncSendStream::RegisterHooks();
 #endif
 
 #if WITH_EDITOR
@@ -169,6 +173,8 @@ void FSpoutModule::ShutdownModule()
 	USpoutBPFunctionLibrary::GlobalShutdown();
 
 #if PLATFORM_WINDOWS
+	// After the shutdown: its flush step needs the flush hook to resolve what asynchronous senders still owe.
+	FSpoutAsyncSendStream::UnregisterHooks();
 	if (SpoutDllHandle != nullptr)
 	{
 		FPlatformProcess::FreeDllHandle(SpoutDllHandle);

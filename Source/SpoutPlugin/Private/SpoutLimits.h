@@ -89,6 +89,24 @@ namespace SpoutLimits
 	 * initialization (SpoutInterop::LatchOnce); a later change has no effect until the process restarts.
 	 */
 	bool SharedSlotInteropRequested();
+
+	// ---- Development switches (0 by default, not supported settings and not documented for users). With both at 0
+	// the render-target send is the synchronous shared-slot send. ----
+
+	/**
+	 * r.Spout.Dev.AsyncSend != 0: render-target senders on the shared-slot path use the asynchronous sender
+	 * (SpoutAsyncSend.h). Read on the render thread when a sender entry sends without having decided: from its first
+	 * send with the switch on, an entry keeps the asynchronous sender for its life. Turning it off applies to senders
+	 * opened afterwards (close and send again).
+	 */
+	bool DevAsyncSend();
+
+	/**
+	 * r.Spout.Dev.AsyncSend.DrainAfter, 0 or 1 (default 0): when the asynchronous sender's worker copies a frame into
+	 * the shared texture. 0: once the fill into its slot is observed finished. 1: also once Unreal's queue reached the
+	 * fence signalled behind the frame's own work, or 100 ms after the fill. Read per send.
+	 */
+	int32 DevAsyncSendDrainAfter();
 }
 
 // Lifetime follows the actual retained texture/entry, including old outputs held by callers.

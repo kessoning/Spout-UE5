@@ -8,6 +8,7 @@
  */
 #include "SpoutSenderRegistry.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "SpoutAsyncSend.h"
 #include "SpoutD3DContext.h"
 #include "SpoutModule.h"
 #include "SpoutValidation.h"
@@ -81,6 +82,20 @@ FSpoutSharedSender::FSpoutSharedSender(FName InName, ESpoutType InType)
 
 FSpoutSharedSender::~FSpoutSharedSender()
 {
+#if PLATFORM_WINDOWS
+	// The asynchronous sender first, and outside ResourceMutex: its worker takes that lock to install, and the stop
+	// waits for the worker to resolve the frames it owes (one access attempt each) and to exit. No render command
+	// holds this entry any more, so nothing can hand the stream another frame.
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Stream;
+	{
+		FScopeLock Lock(&ResourceMutex);
+		Stream = MoveTemp(AsyncSend);
+	}
+	if (Stream)
+	{
+		Stream->Stop();
+	}
+#endif
 	// Ensure shared handles are released before destruction.
 	ReleaseResources();
 }
@@ -97,6 +112,9 @@ void FSpoutSharedSender::ReleaseResources()
 	Async.Reset();
 	AsyncRefusedFor = FSpoutAsyncStream::FIdentity();
 	bAsyncReceiveActive.store(false);
+
+	// Only the destructor calls this, after it stopped the asynchronous sender (which must not be stopped under this lock).
+	check(!AsyncSend.IsValid());
 
 	// The shared-slot objects: their destructors hand them to the retirement list with their outstanding GPU
 	// work, which releases them once that work is proven finished. Nothing here waits for the GPU.

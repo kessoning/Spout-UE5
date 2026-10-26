@@ -22,6 +22,8 @@
 #include "RHI.h"
 #include "UObject/WeakObjectPtr.h"
 
+class FSpoutAsyncSendStream;
+
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <d3d11.h>
@@ -167,6 +169,21 @@ public:
 	bool bSharedTextureWriteUnproven = false;
 	/** Transfers this entry completed through the shared-slot path. Diagnostics and tests. */
 	std::atomic<int64> SlotTransfers{0};
+
+	/**
+	 * Sender role, render-target source, development switch r.Spout.Dev.AsyncSend (SpoutAsyncSend.h): whether this
+	 * entry uses the asynchronous sender (-1 undecided, 0 synchronous, 1 asynchronous). Decided on the render thread at
+	 * the first send that looks (the switch on, or an asynchronous sender alive) and kept for the entry's life; an entry
+	 * that sent synchronously before may move to 1, never back. Render thread only.
+	 */
+	int8 AsyncSendMode = -1;
+	/**
+	 * The entry's asynchronous sender while it exists. Created on the render thread; assigned and read elsewhere under
+	 * ResourceMutex. Its worker is the only thread that uses SharedTexture, the registration, FrameSync's access and
+	 * the announcement of this entry. Stopped (owed frames resolved, worker joined) by the destructor before
+	 * ReleaseResources, outside ResourceMutex, which the worker takes to install.
+	 */
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> AsyncSend;
 
 	// Shared DX11 texture exposed to other Spout clients (senders only).
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> SharedTexture;
