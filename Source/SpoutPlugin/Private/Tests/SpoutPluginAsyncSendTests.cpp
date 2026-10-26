@@ -53,7 +53,7 @@ namespace SpoutAsyncSendTests
 	using SpoutSendRing::EOutcome;
 	using SpoutSendRing::ENotAccepted;
 
-	/** Sets a console variable for the scope and gives it back its value and priority afterwards. */
+	/** Sets a console variable for the scope, at console priority, and gives it back its value and priority afterwards. */
 	struct FScopedVariable
 	{
 		IConsoleVariable* Variable = nullptr;
@@ -66,14 +66,14 @@ namespace SpoutAsyncSendTests
 			{
 				Before = Variable->GetString();
 				Priority = static_cast<EConsoleVariableFlags>(Variable->GetFlags() & ECVF_SetByMask);
-				Variable->Set(Value, ECVF_SetByCode);
+				Variable->Set(Value, ECVF_SetByConsole);
 			}
 		}
 		~FScopedVariable()
 		{
 			if (Variable)
 			{
-				Variable->Set(*Before, ECVF_SetByCode);
+				Variable->Set(*Before, ECVF_SetByConsole);
 				Variable->SetFlags(static_cast<EConsoleVariableFlags>((Variable->GetFlags() & ~ECVF_SetByMask) | Priority));
 			}
 		}
@@ -1035,6 +1035,56 @@ bool FSpoutAsyncSendOutcomeLog::RunTest(const FString&)
 	const FString Detail = Summary[0][19];
 	TestTrue(TEXT("the summary row carries the same counters"), Detail.Contains(FString::Printf(TEXT("accepted=%lld;published=%lld;superseded=%lld;accessAbandoned=%lld;"),
 		Final.Accepted, Final.Published(), Final.Superseded(), Final.AccessAbandoned())) && Detail.Contains(TEXT("inFlight=0;")) && Detail.Contains(TEXT("untracedFrames=0;")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendOutcomeLogPath, "SpoutPlugin.AsyncSend.TheOutcomeLogLosesNoRowWhenItsPathChanges", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendOutcomeLogPath::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	const FString Stem = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(),
+		FString::Printf(TEXT("SpoutAsyncSendOutcomesPath-%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits))));
+	const FString FileA = Stem + TEXT("-a.csv"), FileB = Stem + TEXT("-b.csv");
+	ON_SCOPE_EXIT { IFileManager::Get().Delete(*FileA, false, true, true); IFileManager::Get().Delete(*FileB, false, true, true); };
+	const FName Name = AS::UniqueName(TEXT("OutcomePath"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	AS::Upload(Source.Get(), 1);
+	IConsoleVariable* Log = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.Dev.AsyncSend.OutcomeLog"));
+	if (!TestNotNull(TEXT("the outcome log variable exists"), Log)) return false;
+	const FString Before = Log->GetString();
+	ON_SCOPE_EXIT { Log->Set(*Before, ECVF_SetByConsole); };
+	Log->Set(*FileA, ECVF_SetByConsole);
+	for (int32 I = 0; I < 3; ++I) AS::Send(Name, Source.Get());
+	Log->Set(*FileB, ECVF_SetByConsole);          // rows queued before the change go to A, later ones to B
+	for (int32 I = 0; I < 2; ++I) AS::Send(Name, Source.Get());
+	Log->Set(*FileA, ECVF_SetByConsole);          // back to A: appended, with no second header
+	AS::Send(Name, Source.Get());
+	const FSpoutAsyncSendStats Final = AS::Stats(Name);
+	AS::CloseSender(Name);
+	Log->Set(TEXT(""), ECVF_SetByConsole);         // off: what was queued is written first
+	auto Count = [this, &Name](const FString& File, int32& OutFrames, int32& OutHeaders, int32& OutSummaries)
+	{
+		TArray<FString> Lines;
+		FFileHelper::LoadFileToStringArray(Lines, *File);
+		const FString Quoted = FString::Printf(TEXT("\"%s\","), *Name.ToString());
+		OutFrames = OutHeaders = OutSummaries = 0;
+		for (const FString& L : Lines)
+		{
+			OutHeaders += L.StartsWith(TEXT("kind,stream,"));
+			OutFrames += L.StartsWith(TEXT("F,") + Quoted);
+			OutSummaries += L.StartsWith(TEXT("S,") + Quoted);
+		}
+	};
+	int32 FramesA, HeadersA, SummariesA, FramesB, HeadersB, SummariesB;
+	Count(FileA, FramesA, HeadersA, SummariesA);
+	Count(FileB, FramesB, HeadersB, SummariesB);
+	TestEqual(TEXT("six frames accepted"), Final.Accepted, int64(6));
+	TestEqual(TEXT("every frame has exactly one row across the two files"), int64(FramesA + FramesB), Final.Accepted);
+	TestTrue(TEXT("rows went to the file that was set when they were queued"), FramesA >= 3 && FramesB >= 1);
+	TestEqual(TEXT("each file has its header once"), HeadersA * 10 + HeadersB, 11);
+	TestEqual(TEXT("the summary row was written once, after the stream stopped"), SummariesA + SummariesB, 1);
 	return true;
 }
 

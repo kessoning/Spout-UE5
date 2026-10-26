@@ -204,7 +204,8 @@ namespace SpoutSharedSlotTests
 	}
 
 	/**
-	 * Pins r.Spout.Dev.AsyncSend to 0 for a test of the synchronous send, and gives the variable back its value and
+	 * Pins r.Spout.Dev.AsyncSend to 0 for a test of the synchronous send, at console priority (so a switch set from the
+	 * command line, an ini file or the console does not override it), and gives the variable back its value and
 	 * priority afterwards. A sender entry decides its path at its first send, so the test's own new name sends
 	 * synchronously whatever the process's setting.
 	 */
@@ -220,14 +221,14 @@ namespace SpoutSharedSlotTests
 			{
 				Before = Variable->GetString();
 				Priority = static_cast<EConsoleVariableFlags>(Variable->GetFlags() & ECVF_SetByMask);
-				Variable->Set(TEXT("0"), ECVF_SetByCode);
+				Variable->Set(TEXT("0"), ECVF_SetByConsole);
 			}
 		}
 		~FSynchronousSend()
 		{
 			if (Variable)
 			{
-				Variable->Set(*Before, ECVF_SetByCode);
+				Variable->Set(*Before, ECVF_SetByConsole);
 				Variable->SetFlags(static_cast<EConsoleVariableFlags>((Variable->GetFlags() & ~ECVF_SetByMask) | Priority));
 			}
 		}

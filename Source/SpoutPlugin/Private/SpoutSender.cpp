@@ -592,6 +592,19 @@ namespace
 					return;
 				}
 
+				// Development switch r.Spout.Dev.AsyncSend: an entry whose asynchronous sender exists belongs to its worker
+				// (shared texture, registration, access, announcement). A synchronous send to the same name (the viewport
+				// sender) is refused rather than run beside the worker. Render thread only, like AsyncSendMode.
+				if (Sender->AsyncSendMode == 1)
+				{
+					if (Sender->RegistrationLogThrottle.ShouldLog())
+					{
+						UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout sender '%s': a viewport send to a name whose render-target sender uses the asynchronous send (r.Spout.Dev.AsyncSend) was refused; ")
+							TEXT("one name is published by one source."), *Sender->Name.ToString());
+					}
+					return;
+				}
+
 				// Gate on the registration state, not on the texture existing. A live shared texture
 				// says nothing about whether Spout accepted the name, and publishing into a texture
 				// whose name is unregistered (or whose advertised handle is stale) sends the frames

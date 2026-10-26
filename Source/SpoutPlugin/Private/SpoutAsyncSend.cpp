@@ -146,10 +146,13 @@ namespace
 	}
 
 	/**
-	 * The development outcome log (r.Spout.Dev.AsyncSend.OutcomeLog). Rows are queued under a leaf lock by the render
-	 * thread and the workers and appended to the file by this object's own thread every 200 ms, and on Flush; nothing
-	 * else touches the file. A new path starts a new file with a meta line and the column header; an empty path stops
-	 * the log after writing what was queued.
+	 * The development outcome log (r.Spout.Dev.AsyncSend.OutcomeLog). The render thread and the workers queue rows under
+	 * Mutex, a leaf held only to append one row or to swap the queue out (no other allocation under it); the log's own
+	 * thread appends the queue to the file every 200 ms, as do Flush and the module's shutdown. FileMutex serializes the
+	 * appends and every change of the path: rows queued before a change go to the old file, rows queued after it to the
+	 * new one, and none is dropped while a path is set. A path's file gets the meta line and the column header once,
+	 * when it is empty or new. A stream that started before the log was turned on has no start row: its rows cannot be
+	 * reconciled with the counters.
 	 */
 	class FSpoutSendOutcomeLog final : public FRunnable
 	{
@@ -165,75 +168,51 @@ namespace
 		/** Game thread (the variable's change, module startup). */
 		void SetPath(const FString& NewPath)
 		{
-			Flush();
 			{
-				FScopeLock Lock(&Mutex);
+				FScopeLock FileLock(&FileMutex);
 				if (NewPath == Path)
 				{
 					return;
 				}
+				// What was queued for the old path is written there first; from the swap on, rows queue for the new one.
+				TArray<FString> Lines;
+				{
+					FScopeLock Lock(&Mutex);
+					Swap(Lines, Pending);
+					bOn = !NewPath.IsEmpty();
+				}
+				WriteLocked(Lines);
 				Path = NewPath;
 				bHeaderWritten = false;
-				bOn = !Path.IsEmpty();
 			}
 			if (bOn.load() && !Thread)
 			{
+				bExit = false;
 				Wake = FPlatformProcess::GetSynchEventFromPool(false);
-				Thread = FRunnableThread::Create(this, TEXT("SpoutAsyncSendOutcomeLog"), 0, TPri_BelowNormal);
+				Thread = FRunnableThread::Create(this, TEXT("SpoutAsyncSendOutcomeLog"), 0, TPri_Normal);
 			}
-			if (bOn.load())
-			{
-				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: asynchronous send outcome log (development): %s"), *NewPath);
-			}
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: asynchronous send outcome log (development): %s"), NewPath.IsEmpty() ? TEXT("off") : *NewPath);
 		}
 
 		void Push(FString&& Line)
 		{
 			FScopeLock Lock(&Mutex);
-			if (!Path.IsEmpty())
+			if (bOn.load())
 			{
 				Pending.Add(MoveTemp(Line));
 			}
 		}
 
-		/** Writes what is queued now, on the calling thread (serialized with the writer). */
+		/** Writes what is queued now, on the calling thread (serialized with the writer and with path changes). */
 		void Flush()
 		{
 			FScopeLock FileLock(&FileMutex);
 			TArray<FString> Lines;
-			FString Target;
-			bool bHeader = false;
 			{
 				FScopeLock Lock(&Mutex);
-				Lines = MoveTemp(Pending);
-				Pending.Reset();
-				Target = Path;
-				bHeader = !bHeaderWritten && !Target.IsEmpty();
-				bHeaderWritten = bHeaderWritten || bHeader;
+				Swap(Lines, Pending);
 			}
-			if (Target.IsEmpty() || (Lines.Num() == 0 && !bHeader))
-			{
-				return;
-			}
-			FString Text;
-			if (bHeader)
-			{
-				Text += FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u qpcFrequency=%.0f openedQpc=%llu openedUtc=%s\n"),
-					FPlatformProcess::GetCurrentProcessId(), 1.0 / FPlatformTime::GetSecondsPerCycle64(), FPlatformTime::Cycles64(),
-					*FDateTime::UtcNow().ToIso8601());
-				Text += TEXT("kind,stream,streamObject,set,frame,sendTick,sendQpc,renderFrame,acceptQpc,readyQpc,firstAttemptQpc,acquiredQpc,publishQpc,resolvedQpc,")
-					TEXT("outcome,attempts,failedAttempts,frameEndValue,frameEndFallback,detail\n");
-			}
-			for (const FString& L : Lines)
-			{
-				Text += L;
-				Text += TEXT("\n");
-			}
-			if (!FFileHelper::SaveStringToFile(Text, *Target, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append))
-			{
-				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout: the asynchronous send outcome log could not be written to %s; %d rows are lost (the log is then incomplete and is not evidence)."),
-					*Target, Lines.Num());
-			}
+			WriteLocked(Lines);
 		}
 
 		/** Module shutdown: writes what is queued and stops the writer. */
@@ -261,6 +240,41 @@ namespace
 		}
 
 	private:
+		/** FileMutex held: appends Lines to Path, with the header first when the file is new or empty. */
+		void WriteLocked(const TArray<FString>& Lines)
+		{
+			if (Path.IsEmpty() || Lines.Num() == 0)
+			{
+				return;
+			}
+			FString Text;
+			if (!bHeaderWritten)
+			{
+				bHeaderWritten = true;
+				if (IFileManager::Get().FileSize(*Path) <= 0)
+				{
+					Text += FString::Printf(TEXT("# SpoutAsyncSendOutcomes/1 pid=%u qpcFrequency=%.0f openedQpc=%llu openedUtc=%s
+"),
+						FPlatformProcess::GetCurrentProcessId(), 1.0 / FPlatformTime::GetSecondsPerCycle64(), FPlatformTime::Cycles64(),
+						*FDateTime::UtcNow().ToIso8601());
+					Text += TEXT("kind,stream,streamObject,set,frame,sendTick,sendQpc,renderFrame,acceptQpc,readyQpc,firstAttemptQpc,acquiredQpc,publishQpc,resolvedQpc,")
+						TEXT("outcome,attempts,failedAttempts,frameEndValue,frameEndFallback,detail
+");
+				}
+			}
+			for (const FString& L : Lines)
+			{
+				Text += L;
+				Text += TEXT("
+");
+			}
+			if (!FFileHelper::SaveStringToFile(Text, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append))
+			{
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout: the asynchronous send outcome log could not be written to %s; %d rows are lost (the log is then incomplete and is not evidence)."),
+					*Path, Lines.Num());
+			}
+		}
+
 		virtual uint32 Run() override
 		{
 			while (!bExit.load())
@@ -271,11 +285,11 @@ namespace
 			return 0;
 		}
 
-		FCriticalSection Mutex;       // leaf: Pending, Path
-		FCriticalSection FileMutex;   // serializes the file appends
+		FCriticalSection Mutex;       // leaf: Pending and bOn's changes
+		FCriticalSection FileMutex;   // the appends and Path; never taken under Mutex
 		TArray<FString> Pending;
-		FString Path;
-		bool bHeaderWritten = false;
+		FString Path;                 // FileMutex
+		bool bHeaderWritten = false;  // FileMutex
 		std::atomic<bool> bOn{false};
 		std::atomic<bool> bExit{false};
 		FRunnableThread* Thread = nullptr;
@@ -495,7 +509,9 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 	check(IsInRenderingThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncSendAccept);
 	FSpoutGpuRetirement::Get().Poll();
+	// The frame's acceptance time, for the bounds and the counters and for the outcome log's acceptQpc alike.
 	const double Now = FPlatformTime::Seconds();
+	const uint64 NowQpc = FPlatformTime::Cycles64();
 
 	// No Stop can run while this does: Stop runs only once the entry's last reference is dropped, and the command that
 	// calls this holds one. So nothing below races a stop of this stream.
@@ -605,7 +621,7 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 			T.Id = Id;
 			T.Origin = Origin;
 			T.RenderFrame = GFrameCounterRenderThread;
-			T.AcceptQpc = FPlatformTime::Cycles64();
+			T.AcceptQpc = NowQpc;
 		}
 	}
 	// Hand the fill to the RHI thread now, without waiting for it: the worker waits for the fence on the CPU, and a
