@@ -411,6 +411,8 @@ bool FSpoutAsyncSendWaitsForAccess::RunTest(const FString&)
 	namespace AS = SpoutAsyncSendTests;
 	if (!AS::RequireSharedSlot(*this)) return false;
 	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	// The plugin's access-unavailable wording, which log analysis counts as such (at least once).
+	AddExpectedMessage(TEXT("sender '.*': shared-texture access was unavailable because a receiver still held it"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	const FName Name = AS::UniqueName(TEXT("Wait"));
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
 	AS::Upload(Source.Get(), 1);

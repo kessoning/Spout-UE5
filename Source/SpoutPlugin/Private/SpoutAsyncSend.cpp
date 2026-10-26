@@ -961,9 +961,10 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 		}
 		if (AccessLogThrottle.ShouldLog())
 		{
+			// The same words as every other access-unavailable warning of the plugin, so one log search finds them all.
 			UE_LOG(LogSpoutPlugin, Warning,
-				TEXT("Spout %s: a receiver still held the shared texture after waiting up to %u ms (r.Spout.AccessWaitMs); the frame waits for another attempt, ")
-				TEXT("until a newer frame is ready or %.0f ms after it was ready (asynchronous send)."),
+				TEXT("Spout %s: shared-texture access was unavailable because a receiver still held it after waiting up to %u ms (r.Spout.AccessWaitMs), ")
+				TEXT("so this frame was not published yet. It waits for another attempt, until a newer frame is ready or %.0f ms after it was ready (asynchronous send)."),
 				*What, SpoutLimits::AccessWaitMs(), Ms(AccessDeadlineSeconds));
 		}
 		if (SpoutLimits::AccessWaitMs() == 0)
