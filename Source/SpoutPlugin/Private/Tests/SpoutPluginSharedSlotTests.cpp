@@ -18,6 +18,9 @@
 //               nothing, keeps its texture provable, and the next source size publishes again
 //   access      a late receive keeps the peer's access until its read is proven finished; a failed send drain whose
 //               proof query reports errors keeps access until the proof arrives (a probe thread plays the peer)
+// The send failure and send access tests are tests of the synchronous send (FSpoutSlotSend): they pin the development
+// switch r.Spout.Dev.AsyncSend to 0 for their duration and check that their sender took the synchronous path, so they
+// mean the same thing whatever the process's setting (the asynchronous sender has its own tests).
 #include "Misc/AutomationTest.h"
 #if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
 #include "SpoutAsyncReceive.h"
@@ -199,6 +202,36 @@ namespace SpoutSharedSlotTests
 		return Test.TestTrue(TEXT("this process latched the shared-slot path (r.Spout.SharedSlotInterop 1); these tests do not belong to the legacy control process"),
 			SpoutInterop::IsSharedSlot());
 	}
+
+	/**
+	 * Pins r.Spout.Dev.AsyncSend to 0 for a test of the synchronous send, and gives the variable back its value and
+	 * priority afterwards. A sender entry decides its path at its first send, so the test's own new name sends
+	 * synchronously whatever the process's setting.
+	 */
+	struct FSynchronousSend
+	{
+		IConsoleVariable* Variable = nullptr;
+		FString Before;
+		EConsoleVariableFlags Priority = ECVF_SetByCode;
+		FSynchronousSend()
+		{
+			Variable = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.Dev.AsyncSend"));
+			if (Variable)
+			{
+				Before = Variable->GetString();
+				Priority = static_cast<EConsoleVariableFlags>(Variable->GetFlags() & ECVF_SetByMask);
+				Variable->Set(TEXT("0"), ECVF_SetByCode);
+			}
+		}
+		~FSynchronousSend()
+		{
+			if (Variable)
+			{
+				Variable->Set(*Before, ECVF_SetByCode);
+				Variable->SetFlags(static_cast<EConsoleVariableFlags>((Variable->GetFlags() & ~ECVF_SetByMask) | Priority));
+			}
+		}
+	};
 }
 
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -548,6 +581,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutSlotSendFailures, "SpoutPlugin.SharedSlot
 bool FSpoutSlotSendFailures::RunTest(const FString&)
 {
 	if (!SpoutSharedSlotTests::RequireSharedSlot(*this)) return false;
+	SpoutSharedSlotTests::FSynchronousSend Synchronous;
 	const FName Name = SpoutSharedSlotTests::UniqueName(TEXT("SendFailures"));
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(NewObject<UTextureRenderTarget2D>(GetTransientPackage()));
 	Source->InitCustomFormat(64, 32, PF_B8G8R8A8, true);
@@ -566,6 +600,7 @@ bool FSpoutSlotSendFailures::RunTest(const FString&)
 	SpoutSharedSlotTests::ReadTexture(SpoutSharedSlotTests::SourceTexture(Source.Get()), Expected);
 	TestTrue(TEXT("the first frame arrives"), ReceivedEquals(Expected));
 	TSharedPtr<FSpoutSharedSender> Sender = FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Sender);
+	TestTrue(TEXT("the sender took the synchronous send"), Sender && Sender->AsyncSendMode != 1 && !Sender->AsyncSend.IsValid());
 	if (!TestTrue(TEXT("a send slot exists"), Sender && Sender->SlotSend.IsValid())) return false;
 	const int64 PublishedBefore = Sender->SlotTransfers.load();
 
@@ -687,6 +722,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutSlotSendHoldsAccess, "SpoutPlugin.SharedS
 bool FSpoutSlotSendHoldsAccess::RunTest(const FString&)
 {
 	if (!SpoutSharedSlotTests::RequireSharedSlot(*this)) return false;
+	SpoutSharedSlotTests::FSynchronousSend Synchronous;
 	const FName Name = SpoutSharedSlotTests::UniqueName(TEXT("SendHold"));
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(NewObject<UTextureRenderTarget2D>(GetTransientPackage()));
 	Source->InitCustomFormat(64, 32, PF_B8G8R8A8, true);
@@ -696,6 +732,7 @@ bool FSpoutSlotSendHoldsAccess::RunTest(const FString&)
 	SpoutSharedSlotTests::Receive(Name, Texture, Material);
 	const TSharedPtr<FSpoutSharedSender> Sender = FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Sender);
 	const TSharedPtr<FSpoutSharedSender> Receiver = FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Receiver);
+	TestTrue(TEXT("the sender took the synchronous send"), Sender && Sender->AsyncSendMode != 1 && !Sender->AsyncSend.IsValid());
 	if (!TestTrue(TEXT("a send slot and a receiver with its opened texture exist"), Sender && Sender->SlotSend.IsValid() && Receiver && Receiver->SharedTexture)) return false;
 	const int64 PublishedBefore = Sender->SlotTransfers.load();
 
