@@ -29,10 +29,19 @@
  *   - Spout access is taken and given back by the worker thread only, through
  *     FSpoutTextureAccessScope. The render thread never takes it for an asynchronous stream.
  *   - The worker never exits while it holds access: the stop request is seen between transfers.
- *   - Every GPU wait on the worker is bounded. A copy that did not complete in time is given up:
- *     access is released, the slot is never published, the transfer stays owed.
+ *   - Once access is taken and a copy submitted, access is given back only when that copy is proven
+ *     finished (its written-fence value reached, or, after a failed signal, the event query issued
+ *     after it reported done) or the worker's device was removed, as on the synchronous slot path
+ *     (FSpoutSlotReceive::CopyAndWait). CompletionTimeoutMs classifies a copy as late; it never ends
+ *     the wait. A late copy is never published and its transfer stays owed. A stalled GPU therefore
+ *     keeps the sender's access held, and the stream's destruction (close, a new sender identity, a
+ *     fallback, shutdown) waits for the worker until the copy is proven or the device is removed; a
+ *     warning is logged every 5 s meanwhile.
  *   - A slot is written only when the read fence reached the value of its last read, and read
  *     only behind a queue wait on the written fence.
+ *   - The stream's objects (slots, fences, the opened source, the proof query) are handed to
+ *     FSpoutGpuRetirement with the fence values that prove their work finished, never released
+ *     directly: the native copies it submitted and the reads Unreal queued out of its slots.
  *   - One stream object is one generation, with a number no other stream object of the process
  *     has. A new size, format or share handle destroys the stream and creates another, so an image
  *     of an old generation cannot reach the current output.
@@ -50,6 +59,7 @@
 #include "RHI.h"
 #include "SpoutInstrument.h"
 #include "SpoutSlotPool.h"
+#include "SpoutSlotRules.h"
 #include <atomic>
 #if SPOUT_WITH_INSTRUMENT
 #include "HAL/Thread.h"
@@ -98,6 +108,10 @@ public:
 	/** Turns the asynchronous path off for the process (device removed, a failed fence or handle call). */
 	void Disable(const TCHAR* Why, HRESULT Result);
 	bool IsDisabled() const { return bDisabled.load(); }
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Tests only: undoes Disable after an injected failure, while the device itself still exists and is not removed. */
+	void ReenableForTest();
+#endif
 
 	ID3D11Device5* GetDevice() const { return Device.Get(); }
 	ID3D11DeviceContext4* GetContext() const { return Context.Get(); }
@@ -207,6 +221,7 @@ private:
 	/** Fixed limits of the asynchronous path, not restrictions on what senders may do. */
 	static constexpr int32 PollIntervalMicroseconds = 250;
 	static constexpr uint32 NoSlotWaitMs = 2;
+	/** A copy proven finished later than this is discarded (late); the bound never ends the wait while access is held. */
 	static constexpr uint32 CompletionTimeoutMs = 100;
 	static constexpr int32 MaxConsecutiveTimeouts = 8;
 
@@ -215,11 +230,13 @@ private:
 	FSpoutFrameSync& FrameSync;
 	const FIdentity Identity;
 
-	/** Guards Pool, Gate and NextReadValue. Held for one call; never across access, a device call or a wait. */
+	/** Guards Pool, Gate, LastReadValue and Outstanding. Held for one call; never across access, a device call or a wait. */
 	mutable FCriticalSection StateMutex;
 	SpoutAsync::FSlotPool Pool{NumSlots};
 	SpoutAsync::FTransferGate Gate;
 	uint64 LastReadValue = 0;
+	/** The work the stream's objects may still be used by: native copies (worker) and reads queued by Unreal (render thread). */
+	SpoutSlotRules::FOutstanding Outstanding;
 	const uint64 Generation;
 
 	// Unreal's device: the slots and both fences live there.
@@ -232,6 +249,8 @@ private:
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> WorkerSource;
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> WorkerSlots[NumSlots];
 	Microsoft::WRL::ComPtr<ID3D11Fence> WorkerWrittenFence;
+	/** The event query that proves a copy whose written-fence signal failed. */
+	Microsoft::WRL::ComPtr<ID3D11Query> Proof;
 	bool bKeyedSource = false;
 
 	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> Reservation;
@@ -254,5 +273,20 @@ private:
 	std::atomic<int64> WorkerCpu100ns{-1};
 	std::atomic<double> WorkerSeconds{0.0};
 };
+
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Failure injection for the automation tests, taken by the asynchronous receive's worker only (the shared-slot hooks of
+ * SpoutSharedSlot.h are taken by whichever native wait comes next, which in a test with the plugin's own sender can be
+ * the sender's).
+ */
+namespace SpoutAsyncReceiveTestHooks
+{
+	/** The worker's next copy is not accepted as finished before this many milliseconds; its real proof is still needed. */
+	extern std::atomic<int32> DelayCompletionMs;
+	/** The worker's next written-fence signals are reported failed without being made. */
+	extern std::atomic<int32> FailSignals;
+}
+#endif
 
 #endif // PLATFORM_WINDOWS

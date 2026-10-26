@@ -570,4 +570,248 @@ bool FSpoutAsyncBetaIdentity::RunTest(const FString&)
 	return true;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Completion before release. The worker gives the sender's access back only once its copy is proven
+// finished or its device was removed: a copy that finishes after the 100 ms bound, a copy whose fence signal failed,
+// and a stream closed or stopped with a copy outstanding. "Held" is checked twice: by the plugin's own state and by an
+// independent holder that tries to take the sender's named access mutex. A stream's objects go to the retirement list
+// and are released only once their work is proven finished.
+// ---------------------------------------------------------------------------------------------
+
+namespace SpoutAsyncBetaTests
+{
+	/** Whether another holder could take Name's Spout access mutex now: taken with no wait and given back at once, on this thread. */
+	bool AccessFreeForAnotherHolder(const FName& Name)
+	{
+		const FString Text = Name.ToString();
+		const auto Utf8 = StringCast<ANSICHAR>(*Text);
+		TUniquePtr<ISpoutFrameSyncBackend> Probe = MakeSpoutSdkFrameSyncBackend();
+		bool bGot = false;
+		if (Probe && Probe->CreateAccessMutex(Utf8.Get()))
+		{
+			bGot = Probe->CheckTextureAccess(nullptr, 0);
+			if (bGot)
+			{
+				Probe->AllowTextureAccess(nullptr);
+			}
+			Probe->CloseAccessMutex();
+		}
+		RecycleSpoutSdkFrameSyncBackend(MoveTemp(Probe));
+		return bGot;
+	}
+
+	/** Polls Predicate until it is true or TimeoutSeconds passed. Returns when it became true, or a negative number. */
+	template <typename FPredicate>
+	double WaitUntil(FPredicate&& Predicate, double TimeoutSeconds)
+	{
+		const double End = FPlatformTime::Seconds() + TimeoutSeconds;
+		for (;;)
+		{
+			if (Predicate()) return FPlatformTime::Seconds();
+			if (FPlatformTime::Seconds() > End) return -1.0;
+			FPlatformProcess::SleepNoStats(0.001f);
+		}
+	}
+
+	/** Whether the name's asynchronous worker holds the sender's access (the plugin's own record). */
+	bool WorkerHoldsAccess(const FName& Name)
+	{
+		const TSharedPtr<FSpoutSharedSender> E = Entry(Name);
+		return E && E->FrameSync.IsAccessHeld();
+	}
+
+	FSpoutAsyncStats WorkerStats(const FName& Name)
+	{
+		const TSharedPtr<FSpoutSharedSender> E = Entry(Name);
+		return E && E->Async ? E->Async->GetStats() : FSpoutAsyncStats();
+	}
+
+	/** Waits until the retirement list released at least Count more sets than Before (polling it), or the timeout. */
+	bool WaitForReleases(int64 Before, int64 Count, double TimeoutSeconds)
+	{
+		return WaitUntil([&] { FSpoutGpuRetirement::Get().Poll(); return FSpoutGpuRetirement::Get().GetStats().Released >= Before + Count; }, TimeoutSeconds) > 0.0;
+	}
+
+	/** Sends the first image of a 64x32 BGRA8 source and receives it asynchronously. False when it did not arrive that way. */
+	bool StartAsync(FAutomationTestBase& Test, const FName& Name, FConsumer& C, UTextureRenderTarget2D* Source)
+	{
+		Upload(Source, 1);
+		Send(Name, Source);
+		const bool bArrived = ReceiveExact(Name, C, Source);
+		Test.TestTrue(TEXT("the first image arrives"), bArrived);
+		const bool bAsync = Status(Name).EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta && Entry(Name) && Entry(Name)->Async;
+		Test.TestTrue(TEXT("through Async Receive (Beta)"), bAsync);
+		return bArrived && bAsync;
+	}
+
+	void CloseBoth(const FName& Name, FConsumer& C)
+	{
+		Close(Name, C);
+		USpoutBPFunctionLibrary::CloseSender(Name);
+		FlushRenderingCommands();
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaLateCopy, "SpoutPlugin.AsyncBeta.ACopyFinishingLateKeepsTheSendersAccessUntilItIsProven", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutAsyncBetaLateCopy::RunTest(const FString&)
+{
+	namespace AB = SpoutAsyncBetaTests;
+	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	ON_SCOPE_EXIT { SpoutAsyncReceiveTestHooks::DelayCompletionMs = 0; };
+	const FName Name = AB::UniqueName(TEXT("Late"));
+	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
+	const FSpoutAsyncStats Before = AB::WorkerStats(Name);
+
+	// The worker's next copy is not finished before 400 ms, four times its 100 ms bound.
+	constexpr int32 DelayMs = 400;
+	SpoutAsyncReceiveTestHooks::DelayCompletionMs = DelayMs;
+	AB::Upload(Source.Get(), 2);
+	AB::Send(Name, Source.Get());
+	const double Held = AB::WaitUntil([&] { return AB::WorkerHoldsAccess(Name); }, 2.0);
+	TestTrue(TEXT("the worker took the sender's access for the new image"), Held > 0.0);
+	if (Held > 0.0)
+	{
+		while (FPlatformTime::Seconds() < Held + 0.2) { FPlatformProcess::SleepNoStats(0.005f); }
+		TestTrue(TEXT("200 ms in, past the bound: the worker still holds access"), AB::WorkerHoldsAccess(Name));
+		TestFalse(TEXT("and no other holder can take the sender's access mutex"), AB::AccessFreeForAnotherHolder(Name));
+		const double Freed = AB::WaitUntil([&] { return !AB::WorkerHoldsAccess(Name); }, 5.0);
+		TestTrue(TEXT("access is given back once the copy is proven finished"), Freed > 0.0);
+		TestTrue(FString::Printf(TEXT("not before the copy finished (held %.0f ms; the copy took %d)"), (Freed - Held) * 1000.0, DelayMs),
+			Freed > 0.0 && (Freed - Held) * 1000.0 >= DelayMs - 50.0);
+	}
+	const FSpoutAsyncStats After = AB::WorkerStats(Name);
+	TestTrue(TEXT("the late copy was discarded, never published"), After.CompletionTimeouts >= Before.CompletionTimeouts + 1);
+	TestTrue(TEXT("the image still arrives exactly, from a later copy"), AB::ReceiveExact(Name, C, Source.Get()));
+	TestTrue(TEXT("still through Async Receive (Beta): one late copy does not end the stream"), AB::Status(Name).EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("the sender's access is free again"), AB::WaitUntil([&] { return AB::AccessFreeForAnotherHolder(Name); }, 1.0) > 0.0);
+	TestEqual(TEXT("no rule violation in the slot bookkeeping"), AB::WorkerStats(Name).RuleViolations, int64(0));
+	AB::CloseBoth(Name, C);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaFailedSignal, "SpoutPlugin.AsyncBeta.AFailedSignalKeepsAccessUntilTheQueryProvesTheCopyThenFallsBack", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutAsyncBetaFailedSignal::RunTest(const FString&)
+{
+	namespace AB = SpoutAsyncBetaTests;
+	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	ON_SCOPE_EXIT
+	{
+		SpoutAsyncReceiveTestHooks::FailSignals = 0;
+		SpoutAsyncReceiveTestHooks::DelayCompletionMs = 0;
+		FSpoutAsyncDevice::Get().ReenableForTest();
+	};
+	AddExpectedMessage(TEXT("asynchronous receive is off for this process"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
+	AddExpectedMessage(TEXT("Async Receive (Beta) stopped (a written-fence signal failed"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	const int32 WorkersBefore = FSpoutAsyncStream::GetLiveStreams();
+	const FName Name = AB::UniqueName(TEXT("FailedSignal"));
+	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
+	const int64 ReleasedBefore = FSpoutGpuRetirement::Get().GetStats().Released;
+
+	// The next copy's signal fails; its proof (the event query) is not accepted before 300 ms.
+	constexpr int32 DelayMs = 300;
+	SpoutAsyncReceiveTestHooks::FailSignals = 1;
+	SpoutAsyncReceiveTestHooks::DelayCompletionMs = DelayMs;
+	AB::Upload(Source.Get(), 2);
+	AB::Send(Name, Source.Get());
+	const double Held = AB::WaitUntil([&] { return AB::WorkerHoldsAccess(Name); }, 2.0);
+	TestTrue(TEXT("the worker took the sender's access"), Held > 0.0);
+	if (Held > 0.0)
+	{
+		while (FPlatformTime::Seconds() < Held + 0.15) { FPlatformProcess::SleepNoStats(0.005f); }
+		TestTrue(TEXT("with no fence value to prove the copy, access is still held"), AB::WorkerHoldsAccess(Name));
+		TestFalse(TEXT("and no other holder can take the sender's access mutex"), AB::AccessFreeForAnotherHolder(Name));
+		const double Freed = AB::WaitUntil([&] { return !AB::WorkerHoldsAccess(Name); }, 5.0);
+		TestTrue(FString::Printf(TEXT("access is given back once the query proved the copy (held %.0f ms; the proof took %d)"), (Freed - Held) * 1000.0, DelayMs),
+			Freed > 0.0 && (Freed - Held) * 1000.0 >= DelayMs - 50.0);
+	}
+	TestTrue(TEXT("the stream failed"), AB::WaitUntil([&] { return AB::Entry(Name) && (!AB::Entry(Name)->Async || AB::Entry(Name)->Async->HasFailed()); }, 2.0) > 0.0);
+	TestTrue(TEXT("a failed signal turns the asynchronous path off for the process, as before"), FSpoutAsyncDevice::Get().IsDisabled());
+	TestTrue(TEXT("the image still arrives exactly, through the synchronous fallback"), AB::ReceiveExact(Name, C, Source.Get()));
+	const FSpoutStreamStatus S = AB::Status(Name);
+	TestTrue(TEXT("the effective mode is synchronous"), S.EffectiveReceiveMode == ESpoutReceiveMode::Synchronous);
+	TestFalse(TEXT("and the status says why"), S.ReceiveModeNote.IsEmpty());
+	TestEqual(TEXT("the failed worker is gone"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+	TestTrue(TEXT("its objects were retired and released once their work was proven finished"), AB::WaitForReleases(ReleasedBefore, 1, 5.0));
+	AB::CloseBoth(Name, C);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaCloseOutstanding, "SpoutPlugin.AsyncBeta.ClosingWithACopyOutstandingWaitsForItAndRetiresTheStream", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutAsyncBetaCloseOutstanding::RunTest(const FString&)
+{
+	namespace AB = SpoutAsyncBetaTests;
+	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	ON_SCOPE_EXIT { SpoutAsyncReceiveTestHooks::DelayCompletionMs = 0; };
+	const int32 WorkersBefore = FSpoutAsyncStream::GetLiveStreams();
+	const FName Name = AB::UniqueName(TEXT("CloseOutstanding"));
+	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
+
+	constexpr int32 DelayMs = 500;
+	SpoutAsyncReceiveTestHooks::DelayCompletionMs = DelayMs;
+	AB::Upload(Source.Get(), 2);
+	AB::Send(Name, Source.Get());
+	const double Held = AB::WaitUntil([&] { return AB::WorkerHoldsAccess(Name); }, 2.0);
+	TestTrue(TEXT("the worker holds the sender's access for a copy outstanding"), Held > 0.0);
+	const FSpoutGpuRetirement::FStats Before = FSpoutGpuRetirement::Get().GetStats();
+	AB::Close(Name, C);
+	const double Closed = FPlatformTime::Seconds();
+	TestEqual(TEXT("the close joined the worker"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+	if (Held > 0.0)
+	{
+		TestTrue(FString::Printf(TEXT("the close waited until the copy was proven finished (%.0f ms after access was taken; the copy took %d)"),
+			(Closed - Held) * 1000.0, DelayMs), (Closed - Held) * 1000.0 >= DelayMs - 50.0);
+	}
+	TestTrue(TEXT("the sender's access is free once the close returned"), AB::AccessFreeForAnotherHolder(Name));
+	TestTrue(TEXT("the stream's objects went to the retirement list"), FSpoutGpuRetirement::Get().GetStats().Retired >= Before.Retired + 1);
+	TestTrue(TEXT("and were released once their work was proven finished"), AB::WaitForReleases(Before.Released, 1, 5.0));
+	USpoutBPFunctionLibrary::CloseSender(Name);
+	FlushRenderingCommands();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaStopOutstanding, "SpoutPlugin.AsyncBeta.ASessionStopWithACopyOutstandingWaitsForItAndRetiresTheStream", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutAsyncBetaStopOutstanding::RunTest(const FString&)
+{
+	namespace AB = SpoutAsyncBetaTests;
+	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	ON_SCOPE_EXIT { SpoutAsyncReceiveTestHooks::DelayCompletionMs = 0; };
+	const int32 WorkersBefore = FSpoutAsyncStream::GetLiveStreams();
+	const FName Name = AB::UniqueName(TEXT("StopOutstanding"));
+	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
+
+	constexpr int32 DelayMs = 500;
+	SpoutAsyncReceiveTestHooks::DelayCompletionMs = DelayMs;
+	AB::Upload(Source.Get(), 2);
+	AB::Send(Name, Source.Get());
+	const double Held = AB::WaitUntil([&] { return AB::WorkerHoldsAccess(Name); }, 2.0);
+	TestTrue(TEXT("the worker holds the sender's access for a copy outstanding"), Held > 0.0);
+	const FSpoutGpuRetirement::FStats Before = FSpoutGpuRetirement::Get().GetStats();
+	// The session's ordered teardown (every stream of the process), then the session runs again.
+	USpoutBPFunctionLibrary::CloseAllStreams();
+	const double Stopped = FPlatformTime::Seconds();
+	TestEqual(TEXT("the stop joined the worker"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+	if (Held > 0.0)
+	{
+		TestTrue(FString::Printf(TEXT("the stop waited until the copy was proven finished (%.0f ms after access was taken; the copy took %d)"),
+			(Stopped - Held) * 1000.0, DelayMs), (Stopped - Held) * 1000.0 >= DelayMs - 50.0);
+	}
+	TestTrue(TEXT("the sender's access is free once the stop returned"), AB::AccessFreeForAnotherHolder(Name));
+	TestTrue(TEXT("the stream's objects went to the retirement list"), FSpoutGpuRetirement::Get().GetStats().Retired >= Before.Retired + 1);
+	TestTrue(TEXT("and were released once their work was proven finished"), AB::WaitForReleases(Before.Released, 1, 5.0));
+	FlushRenderingCommands();
+	return true;
+}
+
 #endif

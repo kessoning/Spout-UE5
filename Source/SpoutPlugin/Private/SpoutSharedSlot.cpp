@@ -17,6 +17,7 @@
 #include "SpoutDebugCapture.h"
 #include "SpoutLimits.h"
 #include "SpoutModule.h"
+#include "SpoutNativeWork.h"
 #include "HAL/PlatformProcess.h"
 #include "ID3D12DynamicRHI.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -259,15 +260,18 @@ namespace
 	 * native context. A query that reports an error other than the native device's removal proves nothing, and it is
 	 * issued again. While it waits, a warning says every 5 s that the peer's access is still held.
 	 */
-	ENativeProof WaitForNativeWork(ID3D12Fence* View, uint64 Value, bool bSignalled, ID3D11Query* Proof, uint32 BoundMs, HANDLE Event, const FString& What)
+	ENativeProof WaitForNativeWork(ID3D12Fence* View, uint64 Value, bool bSignalled, ID3D11Query* Proof, uint32 BoundMs, HANDLE Event, const FString& What,
+		int32 TestNotBeforeMs = 0)
 	{
 		FSpoutAsyncDevice& Async = FSpoutAsyncDevice::Get();
 		const double Start = FPlatformTime::Seconds();
 		double NotBefore = Start;
 #if WITH_DEV_AUTOMATION_TESTS
 		// Tests: a GPU operation that takes this long. Completion is not accepted earlier; the real proof is still needed.
-		const int32 DelayMs = SpoutSlotTestHooks::DelayNativeCompletionMs.exchange(0);
+		const int32 DelayMs = FMath::Max(SpoutSlotTestHooks::DelayNativeCompletionMs.exchange(0), TestNotBeforeMs);
 		NotBefore += double(FMath::Max(DelayMs, 0)) / 1000.0;
+#else
+		static_cast<void>(TestNotBeforeMs);
 #endif
 		auto IssueQuery = [&Async, Proof]()
 		{
@@ -372,6 +376,70 @@ namespace
 				FPlatformProcess::SleepNoStats(bDone ? 0.001f : 0.0f);
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// The native device's waits and proofs, for the other users of the native device (SpoutNativeWork.h)
+// ---------------------------------------------------------------------------------------------
+
+namespace SpoutNativeWork
+{
+	bool NativeRemoved()
+	{
+		return IsNativeRemoved();
+	}
+
+	bool UnrealRemoved()
+	{
+		return IsUnrealRemoved();
+	}
+
+	ESpoutNativeProof WaitForProof(ID3D12Fence* View, uint64 Value, bool bSignalled, ID3D11Query* Proof, uint32 BoundMs, HANDLE Event,
+		const FString& What, int32 NotBeforeMs)
+	{
+		switch (WaitForNativeWork(View, Value, bSignalled, Proof, BoundMs, Event, What, NotBeforeMs))
+		{
+		case ENativeProof::InTime: return ESpoutNativeProof::InTime;
+		case ENativeProof::Late:   return ESpoutNativeProof::Late;
+		default:                   return ESpoutNativeProof::Removed;
+		}
+	}
+
+	HRESULT Signal(ID3D11DeviceContext4* Context, ID3D11Fence* Fence, uint64 Value)
+	{
+		return SignalNative(Context, Fence, Value);
+	}
+
+	HRESULT CreateProof(ComPtr<ID3D11Query>& Out)
+	{
+		return CreateProofQuery(Out);
+	}
+
+	SpoutSlotRules::EWait WaitForQueueFence(ID3D12Fence* Fence, uint64 Value, uint32 TimeoutMs, HANDLE Event)
+	{
+		return WaitForFenceValue(Fence, Value, TimeoutMs, Event);
+	}
+
+	HRESULT CreateFencePair(bool bShared, ComPtr<ID3D12Fence>& Out12, ComPtr<ID3D11Fence>* OutNative)
+	{
+		return CreateCrossFence(bShared, Out12, OutNative);
+	}
+
+	HRESULT CreateSlotTexture(uint32 Width, uint32 Height, DXGI_FORMAT Format, EPixelFormat PixelFormat,
+		ComPtr<ID3D12Resource>& OutResource, ComPtr<ID3D11Texture2D>& OutNative, FTextureRHIRef& OutTexture)
+	{
+		return CreateSlot(Width, Height, Format, PixelFormat, OutResource, OutNative, OutTexture);
+	}
+
+	void QueueWait(FRHICommandListImmediate& Cmd, ID3D12Fence* Fence, uint64 Value)
+	{
+		QueueWaitManualFence(Cmd, Fence, Value);
+	}
+
+	void AddRetiredObject(TArray<TRefCountPtr<IUnknown>>& Objects, IUnknown* Object)
+	{
+		AddObject(Objects, Object);
 	}
 }
 

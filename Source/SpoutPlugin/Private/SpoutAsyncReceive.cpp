@@ -15,6 +15,8 @@
 #include "SpoutInstrument.h"
 #include "SpoutLimits.h"
 #include "SpoutModule.h"
+#include "SpoutNativeWork.h"
+#include "SpoutSharedSlot.h"
 #include "HAL/RunnableThread.h"
 #include "ID3D12DynamicRHI.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -273,6 +275,18 @@ void FSpoutAsyncDevice::Disable(const TCHAR* Why, HRESULT Result)
 	UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout asynchronous receive is off for this process: %s. Streams use the synchronous path."), *DisabledWhy);
 }
 
+#if WITH_DEV_AUTOMATION_TESTS
+void FSpoutAsyncDevice::ReenableForTest()
+{
+	FScopeLock Lock(&InitMutex);
+	if (Device && Device->GetDeviceRemovedReason() == S_OK)
+	{
+		bDisabled = false;
+		DisabledWhy.Reset();
+	}
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // One stream
 // ---------------------------------------------------------------------------------------------
@@ -384,6 +398,9 @@ bool FSpoutAsyncStream::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 		::CloseHandle(FenceHandle);
 		if (FAILED(Result) || !WorkerWrittenFence) return Refuse(TEXT("the written fence could not be opened on the worker's device"), Result);
 	}
+	// The event query that proves a copy whose written-fence signal failed: access is held until it reports.
+	Result = SpoutNativeWork::CreateProof(Proof);
+	if (FAILED(Result) || !Proof) return Refuse(TEXT("the event query could not be created"), Result);
 
 	// The slots: shared textures on Unreal's device, wrapped for Unreal and opened on the worker's
 	// device. Created in the common state and wrapped as shared, so the state Unreal assumes for
@@ -454,8 +471,9 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 	Stop();
 	if (Thread)
 	{
-		// The worker sees the request between transfers. One in progress runs to its end: it gives
-		// access back first. That is bounded by the access wait and the completion bound.
+		// The worker sees the request between transfers. One in progress runs to its end and gives access back
+		// only once its copy is proven finished or the worker's device was removed: on a stalled GPU this join
+		// waits that long (WaitForProof warns every 5 s).
 		Thread->WaitForCompletion();
 		delete Thread;
 		Thread = nullptr;
@@ -468,31 +486,50 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 		// One line per stream object, from the bookkeeping's own counters.
 		const FSpoutAsyncStats Stats = GetStats();
 		UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': asynchronous receive ended (stream object %llu, %.1f s): %lld polls, %lld images published, %lld consumed, ")
-			TEXT("%lld replaced unread, %lld transfers skipped for no free slot, %lld accesses refused, %lld copies failed, %lld completions timed out, %lld rule violations; ")
+			TEXT("%lld replaced unread, %lld transfers skipped for no free slot, %lld accesses refused, %lld copies failed, %lld copies finished late (discarded), %lld rule violations; ")
 			TEXT("worker thread CPU time %.1f ms."),
 			*Name.ToString(), Generation, WorkerSeconds.load(), Stats.Polls, Stats.Published, Stats.Consumed, Stats.ReplacedUnread, Stats.NoFreeSlot, Stats.AccessRefused,
 			Stats.CopyFailed, Stats.CompletionTimeouts, Stats.RuleViolations, double(WorkerCpu100ns.load()) / 10000.0);
 	}
+	// The objects go to the retirement list with the fence values that prove their work finished: the worker's copies
+	// (written fence, or the event query after a failed signal) and the copies Unreal queued out of the slots (read
+	// fence). Nothing is released while either device may still use it (SpoutSlotRules.h), on every path that ends a
+	// stream: close, a new sender identity, a fallback to the synchronous path, and shutdown.
+	TUniquePtr<FSpoutGpuRetirement::FRetiredSet> Record = MakeUnique<FSpoutGpuRetirement::FRetiredSet>();
+	Record->What = FString::Printf(TEXT("asynchronous receive objects of '%s' (stream object %llu)"), *Name.ToString(), Generation);
 	{
 		FScopeLock Lock(&StateMutex);
 		Pool.Retire();
+		Record->Outstanding = Outstanding;
 	}
-	// Nothing writes the slots any more. Copies Unreal has queued out of them keep the slots' RHI
-	// textures alive on Unreal's side until its queue has passed them, so releasing here is safe.
+	Record->NativeFence = WrittenFence;
+	Record->QueueFence = ReadFence;
+	Record->Proof = Proof;
 	for (int32 I = 0; I < NumSlots; ++I)
 	{
+		if (SlotTextures[I].IsValid())
+		{
+			Record->Textures.Add(SlotTextures[I]);
+		}
+		SpoutNativeWork::AddRetiredObject(Record->Objects, WorkerSlots[I].Get());
+		SpoutNativeWork::AddRetiredObject(Record->Objects, SlotResources[I].Get());
 		WorkerSlots[I].Reset();
 		SlotTextures[I].SafeRelease();
 		SlotResources[I].Reset();
 	}
+	SpoutNativeWork::AddRetiredObject(Record->Objects, WorkerSource.Get());
+	SpoutNativeWork::AddRetiredObject(Record->Objects, WorkerWrittenFence.Get());
+	Record->Event = FenceEvent;
+	FenceEvent = nullptr;
+	Record->Reservation = MoveTemp(Reservation);
+	FSpoutGpuRetirement::Get().Retire(MoveTemp(Record));
 	WorkerSource.Reset();
 	WorkerWrittenFence.Reset();
 	WrittenFence.Reset();
 	ReadFence.Reset();
+	Proof.Reset();
 	if (PollTimer) ::CloseHandle(PollTimer);
-	if (FenceEvent) ::CloseHandle(FenceEvent);
 	if (StopEvent) ::CloseHandle(StopEvent);
-	Reservation.Reset();
 	// With the debug layer on: what the worker's device had to say about this stream's resources.
 	FSpoutAsyncDevice::Get().ReportDebugLayer();
 	GLiveAsyncStreams.fetch_sub(1);
@@ -644,10 +681,15 @@ bool FSpoutAsyncStream::TransferOnce()
 
 	// 2. Access, with the same bounded wait as the synchronous path, taken and given back by this
 	// thread. 3. The notification read again under access. 4. The copy and the written-fence signal.
-	// 5. The wait for that copy, bounded, while access is still held: the sender may overwrite its
-	// texture as soon as access is released.
+	// 5. The wait until that copy is proven finished, while access is still held: the sender may
+	// overwrite its texture as soon as access is released, and the copy may still be reading it.
+	// CompletionTimeoutMs only classifies the copy as late; the wait ends with a proof or the
+	// worker's device's removal (SpoutNativeWork::WaitForProof), never on a wall-clock bound.
 	bool bAcquired = false;
 	bool bDone = false;
+	bool bSignalled = false;
+	bool bRemoved = false;
+	ESpoutNativeProof Proven = ESpoutNativeProof::InTime;
 	HRESULT CopyResult = S_OK;
 	uint64 Value = 0;
 	uint64 AcquiredAt = 0;
@@ -664,17 +706,70 @@ bool FSpoutAsyncStream::TransferOnce()
 			// new again after its image was copied. It clears nothing: only a completed copy does.
 			bool bUnused = false;
 			FrameSync.PollNotification(bUnused);
+			bool bInjectedSignalFailure = false;
+#if WITH_DEV_AUTOMATION_TESTS
+			for (int32 Left = SpoutAsyncReceiveTestHooks::FailSignals.load(); Left > 0;)
+			{
+				if (SpoutAsyncReceiveTestHooks::FailSignals.compare_exchange_weak(Left, Left - 1))
+				{
+					bInjectedSignalFailure = true;
+					break;
+				}
+			}
+#endif
+			bool bSubmitted = false;
 			{
 				FScopeLock ContextLock(&Async.GetContextMutex());
-				ID3D11DeviceContext4* Context = Async.GetContext();
-				Context->CopyResource(WorkerSlots[Slot].Get(), WorkerSource.Get());
-				Value = ++WrittenValue;
-				CopyResult = Context->Signal(WorkerWrittenFence.Get(), Value);
-				Context->Flush();
+				if (ID3D11DeviceContext4* Context = Async.GetContext())
+				{
+					Context->CopyResource(WorkerSlots[Slot].Get(), WorkerSource.Get());
+					Value = ++WrittenValue;
+					CopyResult = bInjectedSignalFailure ? E_FAIL : SpoutNativeWork::Signal(Context, WorkerWrittenFence.Get(), Value);
+					if (FAILED(CopyResult))
+					{
+						// No fence value will prove this copy: the event query ended after it will.
+						Context->End(Proof.Get());
+					}
+					Context->Flush();
+					bSubmitted = true;
+				}
 			}
-			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TCopyRec = SpoutInstrument::Now(); Rec.WrittenValue = static_cast<int64>(Value); })
-			bDone = SUCCEEDED(CopyResult) && WaitForFence(WrittenFence.Get(), Value, CompletionTimeoutMs, FenceEvent);
-			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TGpuDone = SpoutInstrument::Now(); Rec.Hr = static_cast<int32>(CopyResult); })
+			if (!bSubmitted)
+			{
+				// No context: nothing was submitted, so nothing can still read the sender's texture.
+				CopyResult = E_UNEXPECTED;
+				bRemoved = true;
+			}
+			else
+			{
+				bSignalled = SUCCEEDED(CopyResult);
+				{
+					FScopeLock Lock(&StateMutex);
+					if (bSignalled)
+					{
+						Outstanding.NativeSignalled(Value);
+					}
+					else
+					{
+						Outstanding.NativeSignalFailed(true);
+					}
+				}
+				SPOUT_INSTRUMENT(if (bInstrument) { Rec.TCopyRec = SpoutInstrument::Now(); Rec.WrittenValue = static_cast<int64>(Value); })
+				int32 TestDelayMs = 0;
+#if WITH_DEV_AUTOMATION_TESTS
+				TestDelayMs = SpoutAsyncReceiveTestHooks::DelayCompletionMs.exchange(0);
+#endif
+				Proven = SpoutNativeWork::WaitForProof(WrittenFence.Get(), Value, bSignalled, Proof.Get(), CompletionTimeoutMs, FenceEvent,
+					FString::Printf(TEXT("asynchronous receiver '%s'"), *Name.ToString()), TestDelayMs);
+				bRemoved = Proven == ESpoutNativeProof::Removed;
+				if (!bSignalled && !bRemoved)
+				{
+					FScopeLock Lock(&StateMutex);
+					Outstanding.ProofCompleted();
+				}
+				bDone = bSignalled && Proven == ESpoutNativeProof::InTime;
+				SPOUT_INSTRUMENT(if (bInstrument) { Rec.TGpuDone = SpoutInstrument::Now(); Rec.Hr = static_cast<int32>(CopyResult); })
+			}
 		}
 	}
 	// Access has been given back. A keyed texture's release is recorded on this device's context and
@@ -682,7 +777,10 @@ bool FSpoutAsyncStream::TransferOnce()
 	if (bAcquired && bKeyedSource)
 	{
 		FScopeLock ContextLock(&Async.GetContextMutex());
-		Async.GetContext()->Flush();
+		if (ID3D11DeviceContext4* Context = Async.GetContext())
+		{
+			Context->Flush();
+		}
 	}
 	SPOUT_INSTRUMENT(if (bInstrument) Rec.TRelease = SpoutInstrument::Now();)
 
@@ -701,7 +799,10 @@ bool FSpoutAsyncStream::TransferOnce()
 		}
 		else
 		{
-			Why = !bAcquired ? SpoutAsync::EAbandon::AccessRefused : (FAILED(CopyResult) ? SpoutAsync::EAbandon::CopyFailed : SpoutAsync::EAbandon::CompletionTimeout);
+			// A late copy and a copy whose signal failed are proven finished here; only a removed device leaves one
+			// that will never run. Either way nothing reads the slot any more and it may be written again.
+			Why = !bAcquired ? SpoutAsync::EAbandon::AccessRefused
+				: ((FAILED(CopyResult) || bRemoved) ? SpoutAsync::EAbandon::CopyFailed : SpoutAsync::EAbandon::CompletionTimeout);
 			Pool.AbandonWrite(Slot, Why);
 		}
 	}
@@ -712,12 +813,13 @@ bool FSpoutAsyncStream::TransferOnce()
 	else if (bAcquired)
 	{
 		// A removed device or a failed fence call ends the asynchronous path for the process; a copy
-		// that keeps missing its bound ends it for this stream. Either way the caller falls back.
-		const HRESULT Removed = Async.GetDevice()->GetDeviceRemovedReason();
-		if (Removed != S_OK)
+		// that keeps finishing after its bound ends it for this stream. Either way the caller falls back.
+		ID3D11Device5* WorkerDevice = Async.GetDevice();
+		const HRESULT Removed = WorkerDevice ? WorkerDevice->GetDeviceRemovedReason() : DXGI_ERROR_DEVICE_REMOVED;
+		if (bRemoved || Removed != S_OK)
 		{
-			Async.Disable(TEXT("the worker's device was removed"), Removed);
-			Fail(TEXT("the worker's device was removed"), Removed);
+			Async.Disable(TEXT("the worker's device was removed"), Removed != S_OK ? Removed : DXGI_ERROR_DEVICE_REMOVED);
+			Fail(TEXT("the worker's device was removed"), Removed != S_OK ? Removed : DXGI_ERROR_DEVICE_REMOVED);
 		}
 		else if (FAILED(CopyResult))
 		{
@@ -726,7 +828,7 @@ bool FSpoutAsyncStream::TransferOnce()
 		}
 		else if (++ConsecutiveTimeouts >= MaxConsecutiveTimeouts)
 		{
-			Fail(TEXT("slot copies repeatedly did not complete in time"), HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+			Fail(TEXT("slot copies repeatedly finished later than their bound"), HRESULT_FROM_WIN32(ERROR_TIMEOUT));
 		}
 	}
 	SPOUT_INSTRUMENT(
@@ -774,6 +876,8 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 		{
 			++LastReadValue;
 			Gate.OnConsumed();
+			// Unreal's queue reads the slot until it signals this value: the slot's objects are retired with it.
+			Outstanding.QueueSignalQueued(Taken.ReadValue);
 		}
 	}
 	const bool bConsumed = Result == SpoutAsync::EConsume::Consumed;
@@ -845,5 +949,13 @@ FSpoutAsyncStats FSpoutAsyncStream::GetStats() const
 	Out.Polls = Polls.load();
 	return Out;
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+namespace SpoutAsyncReceiveTestHooks
+{
+	std::atomic<int32> DelayCompletionMs{0};
+	std::atomic<int32> FailSignals{0};
+}
+#endif
 
 #endif // PLATFORM_WINDOWS
