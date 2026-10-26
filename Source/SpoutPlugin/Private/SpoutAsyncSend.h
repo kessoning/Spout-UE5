@@ -36,12 +36,12 @@
  *   - while the worker installs a new identity (the first frame, a resize: shared-texture creation, FrameSync's open,
  *     the registration) it holds the session lock (FSpoutSession::ExecuteIfCurrent), so the render thread's token
  *     checks of every stream, and the game thread's OpenStream, wait for that installation; bounded by it. On the
- *     synchronous send the render thread spent that time installing.
+ *     synchronous send the render thread spends that time installing.
  *   - a Close (FSpoutSender::Close removes the entry without a flush) while a send command still holds the entry makes
  *     that command's reference the last one, so Stop runs on the render thread: it waits for the stream's owed frames,
  *     one access attempt each (the fill, already dispatched, at most 1 s; no installation, the token being stale; the
  *     drain's proof, unbounded only on a GPU that stalls without a removal), as the synchronous send's render thread
- *     waited for its own frame.
+ *     waits for its own frame.
  *
  * Lock order: the entry's ResourceMutex (installation) and FSpoutFrameSync's lock (access) are taken by the worker
  * one at a time, never with the stream's state lock. The state lock is held for one bookkeeping call, never across a
@@ -50,6 +50,11 @@
  *
  * One name, one source: while an entry's asynchronous sender exists, a synchronous send to the same name (the
  * viewport sender) is refused with a warning instead of running beside the worker.
+ *
+ * Lifetime: the stream is shared (the flush hook pins it while it resolves owed frames) and keeps a reference to its
+ * entry, which the worker uses. The entry's destructor stops the stream, joining the worker, before any of the
+ * entry's members goes; a stream pinned past that point owes nothing (its ring is empty) and its own destructor does
+ * not touch the entry.
  *
  * Memory: each slot set reserves two frames against r.Spout.MaxRetainedMiB (the shared texture keeps its own two);
  * a set given up when its identity changes keeps its reservation until FSpoutGpuRetirement releases it. A refused
