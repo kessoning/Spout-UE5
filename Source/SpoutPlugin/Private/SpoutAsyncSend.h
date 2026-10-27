@@ -106,6 +106,12 @@ struct FSpoutAsyncSendStats
 	int64 Accepted = 0;
 	int64 NotAccepted[static_cast<int>(SpoutSendRing::ENotAccepted::Count)] = {};
 	int64 Outcomes[static_cast<int>(SpoutSendRing::EOutcome::Count)] = {};
+	/**
+	 * Of Outcomes, counted apart: frames resolved while a flush (FlushRenderingCommands, a session stop's flush step
+	 * included) or the stream's stop (close, the entry's destruction) allowed them one access attempt only.
+	 */
+	int64 FlushOutcomes[static_cast<int>(SpoutSendRing::EOutcome::Count)] = {};
+	int64 StopOutcomes[static_cast<int>(SpoutSendRing::EOutcome::Count)] = {};
 	int64 InFlight = 0;
 	/** Access attempts the worker made, and those that did not get access (each one also counts in AccessMisses). */
 	int64 Attempts = 0;
@@ -124,10 +130,12 @@ struct FSpoutAsyncSendStats
 	int64 Published() const { return Outcomes[static_cast<int>(SpoutSendRing::EOutcome::Published)]; }
 	int64 Superseded() const { return Outcomes[static_cast<int>(SpoutSendRing::EOutcome::Superseded)]; }
 	int64 AccessAbandoned() const { return Outcomes[static_cast<int>(SpoutSendRing::EOutcome::AccessAbandoned)]; }
-	int64 Failed() const
+	int64 Failed() const { return FailedIn(Outcomes); }
+	/** The failures of one of the outcome arrays above. */
+	static int64 FailedIn(const int64 (&In)[static_cast<int>(SpoutSendRing::EOutcome::Count)])
 	{
 		int64 N = 0;
-		for (int32 I = static_cast<int32>(SpoutSendRing::EOutcome::FailedFill); I < static_cast<int32>(SpoutSendRing::EOutcome::Count); ++I) N += Outcomes[I];
+		for (int32 I = static_cast<int32>(SpoutSendRing::EOutcome::FailedFill); I < static_cast<int32>(SpoutSendRing::EOutcome::Count); ++I) N += In[I];
 		return N;
 	}
 };
@@ -302,6 +310,13 @@ private:
 
 /** Internal accessor (no public fields): the counters of Name's render-target sender stream. False without one. */
 bool SpoutGetAsyncSendStats(const FName& Name, FSpoutAsyncSendStats& Out);
+
+/**
+ * Render thread (SpoutSender.cpp). One name, one source: true when Entry belongs to its asynchronous sender, so a
+ * synchronous send to it (the viewport sender) is refused; counted in Entry.RefusedSynchronousSends and warned about at
+ * most once per 5 s (Entry.RefusedSendLogThrottle).
+ */
+bool SpoutAsyncSendRefusesSynchronousSend(FSpoutSharedSender& Entry);
 
 #if WITH_DEV_AUTOMATION_TESTS
 /** Failure injection for the automation tests. Each counter makes that many next events take the failure branch. */

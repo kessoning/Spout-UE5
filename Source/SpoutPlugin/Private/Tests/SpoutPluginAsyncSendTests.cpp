@@ -25,6 +25,7 @@
 #if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
 #include "Async/Async.h"
 #include "SpoutAsyncSend.h"
+#include "SpoutAsyncReceive.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutD3DContext.h"
 #include "SpoutFrameSync.h"
@@ -204,6 +205,13 @@ namespace SpoutAsyncSendTests
 
 	int64 Outcome(const FSpoutAsyncSendStats& S, EOutcome O) { return S.Outcomes[static_cast<int32>(O)]; }
 	int64 Refused(const FSpoutAsyncSendStats& S, ENotAccepted W) { return S.NotAccepted[static_cast<int32>(W)]; }
+	/** The frames of one outcome array (FlushOutcomes, StopOutcomes), every outcome. */
+	int64 Sum(const int64 (&In)[static_cast<int>(EOutcome::Count)])
+	{
+		int64 N = 0;
+		for (int32 I = 1; I < static_cast<int32>(EOutcome::Count); ++I) N += In[I];
+		return N;
+	}
 
 	template <typename FPredicate>
 	double WaitUntil(FPredicate&& Predicate, double TimeoutSeconds)
@@ -542,6 +550,7 @@ bool FSpoutAsyncSendCloseOwed::RunTest(const FString&)
 		{
 			const FSpoutAsyncSendStats S = Kept->GetStats();
 			TestEqual(TEXT("the owed frame was abandoned for access"), S.AccessAbandoned(), int64(1));
+			TestEqual(TEXT("and counted apart as resolved at the stream's stop"), S.StopOutcomes[static_cast<int32>(AS::EOutcome::AccessAbandoned)], int64(1));
 			TestEqual(TEXT("nothing is owed"), S.InFlight, int64(0));
 		}
 		TestFalse(TEXT("the other holder still has the access mutex"), AS::AccessFree(Name));
@@ -1015,6 +1024,14 @@ bool FSpoutAsyncSendOutcomeLog::RunTest(const FString&)
 	TestEqual(TEXT("one row per accepted frame"), int64(Frames.Num()), Final.Accepted);
 	TestEqual(TEXT("one row per refused send"), int64(Refused.Num()), Final.NotAccepted[0] + Final.NotAccepted[1] + Final.NotAccepted[2] + Final.NotAccepted[3]);
 	TMap<FString, int64> ByOutcome;
+	int64 LimitedByFlush = 0, LimitedByStop = 0;
+	for (const TArray<FString>& C : Frames)
+	{
+		LimitedByFlush += C[19] == TEXT("limit=flush") ? 1 : 0;
+		LimitedByStop += C[19] == TEXT("limit=stop") ? 1 : 0;
+	}
+	TestEqual(TEXT("rows resolved with one attempt at a flush equal the counter"), LimitedByFlush, AS::Sum(Final.FlushOutcomes));
+	TestEqual(TEXT("rows resolved with one attempt at the stop equal the counter"), LimitedByStop, AS::Sum(Final.StopOutcomes));
 	uint64 PreviousResolved = 0;
 	bool bContiguous = true, bOrdered = true, bTimed = true, bOrigin = true;
 	for (int32 I = 0; I < Frames.Num(); ++I)
@@ -1039,6 +1056,8 @@ bool FSpoutAsyncSendOutcomeLog::RunTest(const FString&)
 	const FString Detail = Summary[0][19];
 	TestTrue(TEXT("the summary row carries the same counters"), Detail.Contains(FString::Printf(TEXT("accepted=%lld;published=%lld;superseded=%lld;accessAbandoned=%lld;"),
 		Final.Accepted, Final.Published(), Final.Superseded(), Final.AccessAbandoned())) && Detail.Contains(TEXT("inFlight=0;")) && Detail.Contains(TEXT("untracedFrames=0;")));
+	TestTrue(TEXT("and the counts apart, at a flush and at the stop"), Detail.Contains(FString::Printf(TEXT("flushPublished=%lld;flushSuperseded=%lld;flushAccessAbandoned=%lld;flushFailed=%lld;"),
+		Final.FlushOutcomes[1], Final.FlushOutcomes[2], Final.FlushOutcomes[3], FSpoutAsyncSendStats::FailedIn(Final.FlushOutcomes))));
 	return true;
 }
 
@@ -1238,6 +1257,408 @@ bool FSpoutAsyncSendOutcomeLogRestart::RunTest(const FString&)
 		(H::OutcomeLogEventsTaken.load() - Taken) * 100 + (H::OutcomeLogEventsReturned.load() - Returned), Shutdowns * 100 + Shutdowns);
 	const H::FOutcomeLogState End = H::GetOutcomeLogState();
 	TestTrue(TEXT("the log ends on, with one writer and its event"), End.bOn && End.bWriter && End.bWake && !End.bClosed);
+	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lifecycle under contention, same-name restart, one name one source, and the asynchronous sender with Async Receive
+// (Beta) in the same process.
+// ---------------------------------------------------------------------------------------------
+
+namespace SpoutAsyncSendTests
+{
+	/** The receiver entry of Name (role Receiver), whose FrameSync holds the sender's access during its own copies. */
+	TSharedPtr<FSpoutSharedSender> ReceiverEntry(const FName& Name)
+	{
+		return FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Receiver);
+	}
+
+	/** An Async Receive (Beta) receiver of Name in this process. */
+	struct FBetaReceiver
+	{
+		UTexture2D* Texture = nullptr;
+		UMaterialInstanceDynamic* Material = nullptr;
+		bool Call(const FName& Name)
+		{
+			const bool b = USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, true);
+			FlushRenderingCommands();
+			return b;
+		}
+		bool ReceiveExact(const FName& Name, UTextureRenderTarget2D* Source, double TimeoutSeconds = 5.0)
+		{
+			TArray<FLinearColor> Sent;
+			ReadPixels(SourceTexture(Source), Sent);
+			const double End = FPlatformTime::Seconds() + TimeoutSeconds;
+			for (;;)
+			{
+				if (!Call(Name) || !Texture) return false;
+				TArray<FLinearColor> Got;
+				FTextureResource* Resource = Texture->GetResource();
+				ReadPixels(Resource ? Resource->GetTextureRHI() : nullptr, Got);
+				if (Got.Num() == Sent.Num() && Got.Num() > 0 && FMemory::Memcmp(Got.GetData(), Sent.GetData(), Got.Num() * sizeof(FLinearColor)) == 0) return true;
+				if (FPlatformTime::Seconds() > End) return false;
+				FPlatformProcess::Sleep(0.002f);
+			}
+		}
+		bool IsAsync(const FName& Name) const
+		{
+			const TSharedPtr<FSpoutSharedSender> E = ReceiverEntry(Name);
+			return USpoutBPFunctionLibrary::GetSpoutStreamStatus(Name, ESpoutType::Receiver).EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta && E && E->Async;
+		}
+		FSpoutAsyncStats Stats(const FName& Name) const
+		{
+			const TSharedPtr<FSpoutSharedSender> E = ReceiverEntry(Name);
+			return E && E->Async ? E->Async->GetStats() : FSpoutAsyncStats();
+		}
+		void Close(const FName& Name)
+		{
+			USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material);
+			FlushRenderingCommands();
+		}
+	};
+
+	/**
+	 * Samples, until Seconds passed, whether the sender's worker and the receiver's worker ever held the access mutex at
+	 * the same time. A sample counts only when one of them held it throughout (its acquisition count unchanged around
+	 * reading the other), so a hand-over between two reads is not mistaken for an overlap.
+	 */
+	bool NeverHeldTogether(const FName& Name, double Seconds)
+	{
+		const TSharedPtr<FSpoutSharedSender> S = SenderEntry(Name);
+		const TSharedPtr<FSpoutSharedSender> R = ReceiverEntry(Name);
+		if (!S || !R) return true;
+		auto HeldAround = [](const FSpoutFrameSync& Long, const FSpoutFrameSync& Other)
+		{
+			const int32 Before = Long.GetAcquireCount();
+			const bool bFirst = Long.IsAccessHeld();
+			const bool bOther = Other.IsAccessHeld();
+			const bool bSecond = Long.IsAccessHeld();
+			return bFirst && bOther && bSecond && Long.GetAcquireCount() == Before;
+		};
+		const double End = FPlatformTime::Seconds() + Seconds;
+		while (FPlatformTime::Seconds() < End)
+		{
+			if (HeldAround(S->FrameSync, R->FrameSync) || HeldAround(R->FrameSync, S->FrameSync)) return false;
+			FPlatformProcess::SleepNoStats(0.0005f);
+		}
+		return true;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendStopContended, "SpoutPlugin.AsyncSend.ASessionStopUnderContentionResolvesTheOwedFrameAndCountsItApart", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendStopContended::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	const int32 LiveBefore = FSpoutAsyncSendStream::GetLiveStreams();
+	const FName Name = AS::UniqueName(TEXT("StopContended"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Next(AS::MakeSource(64, 32));
+	AS::Upload(Source.Get(), 1);
+	AS::Upload(Next.Get(), 2);
+	AS::Send(Name, Source.Get());
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Kept = AS::Stream(Name);
+	if (!TestTrue(TEXT("the first frame was published by the asynchronous sender"), Kept.IsValid() && Kept->GetStats().Published() == 1)) { AS::CloseSender(Name); return false; }
+	AS::FReceiver R;
+	TestTrue(TEXT("a receiver in this process has the first image"), R.ReceiveExact(Name, Source.Get()));
+	const FSpoutAsyncSendStats First = Kept->GetStats();
+	{
+		AS::FAccessHolder Holder(Name);
+		TestTrue(TEXT("another holder took the access mutex"), Holder.bHeld);
+		AS::SendNoFlush(Name, Next.Get());
+		const int64 OwedAtStop = Kept->GetStats().InFlight;
+		TestEqual(TEXT("one frame is owed when the session stops"), OwedAtStop, int64(1));
+		const double StoppedAt = FPlatformTime::Seconds();
+		USpoutBPFunctionLibrary::CloseAllStreams();
+		const double Took = FPlatformTime::Seconds() - StoppedAt;
+		TestTrue(FString::Printf(TEXT("the session stop resolved it with one bounded attempt and returned (%.1f ms)"), Took * 1000.0), Took < 0.5);
+		const FSpoutAsyncSendStats S = Kept->GetStats();
+		TestEqual(TEXT("the owed frame was abandoned for access"), S.AccessAbandoned(), First.AccessAbandoned() + 1);
+		TestEqual(TEXT("it was never announced: a receiver keeps the last published image"), S.Published(), First.Published());
+		TestEqual(TEXT("nothing is owed"), S.InFlight, int64(0));
+		TestEqual(TEXT("and it is counted apart, as resolved with one attempt at the stop's flush or the stream's stop"),
+			S.FlushOutcomes[static_cast<int32>(AS::EOutcome::AccessAbandoned)] + S.StopOutcomes[static_cast<int32>(AS::EOutcome::AccessAbandoned)]
+			- First.FlushOutcomes[static_cast<int32>(AS::EOutcome::AccessAbandoned)] - First.StopOutcomes[static_cast<int32>(AS::EOutcome::AccessAbandoned)], OwedAtStop);
+		TestTrue(TEXT("the counts apart are subsets of the outcomes"), AS::Sum(S.FlushOutcomes) + AS::Sum(S.StopOutcomes) <= S.Published() + S.Superseded() + S.AccessAbandoned() + S.Failed());
+		TestEqual(TEXT("no rule of the bookkeeping was broken"), S.RuleViolations, int64(0));
+		TestFalse(TEXT("the other holder still has the access mutex: nothing was taken from it"), AS::AccessFree(Name));
+	}
+	Kept.Reset();
+	TestEqual(TEXT("no stream object is left"), FSpoutAsyncSendStream::GetLiveStreams(), LiveBefore);
+	TestTrue(TEXT("nothing holds the access mutex"), AS::AccessFree(Name));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendRestartContended, "SpoutPlugin.AsyncSend.ASameNameRestartUnderContentionStartsANewStreamThatPublishes", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendRestartContended::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	const int32 LiveBefore = FSpoutAsyncSendStream::GetLiveStreams();
+	// While the holder has the access mutex the new stream's frame waits (the asynchronous sender's warning), and while
+	// the old entry is still held its name stays registered, so the reopened entry's registration is refused and retried.
+	AddExpectedMessage(TEXT("sender '.*': shared-texture access was unavailable because a receiver still held it.*\\(asynchronous send\\)"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
+	AddExpectedMessage(TEXT("sender '.*': Spout refused the registration for"), ELogVerbosity::Error, EAutomationExpectedMessageFlags::Contains, 0);
+	const FName Name = AS::UniqueName(TEXT("Restart"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Second(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Third(AS::MakeSource(96, 48));   // the restarted sender has another size
+	TStrongObjectPtr<UTextureRenderTarget2D> Fourth(AS::MakeSource(96, 48));
+	AS::Upload(Source.Get(), 1);
+	AS::Upload(Second.Get(), 2);
+	AS::Upload(Third.Get(), 3);
+	AS::Upload(Fourth.Get(), 4);
+	AS::Send(Name, Source.Get());
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Old = AS::Stream(Name);
+	if (!TestTrue(TEXT("the first stream published"), Old.IsValid() && Old->GetStats().Published() == 1)) { AS::CloseSender(Name); return false; }
+	AS::FReceiver R;
+	TestTrue(TEXT("the receiver has the first image"), R.ReceiveExact(Name, Source.Get()));
+
+	// 1. Close and reopen at once while another holder has the access mutex.
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> New;
+	{
+		AS::FAccessHolder Holder(Name);
+		AS::SendNoFlush(Name, Second.Get());
+		TestEqual(TEXT("the old stream owes a frame"), Old->GetStats().InFlight, int64(1));
+		USpoutBPFunctionLibrary::CloseSender(Name);
+		const FSpoutAsyncSendStats O = Old->GetStats();
+		TestEqual(TEXT("the close resolved the old stream's frame: abandoned for access, at the stop"), O.StopOutcomes[static_cast<int32>(AS::EOutcome::AccessAbandoned)], int64(1));
+		TestEqual(TEXT("the old stream owes nothing"), O.InFlight, int64(0));
+		TestEqual(TEXT("its account holds"), O.Accepted, O.Published() + O.Superseded() + O.AccessAbandoned() + O.Failed());
+		AS::SendNoFlush(Name, Third.Get());
+		New = AS::Stream(Name);
+		TestTrue(TEXT("the same name has a new stream object"), New.IsValid() && New != Old);
+		if (New)
+		{
+			TestTrue(TEXT("its frame tries for access while the holder has it"), AS::WaitUntil([&] { return New->GetStats().FailedAttempts > 0 || New->GetStats().Failed() > 0; }, 1.0) > 0.0);
+			TestEqual(TEXT("and is not published while the holder has it"), New->GetStats().Published(), int64(0));
+		}
+	}
+	if (!New) { R.Close(Name); AS::CloseSender(Name); return false; }
+	TestTrue(TEXT("once access is free the restarted sender publishes"), AS::WaitUntil([&] { AS::Send(Name, Third.Get()); return New->GetStats().Published() >= 1; }, 3.0) > 0.0);
+	TestTrue(TEXT("the receiver opened before the restart gets the new image exactly, at the new size"), R.ReceiveExact(Name, Third.Get()));
+	AS::CheckIdentity(*this, Name, TEXT("after a restart under contention"));
+	Old.Reset();
+
+	// 2. Close and reopen while something still holds the old entry (as a render command can): its stream keeps running
+	//    until the entry goes, and the new entry's frames are accounted for, never hidden, until the name is free.
+	TSharedPtr<FSpoutSharedSender> OldEntry = AS::SenderEntry(Name);
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Middle = New;
+	New.Reset();
+	const double ClosedAt = FPlatformTime::Seconds();
+	USpoutBPFunctionLibrary::CloseSender(Name);
+	TestTrue(TEXT("the close returns at once while the old entry is still held (its stream stops when the entry goes)"), FPlatformTime::Seconds() - ClosedAt < 0.5);
+	AS::Send(Name, Fourth.Get());
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Latest = AS::Stream(Name);
+	TestTrue(TEXT("the reopened name has its own stream"), Latest.IsValid() && Latest != Middle);
+	OldEntry.Reset();
+	TestTrue(TEXT("the old entry's stream stopped when the entry went"), Middle.IsValid() && Middle->GetStats().InFlight == 0);
+	Middle.Reset();
+	if (Latest)
+	{
+		TestTrue(TEXT("once the old entry is gone the reopened sender publishes"), AS::WaitUntil([&] { AS::Send(Name, Fourth.Get()); return Latest->GetStats().Published() >= 1; }, 3.0) > 0.0);
+		const FSpoutAsyncSendStats L = Latest->GetStats();
+		AddInfo(FString::Printf(TEXT("reopened while the old entry was held: accepted %lld, published %lld, failed %lld (install %lld), not accepted unpublishable %lld"),
+			L.Accepted, L.Published(), L.Failed(), L.Outcomes[static_cast<int32>(AS::EOutcome::FailedInstall)], AS::Refused(L, AS::ENotAccepted::Unpublishable)));
+	}
+	TestTrue(TEXT("and the receiver gets its image exactly"), R.ReceiveExact(Name, Fourth.Get()));
+	AS::CheckIdentity(*this, Name, TEXT("after a reopen while the old entry was held"));
+	Latest.Reset();
+	R.Close(Name);
+	AS::CloseSender(Name);
+	TestEqual(TEXT("no stream object is left"), FSpoutAsyncSendStream::GetLiveStreams(), LiveBefore);
+	TestTrue(TEXT("nothing holds the access mutex"), AS::AccessFree(Name));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendOneSource, "SpoutPlugin.AsyncSend.ASynchronousSendToItsNameIsRefusedCountedAndWarnedAboutOncePerInterval", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendOneSource::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	// Exactly one warning for a burst of refusals within the 5 s interval.
+	AddExpectedMessage(TEXT("sender '.*': a viewport send to a name whose render-target sender uses the asynchronous send \\(r\\.Spout\\.Dev\\.AsyncSend\\) was refused"),
+		ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
+	const FName Name = AS::UniqueName(TEXT("OneSource"));
+	const FName Other = AS::UniqueName(TEXT("Synchronous"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	AS::Upload(Source.Get(), 1);
+	{
+		AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+		AS::Send(Name, Source.Get());
+	}
+	TSharedPtr<FSpoutSharedSender> E = AS::SenderEntry(Name);
+	if (!TestTrue(TEXT("the name's render-target sender uses the asynchronous sender"), E.IsValid() && AS::Stream(Name).IsValid())) { AS::CloseSender(Name); return false; }
+	constexpr int32 Burst = 50;
+	int32 Refused = 0;
+	ENQUEUE_RENDER_COMMAND(SpoutAsyncSendRefuseBurst)([E, &Refused, Count = Burst](FRHICommandListImmediate&)
+	{
+		for (int32 I = 0; I < Count; ++I) Refused += SpoutAsyncSendRefusesSynchronousSend(*E) ? 1 : 0;
+	});
+	FlushRenderingCommands();
+	TestEqual(TEXT("every synchronous send to the name is refused"), Refused, Burst);
+	TestEqual(TEXT("and each one is counted"), E->RefusedSynchronousSends.load(), int64(Burst));
+	TestEqual(TEXT("the asynchronous sender's frames are not touched"), AS::Stats(Name).Published(), int64(1));
+
+	// A name whose sender is synchronous is never refused.
+	{
+		AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("0"));
+		AS::Send(Other, Source.Get());
+	}
+	const TSharedPtr<FSpoutSharedSender> O = AS::SenderEntry(Other);
+	bool bOtherRefused = true;
+	if (O)
+	{
+		ENQUEUE_RENDER_COMMAND(SpoutAsyncSendRefuseOther)([O, &bOtherRefused](FRHICommandListImmediate&) { bOtherRefused = SpoutAsyncSendRefusesSynchronousSend(*O); });
+		FlushRenderingCommands();
+	}
+	TestTrue(TEXT("a synchronous sender's name is not refused"), O.IsValid() && !bOtherRefused && O->RefusedSynchronousSends.load() == 0);
+	AS::CloseSender(Other);
+
+	// After the asynchronous sender closes, the name may be published by another source.
+	E.Reset();
+	AS::CloseSender(Name);
+	{
+		AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("0"));
+		AS::Upload(Source.Get(), 2);
+		TestTrue(TEXT("the reopened name accepts a synchronous send"), AS::Send(Name, Source.Get()));
+		const TSharedPtr<FSpoutSharedSender> Again = AS::SenderEntry(Name);
+		TestTrue(TEXT("through the synchronous slot send"), Again.IsValid() && Again->SlotSend.IsValid() && !AS::Stream(Name).IsValid());
+		AS::FReceiver R;
+		TestTrue(TEXT("and its image arrives exactly"), R.ReceiveExact(Name, Source.Get()));
+		R.Close(Name);
+	}
+	AS::CloseSender(Name);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendBetaDrain, "SpoutPlugin.AsyncSend.AsyncReceiveBetaReceivesTheAsynchronousSendAndWaitsOutItsLongDrain", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendBetaDrain::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	AS::FHooksReset Reset;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	const int32 LiveBefore = FSpoutAsyncSendStream::GetLiveStreams();
+	const FName Name = AS::UniqueName(TEXT("BetaDrain"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Late(AS::MakeSource(64, 32));
+	AS::Upload(Source.Get(), 1);
+	AS::Upload(Late.Get(), 99);
+	AS::Send(Name, Source.Get());
+	AS::FBetaReceiver B;
+	TestTrue(TEXT("the first image arrives through Async Receive (Beta)"), B.ReceiveExact(Name, Source.Get()) && B.IsAsync(Name));
+	for (int32 I = 2; I <= 20; ++I)
+	{
+		AS::Upload(Source.Get(), I);
+		AS::Send(Name, Source.Get());
+		B.Call(Name);
+	}
+	TestTrue(TEXT("the last image of a sequence arrives exactly"), B.ReceiveExact(Name, Source.Get()));
+	TSharedPtr<FSpoutSharedSender> S = AS::SenderEntry(Name);
+	TSharedPtr<FSpoutSharedSender> RxE = AS::ReceiverEntry(Name);
+	const int64 PublishedBefore = AS::Stats(Name).Published();
+	const int64 RxMissesBefore = RxE ? int64(RxE->FrameSync.GetFailedAcquireCount()) : 0;
+
+	// The asynchronous sender's native copy takes 300 ms; it holds the sender's access until the copy is proven.
+	SpoutAsyncSendTestHooks::DelayDrainMs = 300;
+	AS::SendNoFlush(Name, Late.Get());
+	const double Held = AS::WaitUntil([&] { return S && S->FrameSync.IsAccessHeld(); }, 2.0);
+	TestTrue(TEXT("the sender's worker holds access for its long copy"), Held > 0.0);
+	// Receive calls meanwhile. The receiver's worker attempts access only once a newer frame is announced, which happens
+	// after the long copy is proven, so it is expected to wait without failed attempts (reported below).
+	for (int32 I = 0; I < 5; ++I) B.Call(Name);
+	TestTrue(TEXT("the two workers never held the access mutex at the same time"), AS::NeverHeldTogether(Name, 0.15));
+	TestTrue(TEXT("the long copy is published once proven"), AS::WaitUntil([&] { return AS::Stats(Name).Published() == PublishedBefore + 1; }, 3.0) > 0.0);
+	TestTrue(TEXT("and Async Receive (Beta) then delivers exactly that image"), B.ReceiveExact(Name, Late.Get()));
+	if (RxE)
+	{
+		AddInfo(FString::Printf(TEXT("the receiver's failed acquisitions during the sender's long copy: %lld"), int64(RxE->FrameSync.GetFailedAcquireCount()) - RxMissesBefore));
+	}
+	TestEqual(TEXT("no rule violation in the receiver's slot bookkeeping"), B.Stats(Name).RuleViolations, int64(0));
+	AS::CheckIdentity(*this, Name, TEXT("after Async Receive (Beta) received the asynchronous send"));
+	TestTrue(TEXT("still through Async Receive (Beta)"), B.IsAsync(Name));
+	S.Reset();   // the test holds no entry when the streams close
+	RxE.Reset();
+	B.Close(Name);
+	AS::CloseSender(Name);
+	TestEqual(TEXT("no stream object is left"), FSpoutAsyncSendStream::GetLiveStreams(), LiveBefore);
+	TestTrue(TEXT("nothing holds the access mutex"), AS::AccessFree(Name));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendBetaLateCopy, "SpoutPlugin.AsyncSend.ALateBetaCopyKeepsAccessWhileTheAsynchronousSenderWaitsAndBothCloseCleanly", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendBetaLateCopy::RunTest(const FString&)
+{
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	AS::FHooksReset Reset;
+	ON_SCOPE_EXIT { SpoutAsyncReceiveTestHooks::DelayCompletionMs = 0; };
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	// The asynchronous sender's access warning, while the receiver's worker holds the texture (at least once).
+	AddExpectedMessage(TEXT("sender '.*': shared-texture access was unavailable because a receiver still held it.*\\(asynchronous send\\)"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
+	const int32 LiveBefore = FSpoutAsyncSendStream::GetLiveStreams();
+	const FName Name = AS::UniqueName(TEXT("BetaLate"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Second(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Third(AS::MakeSource(64, 32));
+	TStrongObjectPtr<UTextureRenderTarget2D> Fourth(AS::MakeSource(64, 32));
+	AS::Upload(Source.Get(), 1);
+	AS::Upload(Second.Get(), 2);
+	AS::Upload(Third.Get(), 3);
+	AS::Upload(Fourth.Get(), 4);
+	AS::Send(Name, Source.Get());
+	AS::FBetaReceiver B;
+	if (!TestTrue(TEXT("the first image arrives through Async Receive (Beta)"), B.ReceiveExact(Name, Source.Get()) && B.IsAsync(Name))) { B.Close(Name); AS::CloseSender(Name); return false; }
+	TSharedPtr<FSpoutSharedSender> S = AS::SenderEntry(Name);
+	TSharedPtr<FSpoutSharedSender> RxE = AS::ReceiverEntry(Name);
+	const int64 Baseline = S ? int64(S->FrameSync.GetFailedAcquireCount()) - AS::Stats(Name).FailedAttempts : -1;
+
+	// 1. The receiver's next copy is not finished before 400 ms; it keeps the sender's access until the copy is proven.
+	SpoutAsyncReceiveTestHooks::DelayCompletionMs = 400;
+	AS::Send(Name, Second.Get());
+	B.Call(Name);
+	const double RxHeld = AS::WaitUntil([&] { return RxE && RxE->FrameSync.IsAccessHeld(); }, 2.0);
+	TestTrue(TEXT("the receiver's worker holds the sender's access for its late copy"), RxHeld > 0.0);
+	const FSpoutAsyncSendStats Before = AS::Stats(Name);
+	AS::SendNoFlush(Name, Third.Get());
+	TestTrue(TEXT("the sender's frame waits, then is abandoned at its deadline while the receiver keeps access"),
+		AS::WaitUntil([&] { return AS::Stats(Name).AccessAbandoned() == Before.AccessAbandoned() + 1; }, 1.0) > 0.0);
+	TestTrue(TEXT("its attempts failed, each one a failed acquisition"), AS::Stats(Name).FailedAttempts > Before.FailedAttempts);
+	TestTrue(TEXT("the two workers never held the access mutex at the same time"), AS::NeverHeldTogether(Name, 0.1));
+	TestTrue(TEXT("the receiver gives access back only once its copy is proven"), AS::WaitUntil([&] { return RxE && !RxE->FrameSync.IsAccessHeld(); }, 5.0) > 0.0);
+	AS::Send(Name, Fourth.Get());
+	TestTrue(TEXT("afterwards the sender publishes and the receiver delivers that image exactly"), B.ReceiveExact(Name, Fourth.Get()));
+
+	// 2. Both close while work is outstanding: the receiver with a late copy in progress, the sender with a frame owed.
+	SpoutAsyncReceiveTestHooks::DelayCompletionMs = 400;
+	AS::Send(Name, Source.Get());
+	B.Call(Name);
+	TestTrue(TEXT("the receiver's worker holds access for another late copy"), AS::WaitUntil([&] { return RxE && RxE->FrameSync.IsAccessHeld(); }, 2.0) > 0.0);
+	AS::SendNoFlush(Name, Second.Get());
+	S.Reset();   // the test holds no entry when the streams close: the receiver's close itself waits for its copy
+	RxE.Reset();
+	const double CloseAt = FPlatformTime::Seconds();
+	B.Close(Name);
+	const double ReceiverClosed = FPlatformTime::Seconds() - CloseAt;
+	TestTrue(FString::Printf(TEXT("closing the receiver waited for its copy to be proven, bounded (%.0f ms)"), ReceiverClosed * 1000.0), ReceiverClosed < 5.0);
+	TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe> Kept = AS::Stream(Name);
+	AS::CloseSender(Name);
+	if (Kept)
+	{
+		const FSpoutAsyncSendStats End = Kept->GetStats();
+		TestEqual(TEXT("the sender's stream owes nothing after the close"), End.InFlight, int64(0));
+		TestEqual(TEXT("its account holds"), End.Accepted, End.Published() + End.Superseded() + End.AccessAbandoned() + End.Failed());
+		TestEqual(TEXT("no rule of its bookkeeping was broken"), End.RuleViolations, int64(0));
+	}
+	Kept.Reset();
+	static_cast<void>(Baseline);
+	TestEqual(TEXT("no stream object is left"), FSpoutAsyncSendStream::GetLiveStreams(), LiveBefore);
+	TestTrue(TEXT("nothing holds the access mutex"), AS::AccessFree(Name));
 	return true;
 }
 

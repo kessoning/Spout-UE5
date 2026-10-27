@@ -88,7 +88,11 @@ param(
 
     # Keeps the packaged output on disk after the row passes. Off by default: six engines times two
     # configurations of a packaged UE project is tens of gigabytes.
-    [switch] $KeepPackages
+    [switch] $KeepPackages,
+
+    # Extra arguments appended to every host launch, recorded in the manifest. Empty by default. Development
+    # coverage only (for example '-ini:Engine:[ConsoleVariables]:r.Spout.Dev.AsyncSend=1').
+    [string[]] $ExtraLaunchArguments = @()
 )
 
 Set-StrictMode -Version Latest
@@ -639,6 +643,7 @@ foreach ($version in $EngineVersions)
                 $identity = New-TrackDLaunchIdentity -Directory $launchEvidence -ArtifactIdentity $row.BuildIdentity -Executable $executablePath
                 $launchArgs += Get-TrackDIdentityArguments $identity
                 $launchArgs += "-SpoutNativePeer=$($nativeTools.Executable)"
+                if ($ExtraLaunchArguments.Count -gt 0) { $launchArgs += $ExtraLaunchArguments }
                 $launchResult = Invoke-TrackDProcess -FilePath $executablePath -ArgumentList $launchArgs `
                     -StdOutPath $hostLog -TimeoutSeconds $LaunchTimeoutSeconds `
                     -WorkingDirectory (Split-Path -Parent $executablePath)
@@ -793,6 +798,7 @@ $manifest = [ordered] @{
     RequestedEngines = $EngineVersions
     Configurations = $Configurations
     LaunchRepeats  = $LaunchRepeats
+    ExtraLaunchArguments = @($ExtraLaunchArguments)
     RequiredMarkers = $RequiredSmokeMarkers
     RepositorySpoutDllSha256 = $repoSpoutDllHash
     Rows           = $rows.ToArray()

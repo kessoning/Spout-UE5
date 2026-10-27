@@ -70,7 +70,11 @@ param(
     [string] $ExistingExecutable = '',
 
     [int] $PackageTimeoutSeconds = 5400,
-    [int] $ScenarioTimeoutMarginSeconds = 300
+    [int] $ScenarioTimeoutMarginSeconds = 300,
+
+    # Extra arguments appended to every scenario launch. Empty by default. Development coverage only (for example
+    # '-ini:Engine:[ConsoleVariables]:r.Spout.Dev.AsyncSend=1'); the summary records them.
+    [string[]] $ExtraLaunchArguments = @()
 )
 
 Set-StrictMode -Version Latest
@@ -289,6 +293,7 @@ foreach ($scenario in $AllScenarios)
     }
     if ($RhiValidation) { $launchArgs += '-rhivalidation' }
     if ($D3DDebug) { $launchArgs += '-d3ddebug' }
+    if ($ExtraLaunchArguments.Count -gt 0) { $launchArgs += $ExtraLaunchArguments }
 
     $timeout = $Seconds + $WarmupSeconds + $ScenarioTimeoutMarginSeconds
     $identity = New-TrackDLaunchIdentity -Directory $scenarioEvidence -Executable $scenarioExecutable -ArtifactIdentity $scenarioIdentity
@@ -391,6 +396,7 @@ $aggregate = [ordered] @{
     EngineVersion = $EngineVersion
     EngineBuildId = $engine.BuildId
     Configuration = $Configuration
+    ExtraLaunchArguments = @($ExtraLaunchArguments)
     Executable    = $executable
     MeasuredSeconds = $Seconds
     WarmupSeconds = $WarmupSeconds

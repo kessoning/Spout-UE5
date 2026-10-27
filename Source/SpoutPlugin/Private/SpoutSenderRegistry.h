@@ -177,6 +177,8 @@ public:
 	 * that sent synchronously before may move to 1, never back. Render thread only.
 	 */
 	int8 AsyncSendMode = -1;
+	/** Synchronous sends refused because this entry belongs to its asynchronous sender (one name, one source). */
+	std::atomic<int64> RefusedSynchronousSends{0};
 	/**
 	 * The entry's asynchronous sender while it exists. Created on the render thread; assigned and read elsewhere under
 	 * ResourceMutex. Its worker is the only thread that uses SharedTexture, the registration, FrameSync's access and

@@ -23,6 +23,11 @@
  *                    was removed
  * Accepted = Published + Superseded + AccessAbandoned + Failed + in flight, at every step.
  *
+ * Frames resolved while a flush or the stream's stop allowed them one attempt are also counted apart, by outcome
+ * (FlushOutcomes, StopOutcomes: subsets of Outcomes, never added to them). Resolving a frame is not a promise that an
+ * external receiver sees it: a published frame may be overwritten by the next one before a receiver reads it, and a
+ * frame abandoned at a stop is never announced.
+ *
  * Not thread-safe: the owner calls every method under its own lock, held for the call only, never across a graphics
  * call or a wait.
  */
@@ -60,6 +65,14 @@ namespace SpoutSendRing
 		Count = 4
 	};
 
+	/** Why a frame may make one access attempt only. A stop outranks a flush. */
+	enum class ELimit : std::uint8_t
+	{
+		None = 0,
+		Flush = 1,            // a flush (FlushRenderingCommands; a session stop's flush step too)
+		Stop = 2              // the stream's stop (close, or the entry's destruction)
+	};
+
 	/** What the worker does next with the frame it works on. */
 	enum class EStep : std::uint8_t
 	{
@@ -80,6 +93,7 @@ namespace SpoutSendRing
 		int FailedAttempts = 0;
 		bool bDraining = false;          // its copy out of the slot has been submitted
 		bool bOneAttempt = false;        // a flush or stop allows it one access attempt only
+		ELimit Limit = ELimit::None;     // which one (the strongest so far)
 		EOutcome Outcome = EOutcome::None;
 	};
 
@@ -88,6 +102,9 @@ namespace SpoutSendRing
 		std::int64_t Accepted = 0;
 		std::int64_t NotAccepted[static_cast<int>(ENotAccepted::Count)] = {};
 		std::int64_t Outcomes[static_cast<int>(EOutcome::Count)] = {};
+		/** Of Outcomes: the frames a flush, or the stream's stop, allowed one attempt only when they were resolved. */
+		std::int64_t FlushOutcomes[static_cast<int>(EOutcome::Count)] = {};
+		std::int64_t StopOutcomes[static_cast<int>(EOutcome::Count)] = {};
 		std::int64_t Attempts = 0;          // access attempts made
 		std::int64_t FailedAttempts = 0;    // access attempts that did not get access
 		std::int64_t RuleViolations = 0;    // a call that broke a rule (always 0 when the owner is correct)
@@ -249,15 +266,21 @@ namespace SpoutSendRing
 			}
 			if (Outcome == EOutcome::Published) LastPublishedId = F->Id;
 			++Counters.Outcomes[static_cast<int>(Outcome)];
+			if (F->Limit == ELimit::Stop) ++Counters.StopOutcomes[static_cast<int>(Outcome)];
+			else if (F->Limit == ELimit::Flush) ++Counters.FlushOutcomes[static_cast<int>(Outcome)];
 			LastResolvedId = F->Id;
 			Frames.erase(Frames.begin());
 			return true;
 		}
 
 		/** Flush or stop: every frame accepted up to now gets one access attempt only. Returns the last such frame's id. */
-		std::uint64_t LimitToOneAttempt()
+		std::uint64_t LimitToOneAttempt(ELimit Why = ELimit::Flush)
 		{
-			for (FFrame& F : Frames) F.bOneAttempt = true;
+			for (FFrame& F : Frames)
+			{
+				F.bOneAttempt = true;
+				if (static_cast<int>(Why) > static_cast<int>(F.Limit)) F.Limit = Why;
+			}
 			return LastId;
 		}
 
@@ -265,7 +288,7 @@ namespace SpoutSendRing
 		void BeginStop()
 		{
 			bStopping = true;
-			LimitToOneAttempt();
+			LimitToOneAttempt(ELimit::Stop);
 		}
 		bool IsStopping() const { return bStopping; }
 

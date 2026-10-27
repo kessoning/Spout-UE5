@@ -63,6 +63,21 @@
 
 using Microsoft::WRL::ComPtr;
 
+bool SpoutAsyncSendRefusesSynchronousSend(FSpoutSharedSender& Entry)
+{
+	if (Entry.AsyncSendMode != 1)
+	{
+		return false;
+	}
+	++Entry.RefusedSynchronousSends;
+	if (Entry.RefusedSendLogThrottle.ShouldLog())
+	{
+		UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout sender '%s': a viewport send to a name whose render-target sender uses the asynchronous send (r.Spout.Dev.AsyncSend) was refused; ")
+			TEXT("one name is published by one source."), *Entry.Name.ToString());
+	}
+	return true;
+}
+
 namespace
 {
 	/**
@@ -595,13 +610,8 @@ namespace
 				// Development switch r.Spout.Dev.AsyncSend: an entry whose asynchronous sender exists belongs to its worker
 				// (shared texture, registration, access, announcement). A synchronous send to the same name (the viewport
 				// sender) is refused rather than run beside the worker. Render thread only, like AsyncSendMode.
-				if (Sender->AsyncSendMode == 1)
+				if (SpoutAsyncSendRefusesSynchronousSend(*Sender))
 				{
-					if (Sender->RefusedSendLogThrottle.ShouldLog())
-					{
-						UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout sender '%s': a viewport send to a name whose render-target sender uses the asynchronous send (r.Spout.Dev.AsyncSend) was refused; ")
-							TEXT("one name is published by one source."), *Sender->Name.ToString());
-					}
 					return;
 				}
 

@@ -457,9 +457,11 @@ bool FSpoutAsyncSendStream::ResolveLocked(uint64 Id, EOutcome Outcome)
 		const FFrameTrace& T = Traces[Index];
 		if (FSpoutSendOutcomeLog::Get().IsOn())
 		{
-			FSpoutSendOutcomeLog::Get().Push(FString::Printf(TEXT("F,%s,%llu,%llu,%llu,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s,%d,%d,%llu,%d,"),
+			// The detail column says when a flush or the stream's stop allowed the frame one attempt only.
+			const TCHAR* Limit = Frame.Limit == SpoutSendRing::ELimit::Stop ? TEXT("limit=stop") : Frame.Limit == SpoutSendRing::ELimit::Flush ? TEXT("limit=flush") : TEXT("");
+			FSpoutSendOutcomeLog::Get().Push(FString::Printf(TEXT("F,%s,%llu,%llu,%llu,%lld,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%s,%d,%d,%llu,%d,%s"),
 				*LogName, StreamObject, Frame.SetGeneration, Id, T.Origin.Tick, T.Origin.Qpc, T.RenderFrame, T.AcceptQpc, T.ReadyQpc, T.FirstAttemptQpc,
-				T.AcquiredQpc, T.PublishQpc, ResolvedQpc, OutcomeName(Outcome), T.Attempts, Frame.FailedAttempts, Frame.FrameEndValue, T.bFrameEndFallback ? 1 : 0));
+				T.AcquiredQpc, T.PublishQpc, ResolvedQpc, OutcomeName(Outcome), T.Attempts, Frame.FailedAttempts, Frame.FrameEndValue, T.bFrameEndFallback ? 1 : 0, Limit));
 		}
 		Traces.RemoveAt(Index);
 	}
@@ -1319,12 +1321,18 @@ void FSpoutAsyncSendStream::Stop()
 		FSpoutSendOutcomeLog::Get().Push(FString::Printf(TEXT("S,%s,%llu,0,0,-1,0,0,0,0,0,0,0,%llu,Summary,%lld,%lld,0,0,")
 			TEXT("accepted=%lld;published=%lld;superseded=%lld;accessAbandoned=%lld;failedFill=%lld;failedInstall=%lld;failedDrain=%lld;failedRemoved=%lld;inFlight=%lld;")
 			TEXT("notAcceptedNoSlot=%lld;notAcceptedStopping=%lld;notAcceptedBudget=%lld;notAcceptedUnpublishable=%lld;frameEndFallbacks=%lld;setsCreated=%lld;setsRetired=%lld;")
-			TEXT("ruleViolations=%lld;untracedFrames=%d;failure=%s"),
+			TEXT("ruleViolations=%lld;untracedFrames=%d;")
+			TEXT("flushPublished=%lld;flushSuperseded=%lld;flushAccessAbandoned=%lld;flushFailed=%lld;stopPublished=%lld;stopSuperseded=%lld;stopAccessAbandoned=%lld;stopFailed=%lld;failure=%s"),
 			*LogName, StreamObject, FPlatformTime::Cycles64(), S.Attempts, S.FailedAttempts,
 			S.Accepted, S.Published(), S.Superseded(), S.AccessAbandoned(), S.Outcomes[static_cast<int32>(EOutcome::FailedFill)],
 			S.Outcomes[static_cast<int32>(EOutcome::FailedInstall)], S.Outcomes[static_cast<int32>(EOutcome::FailedDrain)],
 			S.Outcomes[static_cast<int32>(EOutcome::FailedRemoved)], S.InFlight, S.NotAccepted[0], S.NotAccepted[1], S.NotAccepted[2], S.NotAccepted[3],
-			S.FrameEndFallbacks, S.SetsCreated, S.SetsRetired, S.RuleViolations, Untraced, *GetFailure().Replace(TEXT(","), TEXT(" ")).Replace(TEXT(";"), TEXT(" "))));
+			S.FrameEndFallbacks, S.SetsCreated, S.SetsRetired, S.RuleViolations, Untraced,
+			S.FlushOutcomes[static_cast<int32>(EOutcome::Published)], S.FlushOutcomes[static_cast<int32>(EOutcome::Superseded)],
+			S.FlushOutcomes[static_cast<int32>(EOutcome::AccessAbandoned)], FSpoutAsyncSendStats::FailedIn(S.FlushOutcomes),
+			S.StopOutcomes[static_cast<int32>(EOutcome::Published)], S.StopOutcomes[static_cast<int32>(EOutcome::Superseded)],
+			S.StopOutcomes[static_cast<int32>(EOutcome::AccessAbandoned)], FSpoutAsyncSendStats::FailedIn(S.StopOutcomes),
+			*GetFailure().Replace(TEXT(","), TEXT(" ")).Replace(TEXT(";"), TEXT(" "))));
 		FSpoutSendOutcomeLog::Get().RequestFlush();
 	}
 	FSpoutAsyncDevice::Get().ReportDebugLayer();
@@ -1337,7 +1345,12 @@ FSpoutAsyncSendStats FSpoutAsyncSendStream::GetStats() const
 	const SpoutSendRing::FCounters& C = Ring.GetCounters();
 	S.Accepted = C.Accepted;
 	for (int32 I = 0; I < static_cast<int32>(ENotAccepted::Count); ++I) S.NotAccepted[I] = C.NotAccepted[I];
-	for (int32 I = 0; I < static_cast<int32>(EOutcome::Count); ++I) S.Outcomes[I] = C.Outcomes[I];
+	for (int32 I = 0; I < static_cast<int32>(EOutcome::Count); ++I)
+	{
+		S.Outcomes[I] = C.Outcomes[I];
+		S.FlushOutcomes[I] = C.FlushOutcomes[I];
+		S.StopOutcomes[I] = C.StopOutcomes[I];
+	}
 	S.InFlight = C.InFlight();
 	S.Attempts = C.Attempts;
 	S.FailedAttempts = C.FailedAttempts;
@@ -1365,13 +1378,18 @@ void FSpoutAsyncSendStream::LogSummary() const
 	UE_LOG(LogSpoutPlugin, Log,
 		TEXT("Spout %s: asynchronous send ended (%.1f s): accepted %lld = published %lld + superseded %lld + access abandoned %lld + failed %lld (fill %lld, install %lld, drain %lld, removed %lld) + in flight %lld; ")
 		TEXT("not accepted %lld (no slot %lld, stopping %lld, budget %lld, unpublishable %lld); access attempts %lld (failed %lld); frame-end fallbacks %lld; slot sets created %lld, retired %lld; ")
-		TEXT("publication latency mean %.2f ms, max %.2f ms; access wait mean %.2f ms, max %.2f ms; rule violations %lld."),
+		TEXT("publication latency mean %.2f ms, max %.2f ms; access wait mean %.2f ms, max %.2f ms; rule violations %lld. ")
+		TEXT("Of these, resolved with one attempt at a flush: published %lld, superseded %lld, access abandoned %lld, failed %lld; at the stop: published %lld, superseded %lld, access abandoned %lld, failed %lld."),
 		*What, FPlatformTime::Seconds() - CreatedAt, S.Accepted, P, S.Superseded(), S.AccessAbandoned(), S.Failed(),
 		S.Outcomes[static_cast<int32>(EOutcome::FailedFill)], S.Outcomes[static_cast<int32>(EOutcome::FailedInstall)],
 		S.Outcomes[static_cast<int32>(EOutcome::FailedDrain)], S.Outcomes[static_cast<int32>(EOutcome::FailedRemoved)], S.InFlight,
 		S.NotAccepted[0] + S.NotAccepted[1] + S.NotAccepted[2] + S.NotAccepted[3], S.NotAccepted[0], S.NotAccepted[1], S.NotAccepted[2], S.NotAccepted[3],
 		S.Attempts, S.FailedAttempts, S.FrameEndFallbacks, S.SetsCreated, S.SetsRetired,
-		P > 0 ? S.PublishLatencyMsSum / double(P) : 0.0, S.PublishLatencyMsMax, P > 0 ? S.AccessWaitMsSum / double(P) : 0.0, S.AccessWaitMsMax, S.RuleViolations);
+		P > 0 ? S.PublishLatencyMsSum / double(P) : 0.0, S.PublishLatencyMsMax, P > 0 ? S.AccessWaitMsSum / double(P) : 0.0, S.AccessWaitMsMax, S.RuleViolations,
+		S.FlushOutcomes[static_cast<int32>(EOutcome::Published)], S.FlushOutcomes[static_cast<int32>(EOutcome::Superseded)],
+		S.FlushOutcomes[static_cast<int32>(EOutcome::AccessAbandoned)], FSpoutAsyncSendStats::FailedIn(S.FlushOutcomes),
+		S.StopOutcomes[static_cast<int32>(EOutcome::Published)], S.StopOutcomes[static_cast<int32>(EOutcome::Superseded)],
+		S.StopOutcomes[static_cast<int32>(EOutcome::AccessAbandoned)], FSpoutAsyncSendStats::FailedIn(S.StopOutcomes));
 }
 
 // ---------------------------------------------------------------------------------------------

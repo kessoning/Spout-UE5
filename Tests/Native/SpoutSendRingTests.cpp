@@ -258,6 +258,8 @@ static void FlushAndStop()
 	Check(NextStep(*R.Oldest(), 0.003, false, 0.1) == EStep::Abandon, "flush: one failed attempt abandons it before its deadline");
 	Check(R.Resolve(A, EOutcome::AccessAbandoned), "flush: abandoned");
 	Check(R.ResolvedUpTo(UpTo), "flush: the flush's frames are resolved");
+	Equal(R.GetCounters().FlushOutcomes[static_cast<int>(EOutcome::AccessAbandoned)], 1, "flush: counted apart as resolved at a flush");
+	Equal(R.GetCounters().StopOutcomes[static_cast<int>(EOutcome::AccessAbandoned)], 0, "flush: not as resolved at a stop");
 	// A frame accepted after the flush keeps the normal bound.
 	const std::uint64_t B = R.Accept(R.FindFreeSlot(Why), 2, 0, 0.1);
 	R.MarkReady(B, 0.101);
@@ -271,9 +273,37 @@ static void FlushAndStop()
 	Equal(R.Accept(1, 3, 0, 0.2), 0, "stop: an acceptance while stopping is refused");
 	Equal(R.GetCounters().RuleViolations, 1, "stop: as a broken rule");
 	Check(NextStep(*R.Oldest(), 0.103, false, 0.1) == EStep::Abandon, "stop: the owed frame, already failed once, is abandoned");
+	Check(R.Oldest()->Limit == ELimit::Stop, "stop: the owed frame is limited by the stop");
 	Check(R.Resolve(B, EOutcome::AccessAbandoned), "stop: resolved");
+	Equal(R.GetCounters().StopOutcomes[static_cast<int>(EOutcome::AccessAbandoned)], 1, "stop: counted apart as resolved at the stop");
+	Equal(R.GetCounters().FlushOutcomes[static_cast<int>(EOutcome::AccessAbandoned)], 1, "stop: the flush's count is unchanged");
+	Equal(R.GetCounters().Outcomes[static_cast<int>(EOutcome::AccessAbandoned)], 2, "stop: both are in the outcomes too, never added twice");
 	Check(R.IsEmpty() && R.ResolvedUpTo(R.GetLastAcceptedId()), "stop: nothing owed; the worker may exit");
 	Check(IdentityHolds(R), "stop: identity");
+	{
+		FRing Q(2);
+		Q.BeginSet(1);
+		const std::uint64_t C = Q.Accept(Q.FindFreeSlot(Why), 1, 0, 0.0);
+		Q.LimitToOneAttempt();
+		Check(Q.Oldest()->Limit == ELimit::Flush, "limit: a flush limits the owed frame");
+		Q.BeginStop();
+		Check(Q.Oldest()->Limit == ELimit::Stop, "limit: a later stop outranks the flush");
+		Q.MarkReady(C, 0.01);
+		Q.NoteAttempt(C, true);
+		Q.BeginDrain(C);
+		Check(Q.Resolve(C, EOutcome::Published), "limit: published under the stop");
+		Equal(Q.GetCounters().StopOutcomes[static_cast<int>(EOutcome::Published)], 1, "limit: counted at the stop");
+		Equal(Q.GetCounters().FlushOutcomes[static_cast<int>(EOutcome::Published)], 0, "limit: not at the flush");
+		FRing U(2);
+		U.BeginSet(1);
+		const std::uint64_t D = U.Accept(U.FindFreeSlot(Why), 1, 0, 0.0);
+		U.MarkReady(D, 0.01);
+		U.NoteAttempt(D, true);
+		U.BeginDrain(D);
+		U.Resolve(D, EOutcome::Published);
+		Equal(U.GetCounters().FlushOutcomes[static_cast<int>(EOutcome::Published)] + U.GetCounters().StopOutcomes[static_cast<int>(EOutcome::Published)], 0,
+			"limit: a frame resolved without a flush or stop is counted in neither");
+	}
 	// A restarted stream (same name) is a new ring: it starts from nothing and owes nothing of the old one.
 	FRing Restarted(2);
 	Check(Restarted.IsEmpty() && Restarted.GetLastAcceptedId() == 0 && Restarted.GetCounters().Accepted == 0, "restart: a new stream owes nothing");
@@ -336,6 +366,7 @@ static void ModelRun(unsigned Seed, int Steps)
 	// What each slot of each set is: the frame whose fill was last queued into it, unresolved or not.
 	std::int64_t WroteUnresolved = 0, ResolvedTwice = 0, OutOfOrder = 0, PublishedUndrained = 0, IdentityBroken = 0, ReadBeforeFilled = 0;
 	std::int64_t MaxInFlight = 0, Flushes = 0, Stops = 0, Resizes = 0, BudgetRefusals = 0, Stalls = 0;
+	std::int64_t StopMiscounted = 0, ApartExceeds = 0;
 	// The retained-memory budget, counted in slot sets: a new set is refused while this many are still reserved
 	// (sets with unresolved frames, which keep their reservation until retired, plus the current one).
 	const int BudgetSets = 3;
@@ -428,6 +459,9 @@ static void ModelRun(unsigned Seed, int Steps)
 		{
 			// The stream stops and a new one starts with the same name (Close, then Send): the old ring resolves what it
 			// owes, here at once with one attempt each; the model then continues with a new ring.
+			const std::int64_t OwedAtStop = static_cast<std::int64_t>(R.GetFrames().size());
+			std::int64_t StopBefore = 0;
+			for (int I = 1; I < static_cast<int>(EOutcome::Count); ++I) StopBefore += R.GetCounters().StopOutcomes[I];
 			R.BeginStop();
 			++Stops;
 			int Guard = 0;
@@ -460,6 +494,9 @@ static void ModelRun(unsigned Seed, int Steps)
 			}
 			if (!IdentityHolds(R) || !R.IsEmpty()) ++IdentityBroken;
 			const FCounters C = R.GetCounters();
+			std::int64_t StopAfter = 0;
+			for (int I = 1; I < static_cast<int>(EOutcome::Count); ++I) StopAfter += C.StopOutcomes[I];
+			if (StopAfter - StopBefore != OwedAtStop) ++StopMiscounted;
 			MaxInFlight = MaxInFlight > C.InFlight() ? MaxInFlight : C.InFlight();
 			// Checks of the stopped ring before it goes, then a fresh one.
 			std::int64_t Resolved = 0;
@@ -523,6 +560,10 @@ static void ModelRun(unsigned Seed, int Steps)
 		}
 		const FCounters& C = R.GetCounters();
 		if (!IdentityHolds(R) || C.InFlight() != static_cast<std::int64_t>(Model.size())) ++IdentityBroken;
+		for (int I = 0; I < static_cast<int>(EOutcome::Count); ++I)
+		{
+			if (C.FlushOutcomes[I] + C.StopOutcomes[I] > C.Outcomes[I] || C.FlushOutcomes[I] < 0 || C.StopOutcomes[I] < 0) ++ApartExceeds;
+		}
 		MaxInFlight = MaxInFlight > C.InFlight() ? MaxInFlight : C.InFlight();
 	}
 	const FCounters& C = R.GetCounters();
@@ -534,6 +575,8 @@ static void ModelRun(unsigned Seed, int Steps)
 	sprintf_s(Label, "model %u: no slot read before its fill finished", Seed); Equal(ReadBeforeFilled, 0, Label);
 	sprintf_s(Label, "model %u: Accepted = outcomes + in flight after every step", Seed); Equal(IdentityBroken, 0, Label);
 	sprintf_s(Label, "model %u: no rule broken", Seed); Equal(C.RuleViolations, 0, Label);
+	sprintf_s(Label, "model %u: at every stop, each frame owed is counted as resolved at the stop", Seed); Equal(StopMiscounted, 0, Label);
+	sprintf_s(Label, "model %u: the counts apart (flush, stop) never exceed the outcomes", Seed); Equal(ApartExceeds, 0, Label);
 	sprintf_s(Label, "model %u: in flight never above the budget's %d sets of two slots (max %lld)", Seed, BudgetSets, static_cast<long long>(MaxInFlight));
 	Check(MaxInFlight <= 2 * BudgetSets, Label);
 	sprintf_s(Label, "model %u: the rare cases occurred (flushes %lld, stops %lld, resizes %lld, budget refusals %lld, stalls %lld)", Seed,
