@@ -120,6 +120,9 @@ $nativeTools = Build-TrackDNativeTools -RepoRoot $RepoRoot -WorkRoot $WorkRoot -
 
 $EngineVersions = Expand-TrackDList $EngineVersions
 $Configurations = Expand-TrackDList $Configurations
+# Shipping compiles out command-line ini overrides and console commands, so such extra arguments reach Development rows only.
+$extraOverridesShipping = (@($ExtraLaunchArguments | Where-Object { $_ -match '^-(ini:|ExecCmds)' }).Count -gt 0) -and ($Configurations -contains 'Shipping')
+if ($extraOverridesShipping) { Write-Warning 'ExtraLaunchArguments with -ini: or -ExecCmds take no effect in Shipping rows (compiled out); they apply to Development rows only' }
 $EnginePaths = Expand-TrackDList $EnginePaths
 
 # A degenerate list like "-EngineVersions ','" or "-Configurations ','" survives the mandatory
@@ -799,6 +802,7 @@ $manifest = [ordered] @{
     Configurations = $Configurations
     LaunchRepeats  = $LaunchRepeats
     ExtraLaunchArguments = @($ExtraLaunchArguments)
+    ExtraLaunchArgumentsNote = $(if ($extraOverridesShipping) { 'Shipping builds compile out -ini: and -ExecCmds overrides: the extra arguments applied to the Development rows only' } else { '' })
     RequiredMarkers = $RequiredSmokeMarkers
     RepositorySpoutDllSha256 = $repoSpoutDllHash
     Rows           = $rows.ToArray()

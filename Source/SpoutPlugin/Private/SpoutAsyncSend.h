@@ -199,6 +199,8 @@ public:
 
 	FSpoutAsyncSendStats GetStats() const;
 	bool HasFailed() const { return bFailed.load(); }
+	/** Whether Stop has run (the stream accepts nothing more and its worker was joined, or is being joined). */
+	bool IsStopped() const { return bStopped.load(); }
 	FString GetFailure() const;
 
 	/** Stream objects alive in the process (tests). */
@@ -334,6 +336,8 @@ namespace SpoutAsyncSendTestHooks
 	extern std::atomic<int32> FailInstalls;
 	/** The next stream creation is refused, as if its worker thread could not be started. */
 	extern std::atomic<int32> FailCreations;
+	/** While above 0: a blocked frame's deadline in milliseconds instead of 100 (tests that must reach a flush or stop first). */
+	extern std::atomic<int32> AccessDeadlineMs;
 
 	/** Flush requests holding the log's lock now (RequestOutcomeLogFlushHolding); requests that triggered the wake event. */
 	extern std::atomic<int32> FlushRequestsHolding;

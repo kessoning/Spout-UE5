@@ -925,7 +925,12 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 		{
 			return;
 		}
-		Next = SpoutSendRing::NextStep(*F, Now, bNewerReady, AccessDeadlineSeconds);
+		double Deadline = AccessDeadlineSeconds;
+#if WITH_DEV_AUTOMATION_TESTS
+		// Tests that must reach a flush or a stop before a blocked frame's deadline lengthen it (no other effect).
+		if (const int32 TestMs = SpoutAsyncSendTestHooks::AccessDeadlineMs.load(); TestMs > 0) Deadline = TestMs / 1000.0;
+#endif
+		Next = SpoutSendRing::NextStep(*F, Now, bNewerReady, Deadline);
 	}
 	if (Next == EStep::Supersede)
 	{
@@ -1379,7 +1384,7 @@ void FSpoutAsyncSendStream::LogSummary() const
 		TEXT("Spout %s: asynchronous send ended (%.1f s): accepted %lld = published %lld + superseded %lld + access abandoned %lld + failed %lld (fill %lld, install %lld, drain %lld, removed %lld) + in flight %lld; ")
 		TEXT("not accepted %lld (no slot %lld, stopping %lld, budget %lld, unpublishable %lld); access attempts %lld (failed %lld); frame-end fallbacks %lld; slot sets created %lld, retired %lld; ")
 		TEXT("publication latency mean %.2f ms, max %.2f ms; access wait mean %.2f ms, max %.2f ms; rule violations %lld. ")
-		TEXT("Of these, resolved with one attempt at a flush: published %lld, superseded %lld, access abandoned %lld, failed %lld; at the stop: published %lld, superseded %lld, access abandoned %lld, failed %lld."),
+		TEXT("Of these, resolved while a flush allowed one attempt only: published %lld, superseded %lld, access abandoned %lld, failed %lld; while the stop did: published %lld, superseded %lld, access abandoned %lld, failed %lld."),
 		*What, FPlatformTime::Seconds() - CreatedAt, S.Accepted, P, S.Superseded(), S.AccessAbandoned(), S.Failed(),
 		S.Outcomes[static_cast<int32>(EOutcome::FailedFill)], S.Outcomes[static_cast<int32>(EOutcome::FailedInstall)],
 		S.Outcomes[static_cast<int32>(EOutcome::FailedDrain)], S.Outcomes[static_cast<int32>(EOutcome::FailedRemoved)], S.InFlight,
@@ -1520,6 +1525,7 @@ namespace SpoutAsyncSendTestHooks
 	std::atomic<int32> DelayDrainMs{0};
 	std::atomic<int32> FailInstalls{0};
 	std::atomic<int32> FailCreations{0};
+	std::atomic<int32> AccessDeadlineMs{0};
 	std::atomic<int32> FlushRequestsHolding{0};
 	std::atomic<int32> FlushRequestsTriggered{0};
 	std::atomic<int32> OutcomeLogEventsTaken{0};
