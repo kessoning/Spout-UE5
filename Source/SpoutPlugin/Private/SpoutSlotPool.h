@@ -249,6 +249,9 @@ namespace SpoutAsync
 		/** Whether a publication waits for the reader. */
 		bool HasReady() const { return Find(ESlotState::Ready) >= 0; }
 
+		/** Whether the worker's copy into a slot is in progress: a newer image may be published shortly. */
+		bool HasWriting() const { return Find(ESlotState::Writing) >= 0; }
+
 		/**
 		 * Takes the newest publication. On Consumed the caller must queue, in this order and without fail: a wait
 		 * on the written fence for Out.WrittenValue, its copy out of the slot, and a signal of the read fence with

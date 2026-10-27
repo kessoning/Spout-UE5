@@ -13,7 +13,10 @@
  * that wait is long, because the copy sits behind Unreal's own work. This path moves access, copy
  * and wait to a worker thread with its own native D3D11 device. The render thread then only takes
  * the newest completed image and queues one copy of it into the same Unreal texture as the synchronous path. It
- * takes no Spout access and waits for no GPU work.
+ * takes no Spout access and waits for no GPU work it queued. Its one wait: a call that finds no new
+ * image while the worker's copy of one is in progress waits for that transfer to end, at most
+ * InFlightWaitBoundMicroseconds (1 ms), so that a copy completing just
+ * after the call is shown now rather than lost when the next copy completes before the next call.
  *
  * The synchronous path stays the default. A stream uses this path only while every precondition
  * holds; otherwise, and after any failure here, it uses the synchronous path and says why once.
@@ -145,6 +148,10 @@ struct FSpoutAsyncStats
 	int64 PublishedAfterReuse = 0;
 	int64 RuleViolations = 0;
 	int64 Polls = 0;
+	/** Render-thread calls that found no new image while a copy was in progress and waited for it, how many of them then took an image, and their total wait. */
+	int64 InFlightWaits = 0;
+	int64 InFlightWaitsDelivered = 0;
+	int64 InFlightWaitMicroseconds = 0;
 };
 
 class FSpoutAsyncStream final : public FRunnable
@@ -185,7 +192,8 @@ public:
 	/**
 	 * Render thread. Takes the newest completed image, when there is one, and queues its copy into
 	 * Destination: a queue wait on the written fence, the copy, a signal of the read fence. Returns
-	 * whether a copy was queued; that copy is the delivery. Never blocks on GPU work.
+	 * whether a copy was queued; that copy is the delivery. Never blocks on GPU work; may wait at most
+	 * InFlightWaitBoundMicroseconds for a worker transfer that is in progress (WaitForCopyInFlight).
 	 */
 	bool ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, uint64 ReceivedBefore);
 
@@ -208,6 +216,8 @@ private:
 	void Fail(const TCHAR* Why, HRESULT Result);
 	/** Waits on the stop event for at most the poll interval. */
 	void WaitForNextPoll();
+	/** Render thread: waits at most InFlightWaitBoundMicroseconds for the worker to end its transfer. Returns the time waited, in microseconds. */
+	int64 WaitForCopyInFlight();
 #if SPOUT_WITH_INSTRUMENT
 	/**
 	 * Measurement builds only: a thread that records when the read fence advances (row kind F), that
@@ -224,6 +234,13 @@ private:
 	/** A copy proven finished later than this is discarded (late); the bound never ends the wait while access is held. */
 	static constexpr uint32 CompletionTimeoutMs = 100;
 	static constexpr int32 MaxConsecutiveTimeouts = 8;
+	/**
+	 * A render-thread call that finds no new image while the worker's copy of one is in progress waits for that
+	 * transfer to end, at most this long, and takes the image if it was published.
+	 * At equal frame rates a copy that completes just after the call would otherwise be shown one frame later, or
+	 * lost when the next copy completes before the next call.
+	 */
+	static constexpr int32 InFlightWaitBoundMicroseconds = 1000;
 
 	const FName Name;
 	const int32 InstrumentStream;
@@ -259,6 +276,10 @@ private:
 	HANDLE StopEvent = nullptr;
 	HANDLE PollTimer = nullptr;
 	HANDLE FenceEvent = nullptr;
+	/** Set by the worker each time a transfer ends (published or given up); reset by the render thread under StateMutex before it waits. */
+	HANDLE TransferEndedEvent = nullptr;
+	/** The render thread's own high-resolution timer for that wait (absent: the wait rounds to the system timer). */
+	HANDLE ConsumeWaitTimer = nullptr;
 	std::atomic<bool> bStop{false};
 	std::atomic<bool> bFailed{false};
 	FString Failure;
@@ -269,6 +290,9 @@ private:
 
 	std::atomic<int64> Polls{0};
 	std::atomic<int64> NoSlotSkips{0};
+	std::atomic<int64> InFlightWaits{0};
+	std::atomic<int64> InFlightWaitsDelivered{0};
+	std::atomic<int64> InFlightWaitMicroseconds{0};
 	/** What the worker thread cost, taken by the thread itself as it ends: CPU time in 100 ns units, and how long it ran. */
 	std::atomic<int64> WorkerCpu100ns{-1};
 	std::atomic<double> WorkerSeconds{0.0};

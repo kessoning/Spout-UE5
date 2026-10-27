@@ -439,13 +439,15 @@ bool FSpoutAsyncStream::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 
 	StopEvent = ::CreateEventW(nullptr, true, false, nullptr);
 	FenceEvent = ::CreateEventW(nullptr, false, false, nullptr);
-	if (!StopEvent || !FenceEvent)
+	TransferEndedEvent = ::CreateEventW(nullptr, true, false, nullptr);
+	if (!StopEvent || !FenceEvent || !TransferEndedEvent)
 	{
 		OutWhy = TEXT("an event could not be created");
 		return false;
 	}
 	// Absent on systems without high-resolution timers; the poll then waits a millisecond.
 	PollTimer = ::CreateWaitableTimerExW(nullptr, nullptr, HighResolutionTimerFlag, TIMER_ALL_ACCESS);
+	ConsumeWaitTimer = ::CreateWaitableTimerExW(nullptr, nullptr, HighResolutionTimerFlag, TIMER_ALL_ACCESS);
 
 	{
 		FScopeLock Lock(&StateMutex);
@@ -487,9 +489,10 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 		const FSpoutAsyncStats Stats = GetStats();
 		UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': asynchronous receive ended (stream object %llu, %.1f s): %lld polls, %lld images published, %lld consumed, ")
 			TEXT("%lld replaced unread, %lld transfers skipped for no free slot, %lld accesses refused, %lld copies failed, %lld copies finished late (discarded), %lld rule violations; ")
-			TEXT("worker thread CPU time %.1f ms."),
+			TEXT("%lld render-thread waits for a copy in progress (%lld then delivered an image; %.1f ms in all); worker thread CPU time %.1f ms."),
 			*Name.ToString(), Generation, WorkerSeconds.load(), Stats.Polls, Stats.Published, Stats.Consumed, Stats.ReplacedUnread, Stats.NoFreeSlot, Stats.AccessRefused,
-			Stats.CopyFailed, Stats.CompletionTimeouts, Stats.RuleViolations, double(WorkerCpu100ns.load()) / 10000.0);
+			Stats.CopyFailed, Stats.CompletionTimeouts, Stats.RuleViolations, Stats.InFlightWaits, Stats.InFlightWaitsDelivered,
+			double(Stats.InFlightWaitMicroseconds) / 1000.0, double(WorkerCpu100ns.load()) / 10000.0);
 	}
 	// The objects go to the retirement list with the fence values that prove their work finished: the worker's copies
 	// (written fence, or the event query after a failed signal) and the copies Unreal queued out of the slots (read
@@ -529,6 +532,8 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 	ReadFence.Reset();
 	Proof.Reset();
 	if (PollTimer) ::CloseHandle(PollTimer);
+	if (ConsumeWaitTimer) ::CloseHandle(ConsumeWaitTimer);
+	if (TransferEndedEvent) ::CloseHandle(TransferEndedEvent);
 	if (StopEvent) ::CloseHandle(StopEvent);
 	// With the debug layer on: what the worker's device had to say about this stream's resources.
 	FSpoutAsyncDevice::Get().ReportDebugLayer();
@@ -568,6 +573,30 @@ void FSpoutAsyncStream::WaitForNextPoll()
 		}
 	}
 	::WaitForSingleObject(StopEvent, 1);
+}
+
+int64 FSpoutAsyncStream::WaitForCopyInFlight()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncWaitForCopyInFlight);
+	const uint64 Start = FPlatformTime::Cycles64();
+	bool bWaited = false;
+	if (ConsumeWaitTimer)
+	{
+		LARGE_INTEGER Due;
+		Due.QuadPart = -static_cast<int64>(InFlightWaitBoundMicroseconds) * 10; // relative, in 100 ns
+		if (::SetWaitableTimer(ConsumeWaitTimer, &Due, 0, nullptr, nullptr, false))
+		{
+			// The timeout is a backstop only: the timer ends the wait.
+			const HANDLE Handles[2] = { TransferEndedEvent, ConsumeWaitTimer };
+			::WaitForMultipleObjects(2, Handles, false, 1 + InFlightWaitBoundMicroseconds / 1000);
+			bWaited = true;
+		}
+	}
+	if (!bWaited)
+	{
+		::WaitForSingleObject(TransferEndedEvent, static_cast<DWORD>(FMath::Max(1, InFlightWaitBoundMicroseconds / 1000)));
+	}
+	return static_cast<int64>(FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - Start) * 1000.0);
 }
 
 uint32 FSpoutAsyncStream::Run()
@@ -674,6 +703,7 @@ bool FSpoutAsyncStream::TransferOnce()
 			FScopeLock Lock(&StateMutex);
 			Pool.AbandonWrite(Slot, SpoutAsync::EAbandon::Cancelled);
 		}
+		::SetEvent(TransferEndedEvent);
 		Fail(TEXT("a slot was offered before its last read completed"), E_UNEXPECTED);
 		SPOUT_INSTRUMENT(if (bInstrument) { Rec.AsyncOutcome = 5; Rec.TRestore = SpoutInstrument::Now(); SpoutInstrument::Push(Rec); })
 		return false;
@@ -806,6 +836,8 @@ bool FSpoutAsyncStream::TransferOnce()
 			Pool.AbandonWrite(Slot, Why);
 		}
 	}
+	// A render-thread call may be waiting for this transfer to end (WaitForCopyInFlight).
+	::SetEvent(TransferEndedEvent);
 	if (bDone)
 	{
 		ConsecutiveTimeouts = 0;
@@ -869,21 +901,55 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 	)
 	SpoutAsync::FConsumed Taken;
 	SpoutAsync::EConsume Result = SpoutAsync::EConsume::Nothing;
+	bool bWaitedForCopy = false;
+	SPOUT_INSTRUMENT(uint64 WaitStart = 0; uint64 WaitEnd = 0;)
+	// At most two looks: the second only after a bounded wait for a copy that was in progress at the first.
+	for (int32 Look = 0; Look < 2; ++Look)
 	{
-		FScopeLock Lock(&StateMutex);
-		Result = Pool.Consume(Generation, LastReadValue + 1, Taken);
-		if (Result == SpoutAsync::EConsume::Consumed)
+		bool bWait = false;
 		{
-			++LastReadValue;
-			Gate.OnConsumed();
-			// Unreal's queue reads the slot until it signals this value: the slot's objects are retired with it.
-			Outstanding.QueueSignalQueued(Taken.ReadValue);
+			FScopeLock Lock(&StateMutex);
+			Result = Pool.Consume(Generation, LastReadValue + 1, Taken);
+			if (Result == SpoutAsync::EConsume::Consumed)
+			{
+				++LastReadValue;
+				Gate.OnConsumed();
+				// Unreal's queue reads the slot until it signals this value: the slot's objects are retired with it.
+				Outstanding.QueueSignalQueued(Taken.ReadValue);
+			}
+			else if (Look == 0 && Result == SpoutAsync::EConsume::Nothing && Pool.HasWriting())
+			{
+				// Reset under the lock: the worker publishes or gives the write up under the same lock, and sets
+				// the event only after that, so its end cannot be missed.
+				::ResetEvent(TransferEndedEvent);
+				bWait = true;
+			}
 		}
+		if (!bWait)
+		{
+			break;
+		}
+		SPOUT_INSTRUMENT(WaitStart = SpoutInstrument::Now();)
+		InFlightWaitMicroseconds.fetch_add(WaitForCopyInFlight());
+		SPOUT_INSTRUMENT(WaitEnd = SpoutInstrument::Now();)
+		InFlightWaits.fetch_add(1);
+		bWaitedForCopy = true;
 	}
 	const bool bConsumed = Result == SpoutAsync::EConsume::Consumed;
+	if (bWaitedForCopy && bConsumed)
+	{
+		InFlightWaitsDelivered.fetch_add(1);
+	}
 	SPOUT_INSTRUMENT(
 		if (bInstrument)
 		{
+			if (bWaitedForCopy)
+			{
+				Rec.WaitDecision = 1;
+				Rec.WaitOutcome = bConsumed ? 1 : 0;
+				Rec.TWait0 = WaitStart;
+				Rec.TWait1 = WaitEnd;
+			}
 			Rec.AsyncOutcome = bConsumed ? 0 : (Result == SpoutAsync::EConsume::Nothing ? 1 : 2);
 			if (bConsumed)
 			{
@@ -946,6 +1012,9 @@ FSpoutAsyncStats FSpoutAsyncStream::GetStats() const
 		Out.RuleViolations = N.RuleViolations;
 	}
 	Out.NoFreeSlot = NoSlotSkips.load();
+	Out.InFlightWaits = InFlightWaits.load();
+	Out.InFlightWaitsDelivered = InFlightWaitsDelivered.load();
+	Out.InFlightWaitMicroseconds = InFlightWaitMicroseconds.load();
 	Out.Polls = Polls.load();
 	return Out;
 }

@@ -692,6 +692,50 @@ bool FSpoutAsyncBetaLateCopy::RunTest(const FString&)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaInFlightWait, "SpoutPlugin.AsyncBeta.AReceiveCallWaitsAtMostAMillisecondForACopyInProgress", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutAsyncBetaInFlightWait::RunTest(const FString&)
+{
+	// A render-thread call that finds no new image while the worker's copy of one is in progress waits for that
+	// transfer, bounded at 1 ms. Here the copy is held for 300 ms, so the call must give up at the bound.
+	namespace AB = SpoutAsyncBetaTests;
+	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	ON_SCOPE_EXIT { SpoutAsyncReceiveTestHooks::DelayCompletionMs = 0; };
+	const FName Name = AB::UniqueName(TEXT("InFlight"));
+	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
+	const FSpoutAsyncStats Before = AB::WorkerStats(Name);
+
+	constexpr int32 DelayMs = 300;
+	SpoutAsyncReceiveTestHooks::DelayCompletionMs = DelayMs;
+	AB::Upload(Source.Get(), 2);
+	AB::Send(Name, Source.Get());
+	const double Held = AB::WaitUntil([&] { return AB::WorkerHoldsAccess(Name); }, 2.0);
+	TestTrue(TEXT("the worker's copy of the new image is in progress"), Held > 0.0);
+	if (Held > 0.0)
+	{
+		const double CallStart = FPlatformTime::Seconds();
+		AB::Call(Name, C);
+		const double CallMs = (FPlatformTime::Seconds() - CallStart) * 1000.0;
+		const bool bStillHeld = AB::WorkerHoldsAccess(Name);
+		const FSpoutAsyncStats During = AB::WorkerStats(Name);
+		TestTrue(TEXT("the copy was still in progress when the call ended"), bStillHeld);
+		TestEqual(TEXT("the call waited once for the copy in progress"), During.InFlightWaits - Before.InFlightWaits, int64(1));
+		TestEqual(TEXT("and took no image: the copy had not ended"), During.InFlightWaitsDelivered - Before.InFlightWaitsDelivered, int64(0));
+		const int64 WaitedUs = During.InFlightWaitMicroseconds - Before.InFlightWaitMicroseconds;
+		// The bound is 1 ms on a high-resolution timer; the test allows for scheduling of the render thread.
+		TestTrue(FString::Printf(TEXT("the wait ended at its bound, not with the copy (%lld us)"), WaitedUs), WaitedUs >= 500 && WaitedUs <= 5000);
+		TestTrue(FString::Printf(TEXT("the whole call ended long before the %d ms copy (%.1f ms)"), DelayMs, CallMs), CallMs < 0.5 * DelayMs);
+	}
+	TestTrue(TEXT("the image still arrives exactly, from a later copy"), AB::ReceiveExact(Name, C, Source.Get()));
+	const FSpoutAsyncStats After = AB::WorkerStats(Name);
+	TestTrue(TEXT("no wait took an image it was not given"), After.InFlightWaitsDelivered <= After.InFlightWaits);
+	TestEqual(TEXT("no rule violation in the slot bookkeeping"), After.RuleViolations, int64(0));
+	AB::CloseBoth(Name, C);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaFailedSignal, "SpoutPlugin.AsyncBeta.AFailedSignalKeepsAccessUntilTheQueryProvesTheCopyThenFallsBack", SPOUT_ASYNC_BETA_FLAGS)
 bool FSpoutAsyncBetaFailedSignal::RunTest(const FString&)
 {

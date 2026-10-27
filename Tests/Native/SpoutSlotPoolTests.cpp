@@ -50,9 +50,11 @@ static void PoolBasics()
 	Check(P.CanDestroy(0), "pool: an unused pool may be destroyed");
 	Equal(P.OldestPendingReadValue(), 0, "pool: no read is pending at the start");
 
+	Check(!P.HasWriting(), "pool: no copy is in progress at the start");
 	const int A = P.BeginWrite(0);
 	Equal(A, 0, "pool: the first write gets slot 0");
 	Check(StateOf(P, 0) == ESlotState::Writing, "pool: and the slot is being written");
+	Check(P.HasWriting(), "pool: a copy is in progress (a reader that finds nothing new may wait for it)");
 	Check(!P.CanDestroy(0), "pool: a pool with a write in progress may not be destroyed");
 	Check(!P.HasReady(), "pool: a slot being written is not ready");
 	Check(P.Consume(1, 1, C) == EConsume::Nothing, "pool: and the reader cannot take it");
@@ -62,6 +64,7 @@ static void PoolBasics()
 
 	Equal(P.Publish(A, 7, 1, 100), 1, "pool: the first publication has sequence 1");
 	Check(StateOf(P, 0) == ESlotState::Ready && P.HasReady(), "pool: the slot is ready");
+	Check(!P.HasWriting(), "pool: and no copy is in progress any more");
 	Equal(P.GetCounters().Published, 1, "pool: one publication");
 	Check(P.Consume(7, 1, C) == EConsume::Consumed, "pool: the reader takes it");
 	Check(C.Slot == 0 && C.Sequence == 1 && C.Generation == 7 && C.WrittenValue == 1 && C.ReadValue == 1 && C.Tag == 100, "pool: with the slot, the sequence, the written value to wait on and the read value to signal");
