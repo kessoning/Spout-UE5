@@ -31,10 +31,15 @@ For 1.0.0 the release pipeline:
   before the run. The release test's scene does not reach 60 fps on that laptop at its default
   (Epic) quality, even with no Spout activity. The release test therefore runs at the highest
   standard Unreal scalability level at which the scene alone meets the release test's frame-pacing
-  limits; that level is chosen by measurement and fixed before the run;
+  limits; that level is chosen by measurement and fixed before the run. The render-target send is
+  asynchronous by default, so the release test's send-access criteria judge frames abandoned for
+  access, not failed access attempts, and every frame must still be published or counted from the
+  send's per-frame outcome log; the original attempt counts are reported beside them;
 - measures the same scene at its default quality with no Spout activity, with one stream sent,
   with one received, and with both. This shows the plugin's cost in a scene that keeps the GPU busy
-  (see [limitations](LIMITATIONS.md)). It is a measurement, not a gate.
+  (see [limitations](LIMITATIONS.md)). It is a measurement, not a gate. The asynchronous
+  render-target send's own extra GPU time was not established on the laptop; 1.0.0 ships with
+  that result as a known limitation, not as a measurement that passed.
 
 The measurements include a serialized pixel observer and queue drain. They are not a claim about
 other hardware, other scenes, isolated plugin cost or unobserved asynchronous throughput.
