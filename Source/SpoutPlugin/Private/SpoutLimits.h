@@ -90,11 +90,11 @@ namespace SpoutLimits
 	 */
 	bool SharedSlotInteropRequested();
 
-	// ---- Development switches (0 by default, not supported settings and not documented for users). With both at 0
-	// the render-target send is the synchronous shared-slot send. ----
+	// ---- Development switches (not supported settings). The asynchronous render-target send is the default;
+	// r.Spout.Dev.AsyncSend 0 selects the synchronous shared-slot send for diagnosis. ----
 
 	/**
-	 * r.Spout.Dev.AsyncSend != 0: render-target senders on the shared-slot path use the asynchronous sender
+	 * r.Spout.Dev.AsyncSend != 0 (default 1): render-target senders on the shared-slot path use the asynchronous sender
 	 * (SpoutAsyncSend.h). Read on the render thread when a sender entry sends without having decided: from its first
 	 * send with the switch on, an entry keeps the asynchronous sender for its life. Turning it off applies to senders
 	 * opened afterwards (close and send again).

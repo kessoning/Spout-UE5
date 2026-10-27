@@ -6,8 +6,9 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ## OCTOBER 2026 UPDATES
 
-This month is mostly groundwork. One change is on for everyone, the new way pictures travel between
-Unreal and Spout; everything else stays switched off unless you turn it on.
+This month is mostly groundwork. Two changes are on for everyone: the new way pictures travel between
+Unreal and Spout, and, at the very end of the month, sending without making Unreal wait. Everything
+else stays switched off unless you turn it on.
 
 I also did my release testing this month on my gaming laptop, an RTX 2060 machine, because it's
 much closer to what a lot of you have. The good news: the standard tests, sending and receiving at
@@ -88,6 +89,20 @@ copies were thrown away, but the other app could start drawing into a picture th
 read. Now the receiver keeps hold until the copy has really finished, just like the normal receive
 mode always has. The trade-off: if the graphics card gets stuck, closing that receiver or stopping
 the game waits for it too, and the log says so every few seconds while it waits.
+
+Right at the end of the month I changed how sending works, and this one is on for everyone. Sending a
+picture out of Unreal used to make Unreal wait until the copy was done, which on a busy graphics card
+cost frame rate. Now a little helper does that waiting in the background. In my laptop test scene
+Unreal kept its 60 frames per second while sending, where it used to drop to about 58. The pictures
+still go out in order, just a few thousandths of a second later. If another app is holding the
+picture when Unreal wants to send, the helper skips that frame and sends the next one instead of
+making Unreal wait, and it counts every frame it skips. Each sender uses a bit more memory, one extra
+picture's worth.
+
+One thing I couldn't pin down is how much extra work the helper gives the graphics card. One of my
+measurements said about a thousandth of a second per frame, and the others were too noisy to call, so
+I'm telling you that rather than claiming it's free. I also haven't re-measured the heavy scene from
+the start of this month with it. The viewport sender works exactly as before.
 
 ---
 

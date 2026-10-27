@@ -31,6 +31,22 @@ from the August preparation.
 - Measurements in the documentation that were taken on an RTX 4090 desktop are labelled as such.
   No code changed.
 
+#### Asynchronous render-target send (late October 2026, the default)
+- Render-target senders on the default shared-slot path publish from a worker thread:
+  - the render thread no longer waits for the copy or for Spout's access;
+  - frames are announced in order; frames superseded or abandoned for access are skipped and counted,
+    never queued;
+  - flush, close and stop give owed frames one access attempt, and a frame a receiver still blocks
+    then is abandoned (every accepted frame is published or explicitly skipped);
+  - one more frame of memory per render-target sender;
+  - a viewport send to a name owned by a render-target sender is refused with a throttled warning.
+- The viewport sender is unchanged.
+- `r.Spout.Dev.AsyncSend` (default now 1) is a development switch, not a supported setting: `0` brings
+  back the synchronous render-target send for diagnosis.
+- Its extra GPU time per frame was not established on the test laptop (one comparison measured
+  1.09 ms, two were inconclusive); 1.0.0 ships with that result as a known limitation. See
+  `Docs/LIMITATIONS.md` (Performance and diagnostics).
+
 #### Shared-slot interop (October 2026, the default)
 - The sender and the synchronous receiver no longer wrap Unreal's textures for Direct3D 11. The plugin
   creates its own "slot" textures on Unreal's Direct3D 12 device in a shared heap, opens them on a

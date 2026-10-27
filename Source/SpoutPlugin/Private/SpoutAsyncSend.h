@@ -3,10 +3,11 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * The asynchronous render-target sender. DEVELOPMENT SWITCH ONLY: r.Spout.Dev.AsyncSend, 0 by default. With it at 0
- * nothing here runs and the render-target send is the synchronous shared-slot send (SpoutSender.cpp).
+ * The asynchronous render-target sender: the default render-target send. The development switch r.Spout.Dev.AsyncSend
+ * is 1 by default; at 0 nothing here runs and the render-target send is the synchronous shared-slot send
+ * (SpoutSender.cpp), for diagnosis only.
  *
- * With it at 1, on the shared-slot path, each render-target sender entry gets one stream: a worker thread and slot
+ * On the shared-slot path, each render-target sender entry gets one stream: a worker thread and slot
  * sets of two slots per source identity. The render thread only queues Unreal's copy of the source into a free slot
  * and the filled-fence signal, dispatches them, and hands the frame to the worker; it never waits and never takes
  * Spout's access. The worker waits for the fill (bounded), installs the entry's shared texture and registration for

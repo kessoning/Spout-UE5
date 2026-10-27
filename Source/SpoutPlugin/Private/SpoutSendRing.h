@@ -3,7 +3,7 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * The bookkeeping of the asynchronous render-target sender (development switch r.Spout.Dev.AsyncSend, off by default):
+ * The bookkeeping of the asynchronous render-target sender (the default; development switch r.Spout.Dev.AsyncSend):
  * which slot the render thread may fill, which frame the worker works on, and how every accepted frame ends.
  * Engine-free, like SpoutSlotPool.h: it makes no graphics call and takes times and fence values as numbers.
  *

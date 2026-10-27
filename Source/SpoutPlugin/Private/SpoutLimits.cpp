@@ -63,10 +63,10 @@ namespace
 		TEXT("1 (default): the sender and the synchronous receiver move pixels through plugin-owned shared textures on a native D3D11 device and never wrap Unreal's resources for D3D11. ")
 		TEXT("0: they wrap Unreal's resources with D3D11-on-12, as before. Read once per process, at the first Spout initialization: a later change takes effect at the next start."),
 		ECVF_Default);
-	// Development switches (SpoutLimits.h). Off by default; the console help says they are not supported settings.
-	TAutoConsoleVariable<int32> GSpoutDevAsyncSend(TEXT("r.Spout.Dev.AsyncSend"), 0,
-		TEXT("Development switch, not a supported setting. 1: render-target senders opened afterwards use the asynchronous sender (a worker takes the access lock and copies; ")
-		TEXT("the render thread does not wait). 0 (default): the synchronous send."),
+	// Development switches (SpoutLimits.h). The console help says they are not supported settings.
+	TAutoConsoleVariable<int32> GSpoutDevAsyncSend(TEXT("r.Spout.Dev.AsyncSend"), 1,
+		TEXT("Development switch, not a supported setting. 1 (default): render-target senders opened afterwards use the asynchronous sender (a worker takes the access lock and copies; ")
+		TEXT("the render thread does not wait). 0: the synchronous send, for diagnosis only."),
 		ECVF_Default);
 	TAutoConsoleVariable<int32> GSpoutDevAsyncSendDrainAfter(TEXT("r.Spout.Dev.AsyncSend.DrainAfter"), 0,
 		TEXT("Development switch, not a supported setting. With r.Spout.Dev.AsyncSend 1: 0 (default) the worker copies a frame once its fill finished; ")

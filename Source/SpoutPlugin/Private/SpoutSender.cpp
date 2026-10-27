@@ -415,7 +415,7 @@ namespace
 	}
 
 	/**
-	 * Development switch r.Spout.Dev.AsyncSend (SpoutAsyncSend.h): a render-target send on the shared-slot path goes
+	 * The asynchronous send (r.Spout.Dev.AsyncSend, 1 by default; SpoutAsyncSend.h): a render-target send on the shared-slot path goes
 	 * to the entry's asynchronous sender. Returns false when the entry uses the synchronous send (the switch was off at
 	 * its first render-target send, or its asynchronous sender could not start), true otherwise: the send was handed
 	 * over (accepted or counted as not accepted) or its token is no longer current (nothing queued, as the synchronous
@@ -451,7 +451,7 @@ namespace
 					*Sender->Name.ToString(), *Why);
 				return false;
 			}
-			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout sender '%s': publishing through the asynchronous send (development switch r.Spout.Dev.AsyncSend)."), *Sender->Name.ToString());
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout sender '%s': publishing through the asynchronous send."), *Sender->Name.ToString());
 			FScopeLock SenderLock(&Sender->ResourceMutex);
 			Sender->AsyncSend = Stream;
 		}
@@ -578,7 +578,7 @@ namespace
 			return;
 		}
 
-		// Development switch r.Spout.Dev.AsyncSend: a render-target send (always one name) may go to the entry's
+		// The asynchronous send (r.Spout.Dev.AsyncSend, 1 by default): a render-target send (always one name) may go to the entry's
 		// asynchronous sender, which installs the texture and registration on its own worker. With the switch off and no
 		// asynchronous sender alive, nothing of this runs.
 		if (!bIsViewport && SpoutInterop::IsSharedSlot() && LiveTokens.Num() == 1
@@ -607,7 +607,7 @@ namespace
 					return;
 				}
 
-				// Development switch r.Spout.Dev.AsyncSend: an entry whose asynchronous sender exists belongs to its worker
+				// The asynchronous send (r.Spout.Dev.AsyncSend): an entry whose asynchronous sender exists belongs to its worker
 				// (shared texture, registration, access, announcement). A synchronous send to the same name (the viewport
 				// sender) is refused rather than run beside the worker. Render thread only, like AsyncSendMode.
 				if (SpoutAsyncSendRefusesSynchronousSend(*Sender))

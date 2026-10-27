@@ -135,7 +135,7 @@ void FSpoutModule::StartupModule()
 	// Explicitly load Spout.dll so its delay-loaded imports bind on first Spout call
 	// instead of crashing with 0xC06D007E.
 	SpoutDllHandle = LoadSpoutRuntime();
-	// The asynchronous sender's flush and frame-end hooks (development switch r.Spout.Dev.AsyncSend). They do nothing
+	// The asynchronous sender's flush and frame-end hooks (the default render-target send). They do nothing
 	// while no asynchronous sender exists.
 	FSpoutAsyncSendStream::RegisterHooks();
 #endif

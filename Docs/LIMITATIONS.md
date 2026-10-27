@@ -283,16 +283,42 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
   actual workload.
 - Once access is acquired, GPU completion is required before handing the shared resource back.
   This can stall the render thread, independently of the access wait.
-- Sending waits for its copy. A send copies the source into a slot on Unreal's queue and waits for
-  that copy before the native device publishes it (see Interop path). In a scene that keeps the
-  GPU busy, that copy runs behind the frame's own rendering, so the wait lengthens the frame.
-  - Measured on an RTX 2060 laptop, UE 5.8 packaged, in a scene that ran at 40 to 43 fps with no
-    Spout activity.
-  - Sending one 1080p stream at 60 fps lowered the scene to about 35 fps, while the GPU time rose
-    only about 1 ms. The waiting is inferred from those figures, not timed directly.
-  - Receiving one 1080p 60 fps stream lowered the scene to about 39.5 fps.
-  - In a light scene at 60 fps on the same laptop, neither had a measurable cost.
-  Measure your own scene with and without the streams.
+- Sending does not wait on the render thread. A render-target send copies the source into one of two
+  slots on Unreal's queue and returns. A worker thread per sender takes Spout's access, copies the
+  slot into the Spout texture, waits until that copy is proven finished, announces the frame and
+  releases the access.
+  - Frames are announced in order, normally within a few milliseconds of the send. Measured on the
+    RTX 2060 laptop: acceptance to announcement p50 0.9 ms and p99 6 ms when only sending, and p50 4
+    to 7 ms and p99 12 to 20 ms while Unreal and a peer also receive.
+  - A receiver in the same process, in the same frame, may therefore still see the previous frame.
+  - If a peer holds the texture, the worker keeps trying in attempts of `r.Spout.AccessWaitMs`. A
+    frame that a newer one replaces before it got access is skipped (superseded or abandoned), and
+    the worker gives up on a frame 100 ms after it was ready. Each skipped frame is counted, never
+    queued.
+  - Each render-target sender keeps one more frame of memory than before: four frame sizes.
+  - Measured in a laptop scene at the highest scalability level at which the scene alone holds
+    60 fps: sending held 60 fps (59.99 to 60.0), where the earlier synchronous send reached 57.7.
+  - Its extra GPU time per frame is not established. On the laptop, one comparison with no Spout
+    activity measured 1.09 ms, and two further comparisons were inconclusive because their reference
+    runs disagreed. Measure your own scene with and without the streams.
+  - The viewport sender is unchanged: it still waits for its copy on the render thread. In a scene
+    that keeps the GPU busy, that copy runs behind the frame's own rendering, so the wait lengthens
+    the frame. Measured on the laptop with the earlier synchronous render-target send, in a scene
+    that ran at 40 to 43 fps with no Spout activity, sending one 1080p stream at 60 fps lowered the
+    scene to about 35 fps (the waiting is inferred, not timed directly).
+- Receiving one 1080p 60 fps stream lowered the 40 to 43 fps scene above to about 39.5 fps. In a light
+  scene at 60 fps on the same laptop, receiving had no measurable cost. Measure your own scene with
+  and without the streams.
+- Closing a render-target sender, stopping the session, or flushing the rendering commands gives
+  each frame still owed one access attempt. If a receiver holds the texture then, that frame is
+  abandoned and never announced: a receiver keeps the last frame it saw. The plugin promises that
+  every accepted frame is published or explicitly skipped, not that an external receiver sees the
+  final frame.
+- Receiving Unreal's own output in the same process makes the receive and the send's worker contend
+  for the same texture. Measured in a paced close/reopen workload: 72 access warnings (throttled),
+  where the synchronous send had none, and no failed cycle.
+- A viewport send to a name that a render-target sender already publishes is refused, with a
+  throttled warning: one name has one source.
 - A sender that keeps its texture locked while it waits for its own GPU work makes receive attempts
   wait or skip whenever that GPU work is queued behind other work. On a busy GPU this can be on
   most frames.

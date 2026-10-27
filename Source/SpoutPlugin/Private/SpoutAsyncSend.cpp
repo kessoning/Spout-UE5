@@ -3,7 +3,7 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * Implements the asynchronous render-target sender (development switch r.Spout.Dev.AsyncSend). See SpoutAsyncSend.h
+ * Implements the asynchronous render-target sender (the default; r.Spout.Dev.AsyncSend 0 turns it off). See SpoutAsyncSend.h
  * for the design, the ownership rules and who waits, SpoutSendRing.h for the bookkeeping, and SpoutSharedSlot.h for
  * the slot, fence and retirement rules it reuses.
  */

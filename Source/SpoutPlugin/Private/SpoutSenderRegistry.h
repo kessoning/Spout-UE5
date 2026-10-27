@@ -171,7 +171,7 @@ public:
 	std::atomic<int64> SlotTransfers{0};
 
 	/**
-	 * Sender role, render-target source, development switch r.Spout.Dev.AsyncSend (SpoutAsyncSend.h): whether this
+	 * Sender role, render-target source, the asynchronous send (r.Spout.Dev.AsyncSend, 1 by default; SpoutAsyncSend.h): whether this
 	 * entry uses the asynchronous sender (-1 undecided, 0 synchronous, 1 asynchronous). Decided on the render thread at
 	 * the first send that looks (the switch on, or an asynchronous sender alive) and kept for the entry's life; an entry
 	 * that sent synchronously before may move to 1, never back. Render thread only.
