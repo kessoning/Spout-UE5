@@ -43,6 +43,13 @@ namespace
 	std::atomic<int32> GLiveAsyncStreams{0};
 
 	/**
+	 * Render thread only (ConsumeOnRenderThread): the render frame the waits for a copy in progress were counted in,
+	 * and their microseconds so far. Every stream and consumer of the frame shares one InFlightWaitBoundMicroseconds.
+	 */
+	uint64 GInFlightWaitFrame = MAX_uint64;
+	int64 GInFlightWaitUsedMicroseconds = 0;
+
+	/**
 	 * Waits until Fence reached Value, for at most TimeoutMs. False on a timeout and on device
 	 * removal (a removed device reports the largest value). Event is an auto-reset event used by one
 	 * thread; an earlier wait that timed out may still set it, so the value is read again after
@@ -575,26 +582,27 @@ void FSpoutAsyncStream::WaitForNextPoll()
 	::WaitForSingleObject(StopEvent, 1);
 }
 
-int64 FSpoutAsyncStream::WaitForCopyInFlight()
+int64 FSpoutAsyncStream::WaitForCopyInFlight(int64 BoundMicroseconds)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncWaitForCopyInFlight);
 	const uint64 Start = FPlatformTime::Cycles64();
+	const int64 Bound = FMath::Clamp<int64>(BoundMicroseconds, 0, InFlightWaitBoundMicroseconds);
 	bool bWaited = false;
 	if (ConsumeWaitTimer)
 	{
 		LARGE_INTEGER Due;
-		Due.QuadPart = -static_cast<int64>(InFlightWaitBoundMicroseconds) * 10; // relative, in 100 ns
+		Due.QuadPart = -Bound * 10; // relative, in 100 ns
 		if (::SetWaitableTimer(ConsumeWaitTimer, &Due, 0, nullptr, nullptr, false))
 		{
 			// The timeout is a backstop only: the timer ends the wait.
 			const HANDLE Handles[2] = { TransferEndedEvent, ConsumeWaitTimer };
-			::WaitForMultipleObjects(2, Handles, false, 1 + InFlightWaitBoundMicroseconds / 1000);
+			::WaitForMultipleObjects(2, Handles, false, static_cast<DWORD>(1 + Bound / 1000));
 			bWaited = true;
 		}
 	}
 	if (!bWaited)
 	{
-		::WaitForSingleObject(TransferEndedEvent, static_cast<DWORD>(FMath::Max(1, InFlightWaitBoundMicroseconds / 1000)));
+		::WaitForSingleObject(TransferEndedEvent, static_cast<DWORD>(FMath::Max<int64>(1, Bound / 1000)));
 	}
 	return static_cast<int64>(FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - Start) * 1000.0);
 }
@@ -902,7 +910,19 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 	SpoutAsync::FConsumed Taken;
 	SpoutAsync::EConsume Result = SpoutAsync::EConsume::Nothing;
 	bool bWaitedForCopy = false;
-	SPOUT_INSTRUMENT(uint64 WaitStart = 0; uint64 WaitEnd = 0;)
+	// The render frame's budget for these waits, shared by every asynchronous stream and consumer.
+#if WITH_DEV_AUTOMATION_TESTS
+	if (SpoutAsyncReceiveTestHooks::ResetInFlightWaitBudget.exchange(false))
+	{
+		GInFlightWaitFrame = MAX_uint64;
+	}
+#endif
+	if (GInFlightWaitFrame != GFrameCounterRenderThread)
+	{
+		GInFlightWaitFrame = GFrameCounterRenderThread;
+		GInFlightWaitUsedMicroseconds = 0;
+	}
+	const int64 BudgetLeft = InFlightWaitBoundMicroseconds - GInFlightWaitUsedMicroseconds;
 	// At most two looks: the second only after a bounded wait for a copy that was in progress at the first.
 	for (int32 Look = 0; Look < 2; ++Look)
 	{
@@ -917,7 +937,7 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 				// Unreal's queue reads the slot until it signals this value: the slot's objects are retired with it.
 				Outstanding.QueueSignalQueued(Taken.ReadValue);
 			}
-			else if (Look == 0 && Result == SpoutAsync::EConsume::Nothing && Pool.HasWriting())
+			else if (Look == 0 && Result == SpoutAsync::EConsume::Nothing && Pool.HasWriting() && BudgetLeft >= MinInFlightWaitMicroseconds)
 			{
 				// Reset under the lock: the worker publishes or gives the write up under the same lock, and sets
 				// the event only after that, so its end cannot be missed.
@@ -929,9 +949,9 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 		{
 			break;
 		}
-		SPOUT_INSTRUMENT(WaitStart = SpoutInstrument::Now();)
-		InFlightWaitMicroseconds.fetch_add(WaitForCopyInFlight());
-		SPOUT_INSTRUMENT(WaitEnd = SpoutInstrument::Now();)
+		const int64 Waited = WaitForCopyInFlight(BudgetLeft);
+		GInFlightWaitUsedMicroseconds += Waited;
+		InFlightWaitMicroseconds.fetch_add(Waited);
 		InFlightWaits.fetch_add(1);
 		bWaitedForCopy = true;
 	}
@@ -943,13 +963,8 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 	SPOUT_INSTRUMENT(
 		if (bInstrument)
 		{
-			if (bWaitedForCopy)
-			{
-				Rec.WaitDecision = 1;
-				Rec.WaitOutcome = bConsumed ? 1 : 0;
-				Rec.TWait0 = WaitStart;
-				Rec.TWait1 = WaitEnd;
-			}
+			// A wait for a copy in progress shows as the row's own length (tDetect to tRestore); the frame-wait columns
+			// belong to the synchronous receive's SpoutFrameWait and stay unset here.
 			Rec.AsyncOutcome = bConsumed ? 0 : (Result == SpoutAsync::EConsume::Nothing ? 1 : 2);
 			if (bConsumed)
 			{
@@ -1024,6 +1039,7 @@ namespace SpoutAsyncReceiveTestHooks
 {
 	std::atomic<int32> DelayCompletionMs{0};
 	std::atomic<int32> FailSignals{0};
+	std::atomic<bool> ResetInFlightWaitBudget{false};
 }
 #endif
 

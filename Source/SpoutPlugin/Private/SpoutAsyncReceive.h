@@ -15,7 +15,7 @@
  * the newest completed image and queues one copy of it into the same Unreal texture as the synchronous path. It
  * takes no Spout access and waits for no GPU work it queued. Its one wait: a call that finds no new
  * image while the worker's copy of one is in progress waits for that transfer to end, at most
- * InFlightWaitBoundMicroseconds (1 ms), so that a copy completing just
+ * InFlightWaitBoundMicroseconds (1 ms per render frame for all streams together), so that a copy completing just
  * after the call is shown now rather than lost when the next copy completes before the next call.
  *
  * The synchronous path stays the default. A stream uses this path only while every precondition
@@ -216,8 +216,8 @@ private:
 	void Fail(const TCHAR* Why, HRESULT Result);
 	/** Waits on the stop event for at most the poll interval. */
 	void WaitForNextPoll();
-	/** Render thread: waits at most InFlightWaitBoundMicroseconds for the worker to end its transfer. Returns the time waited, in microseconds. */
-	int64 WaitForCopyInFlight();
+	/** Render thread: waits at most BoundMicroseconds (no more than InFlightWaitBoundMicroseconds) for the worker to end its transfer. Returns the time waited, in microseconds. */
+	int64 WaitForCopyInFlight(int64 BoundMicroseconds);
 #if SPOUT_WITH_INSTRUMENT
 	/**
 	 * Measurement builds only: a thread that records when the read fence advances (row kind F), that
@@ -238,9 +238,11 @@ private:
 	 * A render-thread call that finds no new image while the worker's copy of one is in progress waits for that
 	 * transfer to end, at most this long, and takes the image if it was published.
 	 * At equal frame rates a copy that completes just after the call would otherwise be shown one frame later, or
-	 * lost when the next copy completes before the next call.
+	 * lost when the next copy completes before the next call. The bound is per render frame, shared by every stream and
+	 * consumer: a call waits only while at least MinInFlightWaitMicroseconds of the frame's bound are left.
 	 */
 	static constexpr int32 InFlightWaitBoundMicroseconds = 1000;
+	static constexpr int32 MinInFlightWaitMicroseconds = 100;
 
 	const FName Name;
 	const int32 InstrumentStream;
@@ -310,6 +312,11 @@ namespace SpoutAsyncReceiveTestHooks
 	extern std::atomic<int32> DelayCompletionMs;
 	/** The worker's next written-fence signals are reported failed without being made. */
 	extern std::atomic<int32> FailSignals;
+	/**
+	 * The next receive call starts the render frame's budget for waits for a copy in progress again. An automation test
+	 * runs inside one engine frame, so its earlier calls would otherwise have spent that budget.
+	 */
+	extern std::atomic<bool> ResetInFlightWaitBudget;
 }
 #endif
 

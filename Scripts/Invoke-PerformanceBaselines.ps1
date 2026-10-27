@@ -73,7 +73,8 @@ param(
     [int] $ScenarioTimeoutMarginSeconds = 300,
 
     # Extra arguments appended to every scenario launch. Empty by default. Development coverage only (for example
-    # '-ini:Engine:[ConsoleVariables]:r.Spout.Dev.AsyncSend=1'); the summary records them.
+    # '-ini:Engine:[ConsoleVariables]:r.Spout.Dev.AsyncSend=0', the synchronous render-target send; the asynchronous send
+    # is the default); the summary records them.
     [string[]] $ExtraLaunchArguments = @()
 )
 

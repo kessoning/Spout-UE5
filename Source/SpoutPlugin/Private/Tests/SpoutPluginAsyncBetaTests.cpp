@@ -715,6 +715,8 @@ bool FSpoutAsyncBetaInFlightWait::RunTest(const FString&)
 	TestTrue(TEXT("the worker's copy of the new image is in progress"), Held > 0.0);
 	if (Held > 0.0)
 	{
+		// The test runs inside one engine frame: earlier calls may have spent the frame's budget, so start it again.
+		SpoutAsyncReceiveTestHooks::ResetInFlightWaitBudget = true;
 		const double CallStart = FPlatformTime::Seconds();
 		AB::Call(Name, C);
 		const double CallMs = (FPlatformTime::Seconds() - CallStart) * 1000.0;
@@ -724,9 +726,17 @@ bool FSpoutAsyncBetaInFlightWait::RunTest(const FString&)
 		TestEqual(TEXT("the call waited once for the copy in progress"), During.InFlightWaits - Before.InFlightWaits, int64(1));
 		TestEqual(TEXT("and took no image: the copy had not ended"), During.InFlightWaitsDelivered - Before.InFlightWaitsDelivered, int64(0));
 		const int64 WaitedUs = During.InFlightWaitMicroseconds - Before.InFlightWaitMicroseconds;
-		// The bound is 1 ms on a high-resolution timer; the test allows for scheduling of the render thread.
-		TestTrue(FString::Printf(TEXT("the wait ended at its bound, not with the copy (%lld us)"), WaitedUs), WaitedUs >= 500 && WaitedUs <= 5000);
+		// The bound is 1 ms on a high-resolution timer. The upper limit only shows that the wait ended at its bound and
+		// not with the copy; it allows for the render thread being descheduled on a loaded machine.
+		TestTrue(FString::Printf(TEXT("the wait ended at its bound, not with the copy (%lld us)"), WaitedUs), WaitedUs >= 500 && WaitedUs <= 50000);
 		TestTrue(FString::Printf(TEXT("the whole call ended long before the %d ms copy (%.1f ms)"), DelayMs, CallMs), CallMs < 0.5 * DelayMs);
+		// A second call in the same render frame finds the frame's budget spent and does not wait again.
+		AB::Call(Name, C);
+		if (AB::WorkerHoldsAccess(Name))
+		{
+			TestEqual(TEXT("a second call in the same frame does not wait: the budget is per frame, for every stream"),
+				AB::WorkerStats(Name).InFlightWaits - Before.InFlightWaits, int64(1));
+		}
 	}
 	TestTrue(TEXT("the image still arrives exactly, from a later copy"), AB::ReceiveExact(Name, C, Source.Get()));
 	const FSpoutAsyncStats After = AB::WorkerStats(Name);

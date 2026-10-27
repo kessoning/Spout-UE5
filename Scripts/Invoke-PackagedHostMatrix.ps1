@@ -91,7 +91,8 @@ param(
     [switch] $KeepPackages,
 
     # Extra arguments appended to every host launch, recorded in the manifest. Empty by default. Development
-    # coverage only (for example '-ini:Engine:[ConsoleVariables]:r.Spout.Dev.AsyncSend=1').
+    # coverage only (for example '-ini:Engine:[ConsoleVariables]:r.Spout.Dev.AsyncSend=0', the synchronous render-target
+    # send; the asynchronous send is the default).
     [string[]] $ExtraLaunchArguments = @()
 )
 
