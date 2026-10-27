@@ -27,6 +27,7 @@
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/CoreDelegates.h"
 // Same macro the plugin's SpoutSender.cpp keys its delegate-signature branch on. Evaluating the
@@ -58,6 +59,20 @@ namespace SpoutHostTest
 		constexpr int32 TravelBudgetFrames = 1800;
 
 		constexpr double DefaultDeadlineSeconds = 600.0;
+
+		// The development switch r.Spout.Dev.AsyncSend: a render-target sender then announces its frames
+		// from a worker, a few milliseconds after SpoutSender returned, so a receiver opened in the same process in the
+		// same frame may find nothing announced yet. With the switch on, a receiver cycle's image must arrive within this
+		// many frames of the cycle's first accepted receive; with it off, the first accepted receive must deliver it.
+		constexpr int32 AsyncSendSettleBudgetFrames = 60;
+		int32 GCycleFirstReceiveFrame = -1;
+		int32 GMaxCycleSettleFrames = 0;
+
+		bool IsDevAsyncSendOn()
+		{
+			const IConsoleVariable* Switch = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.Dev.AsyncSend"));
+			return Switch && Switch->GetInt() != 0;
+		}
 
 		// GameViewportSenderSmoke thresholds. Conservative on purpose: the point is "frames are
 		// genuinely advancing across real presents", not a performance assertion. Three distinct
@@ -714,11 +729,21 @@ namespace SpoutHostTest
 
 		const auto ActualPixels = ReadPixels(OutTexture->GetResource(), OutTexture->GetSizeX(), OutTexture->GetSizeY());
 		const auto SourcePixels = ReadPixels(SourceRenderTarget->GetResource(), SourceRenderTarget->SizeX, SourceRenderTarget->SizeY);
+		if (GCycleFirstReceiveFrame < 0)
+		{
+			GCycleFirstReceiveFrame = StepFrames;
+		}
 		if (ActualPixels.IsEmpty() || ActualPixels != SourcePixels || ActualPixels[0]!=ExpectedPixel)
 		{
+			if (IsDevAsyncSendOn() && StepFrames - GCycleFirstReceiveFrame < AsyncSendSettleBudgetFrames)
+			{
+				return false;   // receive again on the next cycle frame (development switch only)
+			}
 			FailAndFinish(TEXT("receiver cycle: completed pixels differ from source before close"));
 			return false;
 		}
+		GMaxCycleSettleFrames = FMath::Max(GMaxCycleSettleFrames, StepFrames - GCycleFirstReceiveFrame);
+		GCycleFirstReceiveFrame = -1;
 		// Close by name. The pointers are handed back exactly as documented, so both are expected to
 		// be cleared - a receiver that leaves them set would mean the close did not own them.
 		USpoutBPFunctionLibrary::CloseReceiver(LifecycleSenderName, OutTexture, OutMaterial);
@@ -740,6 +765,8 @@ namespace SpoutHostTest
 		{
 			FReport* Report = FReport::Get();
 			Report->SetField(TEXT("receiverCyclesCompleted"), FString::FromInt(CompletedReceiverCycles));
+			Report->SetField(TEXT("devAsyncSend"), IsDevAsyncSendOn() ? TEXT("true") : TEXT("false"));
+			Report->SetField(TEXT("receiverCycleMaxSettleFrames"), FString::FromInt(GMaxCycleSettleFrames));
 			Report->MarkValue(TEXT("SPOUT_RECEIVER_CYCLES"), FString::FromInt(CompletedReceiverCycles));
 			Report->Mark(Markers::ReceiverCreatePass);
 			return true;
