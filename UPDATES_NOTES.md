@@ -90,6 +90,17 @@ read. Now the receiver keeps hold until the copy has really finished, just like 
 mode always has. The trade-off: if the graphics card gets stuck, closing that receiver or stopping
 the game waits for it too, and the log says so every few seconds while it waits.
 
+I also chased down why that Beta mode sometimes skipped a frame when both apps ran at the same speed.
+I recorded every single frame for five minutes and found the reason: the background helper would
+finish fetching a picture a split second after Unreal had asked for one, and then fetch the next
+picture just before Unreal asked again, so the first of the two never got shown. Now, when Unreal asks
+and a picture is literally being fetched right that moment, it waits for it, but never more than a
+thousandth of a second per frame in total. In my tests that took it from missing about 3.4 % of frames
+down to between 0.2 % and 2.7 %, and in the matching test the picture arrived just as quickly as
+before. It's still not perfect: two
+apps on separate clocks can still drop the odd frame. The Beta checkbox is still off unless you turn it
+on.
+
 Right at the end of the month I changed how sending works, and this one is on for everyone. Sending a
 picture out of Unreal used to make Unreal wait until the copy was done, which on a busy graphics card
 cost frame rate. Now a little helper does that waiting in the background. In my laptop test scene

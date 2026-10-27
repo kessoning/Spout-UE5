@@ -109,6 +109,16 @@ from the August preparation.
   Streams and shutdown can therefore wait as long as a stalled GPU copy, as on the synchronous path.
   New automation tests cover a late copy, a failed signal, and a close and a session stop with a
   copy outstanding.
+- Delivery fix (end of October 2026): at equal frame rates the worker's copy of a frame could complete
+  just after Unreal's receive call and the next copy just before the following call, so the earlier
+  frame was replaced unread and never shown (94 % of the missing frames in a per-frame diagnostic). A
+  receive call that finds no new image while the worker's copy of one is in progress now waits for
+  that copy and takes it: at most 1 ms per render frame, shared by every Async Receive stream and
+  consumer, on a high-resolution timer. The stream's end-of-stream log line counts the waits, those
+  that delivered an image, and their total time. On the RTX 2060 laptop against the plugin's native
+  test sender (300 s runs), distinct-frame delivery was 97.3 to 99.8 % at 59.94, 60 and 60.06 fps,
+  against 96.6 % before at 59.94 fps, with 8 to 289 ms of waiting per 300 s; frames near that
+  alignment can still be lost. Async Receive stays opt-in and off by default.
 
 #### Experimental receive settings (October 2026, off by default, not yet qualified)
 - Added four experimental console variables for the receive path: `r.Spout.FrameCountRecheck`,

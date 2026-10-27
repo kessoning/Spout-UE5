@@ -142,8 +142,8 @@ Async Receive (Beta) is chosen per receiver: the `Async Receive (Beta)` input of
 Spout Receiver With Material, or the checkbox of the same name on the shipped receiver example
 (Spout > Experimental). It moves receive work off the render thread: a worker thread with its own
 device takes the sender's texture and waits for the copy, and the render thread only queues a copy
-of the newest completed image. It is off by default and it is not part of the qualified behaviour
-of this release.
+of the newest completed image (waiting at most 1 ms per frame for a copy already in progress, below).
+It is off by default and it is not part of the qualified behaviour of this release.
 
 - **Per sender name, fixed while open.** The mode belongs to the receiver session of a name, which
   every graph receiving that name shares. The first accepted receive decides it; a later call for
@@ -167,6 +167,25 @@ of this release.
   not a general, causal or cross-machine result, and the original targets for this mode (3 ms
   better frame p99, at most 1 ms / 1.5 ms worse image age) were not met. Measure it in your own
   project before relying on it.
+- **Frames at equal frame rates.** When the sender and Unreal run at about the same frame rate, the
+  worker's copy of one frame can complete just after Unreal's receive call, and its copy of the next
+  frame just before the following call. The earlier frame is then never shown: the previous frame
+  stays one frame longer, then the next one follows. So a receive call that finds no new image while
+  the worker's copy of one is in progress waits for that copy and shows it. The wait is at most 1 ms
+  per render frame, for all Async Receive streams together.
+  - Measured on the RTX 2060 laptop, UE 5.8 packaged, in 300-second runs, receiving the plugin's
+    native test sender at 1080p. That sender holds Spout's access lock until its GPU work completes.
+  - With the sender at 59.94, 60 and 60.06 fps, 97.3 to 99.8 % of its frames were shown, and 98.6 %
+    with three more senders running. At most 3 frames in a row were missed, with no freeze.
+  - The waits took 8 to 289 ms of render-thread time per 300 seconds.
+  - Before the wait was added, the same configuration at 59.94 fps showed 96.6 %. A per-frame
+    diagnostic found that 94 % of the missing frames had been copied by the worker and then replaced by
+    the next copy before Unreal's call.
+  - Frames are still lost near that alignment, and whenever the sender keeps its texture locked past
+    the access wait. Showing every frame would mean holding a frame and showing it one frame later,
+    and the receiver does not do that.
+  - With Unreal at 30 fps receiving a 60 fps sender, every second frame is skipped, as with the
+    synchronous receive; no wait occurred.
 - Same safety rules as the synchronous receive: the sender's texture is only read under its access
   lock, and the lock is given back only once the worker's copy is proven finished on the GPU (or
   the worker's device was removed), however long that takes. A copy that finished later than
