@@ -15,10 +15,8 @@
  * the newest completed image and queues one copy of it into the same Unreal texture as the synchronous path. It
  * takes no Spout access and waits for no GPU work it queued. Its one wait: a call that finds no new
  * image while the worker's copy of one is in progress waits for that transfer to end, at most
- * 1 ms per render frame for all streams together (r.Spout.Dev.Recv.InFlightWaitUs, a
- * development switch, changes the bound), so that a copy completing just after the call is shown now rather than
- * lost when the next copy completes before the next call. With the development switch r.Spout.Dev.Recv.HoldMaxAgeUs a
- * stream keeps two unread images and a call may take the older (bounded retention).
+ * InFlightWaitBoundMicroseconds (1 ms per render frame for all streams together), so that a copy completing just
+ * after the call is shown now rather than lost when the next copy completes before the next call.
  *
  * The synchronous path stays the default. A stream uses this path only while every precondition
  * holds; otherwise, and after any failure here, it uses the synchronous path and says why once.
@@ -154,13 +152,6 @@ struct FSpoutAsyncStats
 	int64 InFlightWaits = 0;
 	int64 InFlightWaitsDelivered = 0;
 	int64 InFlightWaitMicroseconds = 0;
-	/** Bounded retention (r.Spout.Dev.Recv.HoldMaxAgeUs): calls that took the older of two unread images, and calls that found the older one beyond the age bound. */
-	int64 HoldTakes = 0;
-	int64 HoldTooOld = 0;
-	/** ... and calls that found two unread images while the source was faster than the reader (the rate guard). */
-	int64 HoldRateBlocked = 0;
-	/** ... and calls that found two unread images after r.Spout.Dev.Recv.HoldMaxRun older-image takes in a row. */
-	int64 HoldRunLimited = 0;
 };
 
 class FSpoutAsyncStream final : public FRunnable
@@ -189,8 +180,6 @@ public:
 	virtual ~FSpoutAsyncStream();
 
 	const FIdentity& GetIdentity() const { return Identity; }
-	/** The stream's slots: three, or four with the bounded retention (r.Spout.Dev.Recv.HoldMaxAgeUs). Fixed when it was created. */
-	int32 GetSlotCount() const { return NumSlots; }
 	/** This stream object's generation: a number no other stream object of the process has. */
 	uint64 GetGeneration() const { return Generation; }
 	/**
@@ -201,15 +190,12 @@ public:
 	static int32 GetLiveStreams();
 
 	/**
-	 * Render thread. Takes the newest completed image (or, with the bounded retention, the older of two),
-	 * when there is one, and queues its copy into
+	 * Render thread. Takes the newest completed image, when there is one, and queues its copy into
 	 * Destination: a queue wait on the written fence, the copy, a signal of the read fence. Returns
 	 * whether a copy was queued; that copy is the delivery. Never blocks on GPU work; may wait at most
-	 * the render frame's bound (1 ms unless r.Spout.Dev.Recv.InFlightWaitUs says otherwise) for a worker transfer that
-	 * is in progress (WaitForCopyInFlight). CommandStart and CommandUpdated are measurement-only: when the receive
-	 * command began and when its source update ended (0 when unknown), recorded in the call's row.
+	 * InFlightWaitBoundMicroseconds for a worker transfer that is in progress (WaitForCopyInFlight).
 	 */
-	bool ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, uint64 ReceivedBefore, uint64 CommandStart = 0, uint64 CommandUpdated = 0);
+	bool ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, uint64 ReceivedBefore);
 
 	/** The worker met an error that ends the asynchronous path for this stream: use the synchronous path. */
 	bool HasFailed() const { return bFailed.load(); }
@@ -230,7 +216,7 @@ private:
 	void Fail(const TCHAR* Why, HRESULT Result);
 	/** Waits on the stop event for at most the poll interval. */
 	void WaitForNextPoll();
-	/** Render thread: waits at most BoundMicroseconds (no more than MaxInFlightWaitMicroseconds) for the worker to end its transfer. Returns the time waited, in microseconds. */
+	/** Render thread: waits at most BoundMicroseconds (no more than InFlightWaitBoundMicroseconds) for the worker to end its transfer. Returns the time waited, in microseconds. */
 	int64 WaitForCopyInFlight(int64 BoundMicroseconds);
 #if SPOUT_WITH_INSTRUMENT
 	/**
@@ -241,8 +227,7 @@ private:
 	TUniquePtr<SpoutInstrument::FDestinationFenceWatch> ReadWatch;
 #endif
 
-	/** The most slots a stream has: three, and four while it keeps two unread images (the bounded retention). */
-	static constexpr int32 MaxStreamSlots = 4;
+	static constexpr int32 NumSlots = 3;
 	/** Fixed limits of the asynchronous path, not restrictions on what senders may do. */
 	static constexpr int32 PollIntervalMicroseconds = 250;
 	static constexpr uint32 NoSlotWaitMs = 2;
@@ -254,11 +239,9 @@ private:
 	 * transfer to end, at most this long, and takes the image if it was published.
 	 * At equal frame rates a copy that completes just after the call would otherwise be shown one frame later, or
 	 * lost when the next copy completes before the next call. The bound is per render frame, shared by every stream and
-	 * consumer: a call waits only while at least MinInFlightWaitMicroseconds of the frame's bound are left. The bound is
-	 * r.Spout.Dev.Recv.InFlightWaitUs (development switch, 1000 by default), read at the frame's first call and never
-	 * above MaxInFlightWaitMicroseconds.
+	 * consumer: a call waits only while at least MinInFlightWaitMicroseconds of the frame's bound are left.
 	 */
-	static constexpr int32 MaxInFlightWaitMicroseconds = 4000;
+	static constexpr int32 InFlightWaitBoundMicroseconds = 1000;
 	static constexpr int32 MinInFlightWaitMicroseconds = 100;
 
 	const FName Name;
@@ -268,34 +251,22 @@ private:
 
 	/** Guards Pool, Gate, LastReadValue and Outstanding. Held for one call; never across access, a device call or a wait. */
 	mutable FCriticalSection StateMutex;
-	SpoutAsync::FSlotPool Pool{3};
+	SpoutAsync::FSlotPool Pool{NumSlots};
 	SpoutAsync::FTransferGate Gate;
 	uint64 LastReadValue = 0;
 	/** The work the stream's objects may still be used by: native copies (worker) and reads queued by Unreal (render thread). */
 	SpoutSlotRules::FOutstanding Outstanding;
 	const uint64 Generation;
-	/** Slots of this stream (three, or four with the bounded retention) and the retention's age bound in cycles (0: off). Fixed by Create. */
-	int32 NumSlots = 3;
-	int64 HoldMaxAgeCycles = 0;
-	/** The retention's limit on older-image takes in a row (0: none). Fixed by Create. */
-	int32 HoldMaxRun = 0;
-	/** Bounded retention: its rate guard, the current run of older-image takes and its counters, guarded by StateMutex. */
-	SpoutAsync::FRateGuard Rate;
-	int32 HoldRun = 0;
-	int64 HoldTakes = 0;
-	int64 HoldTooOld = 0;
-	int64 HoldRateBlocked = 0;
-	int64 HoldRunLimited = 0;
 
 	// Unreal's device: the slots and both fences live there.
 	Microsoft::WRL::ComPtr<ID3D12Fence> WrittenFence;
 	Microsoft::WRL::ComPtr<ID3D12Fence> ReadFence;
-	Microsoft::WRL::ComPtr<ID3D12Resource> SlotResources[MaxStreamSlots];
-	FTextureRHIRef SlotTextures[MaxStreamSlots];
+	Microsoft::WRL::ComPtr<ID3D12Resource> SlotResources[NumSlots];
+	FTextureRHIRef SlotTextures[NumSlots];
 
 	// The worker's device: the sender's texture and the slots opened there, and the written fence.
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> WorkerSource;
-	Microsoft::WRL::ComPtr<ID3D11Texture2D> WorkerSlots[MaxStreamSlots];
+	Microsoft::WRL::ComPtr<ID3D11Texture2D> WorkerSlots[NumSlots];
 	Microsoft::WRL::ComPtr<ID3D11Fence> WorkerWrittenFence;
 	/** The event query that proves a copy whose written-fence signal failed. */
 	Microsoft::WRL::ComPtr<ID3D11Query> Proof;

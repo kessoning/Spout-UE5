@@ -440,7 +440,7 @@ void FSpoutFrameSync::GetStatus(int64& OutFrames, int64& OutAccessMisses) const
 	OutAccessMisses = FailedAcquireCount.load();
 }
 
-bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture, int32 TimeoutMs)
+bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
 {
 	FScopeLock Lock(&Mutex);
 	++AcquireAttemptCount;
@@ -468,7 +468,7 @@ bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture, int32 TimeoutMs)
 	bool bGranted = false;
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AccessWait);
-		bGranted = Backend->CheckTextureAccess(SharedTexture, TimeoutMs < 0 ? SpoutLimits::AccessWaitMs() : static_cast<uint32>(TimeoutMs));
+		bGranted = Backend->CheckTextureAccess(SharedTexture, SpoutLimits::AccessWaitMs());
 	}
 	if (!bGranted)
 	{

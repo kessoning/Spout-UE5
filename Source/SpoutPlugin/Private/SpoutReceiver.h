@@ -20,17 +20,7 @@ namespace SpoutReceiverInternal
 #if WITH_DEV_AUTOMATION_TESTS
 	/** One-shot failure at the real CPU readback boundary, for retry regression tests. */
 	void FailNextCpuReadbackForTests();
-	/** Render thread: the synchronous receives waiting for their end-of-frame attempt. Tests. */
-	int32 GetArmedEndOfFrameRetriesForTests();
 #endif
-	/**
-	 * Render thread, at the end of every render frame (FCoreDelegates::OnEndFrameRT, registered by the module): the
-	 * end-of-frame attempts of the synchronous shared-slot receives whose access was refused in this frame (development
-	 * switch r.Spout.Dev.Recv.SyncRetry). Does nothing while none is armed.
-	 */
-	void RunEndOfFrameRetries();
-	/** Render thread: drops every armed end-of-frame attempt (the ordered teardown, before its flush). */
-	void DiscardEndOfFrameRetries();
 	/**
 	 * Chooses the material instance one consumer uses this frame.
 	 *

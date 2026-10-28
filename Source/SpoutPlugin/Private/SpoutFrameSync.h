@@ -383,12 +383,8 @@ public:
 private:
 	friend class FSpoutTextureAccessScope;
 
-	/**
-	 * Only FSpoutTextureAccessScope may take and give back access, so the two cannot be separated. TimeoutMs below zero
-	 * uses r.Spout.AccessWaitMs; otherwise it is the attempt's own bound (development switches: the asynchronous receive
-	 * worker's wait, the synchronous receive's try-only first attempt and its retry).
-	 */
-	bool AcquireTextureAccess(void* SharedTexture, int32 TimeoutMs = -1);
+	/** Only FSpoutTextureAccessScope may take and give back access, so the two cannot be separated. */
+	bool AcquireTextureAccess(void* SharedTexture);
 	void ReleaseTextureAccess(void* SharedTexture);
 
 	/** The clock of the predictor and the wait: QPC seconds unless a test set one. */
@@ -481,10 +477,10 @@ namespace SpoutFrameWait
 class FSpoutTextureAccessScope
 {
 public:
-	FSpoutTextureAccessScope(FSpoutFrameSync& InFrameSync, void* InSharedTexture, int32 TimeoutMs = -1)
+	FSpoutTextureAccessScope(FSpoutFrameSync& InFrameSync, void* InSharedTexture)
 		: FrameSync(InFrameSync)
 		, SharedTexture(InSharedTexture)
-		, bAcquired(InFrameSync.AcquireTextureAccess(InSharedTexture, TimeoutMs))
+		, bAcquired(InFrameSync.AcquireTextureAccess(InSharedTexture))
 	{
 	}
 

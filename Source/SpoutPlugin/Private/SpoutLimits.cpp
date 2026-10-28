@@ -72,31 +72,6 @@ namespace
 		TEXT("Development switch, not a supported setting. With r.Spout.Dev.AsyncSend 1: 0 (default) the worker copies a frame once its fill finished; ")
 		TEXT("1 also waits for the end of Unreal's frame on its GPU queue, at most 100 ms."),
 		ECVF_Default);
-	// Receive development switches (SpoutLimits.h). Development only; every default is the standard receive behaviour.
-	TAutoConsoleVariable<int32> GSpoutDevRecvWorkerAccessWaitMs(TEXT("r.Spout.Dev.Recv.WorkerAccessWaitMs"), -1,
-		TEXT("Development switch, not a supported setting. Async Receive's worker's access wait in ms, clamped to 0..16; -1 (default): r.Spout.AccessWaitMs."),
-		ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutDevRecvInFlightWaitUs(TEXT("r.Spout.Dev.Recv.InFlightWaitUs"), 1000,
-		TEXT("Development switch, not a supported setting. Async Receive's per-render-frame bound in microseconds on waits for a copy in progress, clamped to 0..4000 (default 1000)."),
-		ECVF_RenderThreadSafe);
-	TAutoConsoleVariable<int32> GSpoutDevRecvHoldMaxAgeUs(TEXT("r.Spout.Dev.Recv.HoldMaxAgeUs"), 0,
-		TEXT("Development switch, not a supported setting. 0 (default): off. Otherwise Async Receive streams created afterwards keep up to two unread images and take the older ")
-		TEXT("of two when it was captured at most this many microseconds ago (clamped to 0..50000)."),
-		ECVF_RenderThreadSafe);
-	TAutoConsoleVariable<int32> GSpoutDevRecvHoldMaxRun(TEXT("r.Spout.Dev.Recv.HoldMaxRun"), 0,
-		TEXT("Development switch, not a supported setting. With r.Spout.Dev.Recv.HoldMaxAgeUs on: at most this many receive calls in a row take the older of two unread images ")
-		TEXT("(0, default: no limit; clamped to 0..8). Read when a stream is created."),
-		ECVF_RenderThreadSafe);
-	TAutoConsoleVariable<int32> GSpoutDevRecvSyncRetry(TEXT("r.Spout.Dev.Recv.SyncRetry"), 0,
-		TEXT("Development switch, not a supported setting. 0 (default): one synchronous receive attempt per frame. 1: a refused attempt is tried again at the end of the render frame. ")
-		TEXT("2: as 1, and while the first attempt keeps failing only the end-of-frame attempt is made."),
-		ECVF_RenderThreadSafe);
-	TAutoConsoleVariable<int32> GSpoutDevRecvSyncFirstTryOnly(TEXT("r.Spout.Dev.Recv.SyncFirstTryOnly"), 0,
-		TEXT("Development switch, not a supported setting. 1: the synchronous receive's first attempt does not wait for access. 0 (default): it waits r.Spout.AccessWaitMs."),
-		ECVF_RenderThreadSafe);
-	TAutoConsoleVariable<int32> GSpoutDevRecvSyncRetryBudgetUs(TEXT("r.Spout.Dev.Recv.SyncRetryBudgetUs"), 2000,
-		TEXT("Development switch, not a supported setting. Total access wait in microseconds of one render frame's end-of-frame receive attempts, clamped to 0..10000 (default 2000)."),
-		ECVF_RenderThreadSafe);
 	FCriticalSection GSpoutLimitBudgetMutex;
 	int64 GSpoutLimitReserved = 0, GSpoutLimitPeak = 0, GSpoutLimitRejected = 0;
 }
@@ -127,13 +102,6 @@ int32 SpoutLimits::AsyncReceiveGpuPriority() { return FMath::Clamp(GSpoutAsyncRe
 bool SpoutLimits::SharedSlotInteropRequested() { return GSpoutSharedSlotInterop.GetValueOnAnyThread() != 0; }
 bool SpoutLimits::DevAsyncSend() { return GSpoutDevAsyncSend.GetValueOnAnyThread() != 0; }
 int32 SpoutLimits::DevAsyncSendDrainAfter() { return GSpoutDevAsyncSendDrainAfter.GetValueOnAnyThread() != 0 ? 1 : 0; }
-uint32 SpoutLimits::DevRecvWorkerAccessWaitMs() { const int32 V = GSpoutDevRecvWorkerAccessWaitMs.GetValueOnAnyThread(); return V < 0 ? AccessWaitMs() : static_cast<uint32>(FMath::Min(V, 16)); }
-int32 SpoutLimits::DevRecvInFlightWaitUs() { return FMath::Clamp(GSpoutDevRecvInFlightWaitUs.GetValueOnAnyThread(), 0, 4000); }
-int32 SpoutLimits::DevRecvHoldMaxAgeUs() { return FMath::Clamp(GSpoutDevRecvHoldMaxAgeUs.GetValueOnAnyThread(), 0, 50000); }
-int32 SpoutLimits::DevRecvHoldMaxRun() { return FMath::Clamp(GSpoutDevRecvHoldMaxRun.GetValueOnAnyThread(), 0, 8); }
-int32 SpoutLimits::DevRecvSyncRetry() { return FMath::Clamp(GSpoutDevRecvSyncRetry.GetValueOnAnyThread(), 0, 2); }
-bool SpoutLimits::DevRecvSyncFirstTryOnly() { return GSpoutDevRecvSyncFirstTryOnly.GetValueOnAnyThread() != 0; }
-int32 SpoutLimits::DevRecvSyncRetryBudgetUs() { return FMath::Clamp(GSpoutDevRecvSyncRetryBudgetUs.GetValueOnAnyThread(), 0, 10000); }
 int64 SpoutLimits::RetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitReserved; }
 int64 SpoutLimits::PeakRetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitPeak; }
 int64 SpoutLimits::RejectedAllocations() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitRejected; }

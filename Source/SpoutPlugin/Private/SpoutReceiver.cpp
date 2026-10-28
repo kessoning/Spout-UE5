@@ -59,38 +59,6 @@ namespace
 #if WITH_DEV_AUTOMATION_TESTS
 	TAtomic<bool> GFailNextCpuReadback{false};
 #endif
-	/**
-	 * Render thread only. When the current receive command began and when its source update ended: written by the
-	 * command, recorded in its measurement row (tWrap0/tWrap1), which the synchronous shared-slot path and Async
-	 * Receive leave unused otherwise. 0 outside a receive command.
-	 */
-	uint64 GReceiveCommandStart = 0;
-	uint64 GReceiveCommandUpdated = 0;
-
-	/**
-	 * Render thread only. The synchronous shared-slot receives of this render frame whose access was refused, waiting for
-	 * their end-of-frame attempt (development switch r.Spout.Dev.Recv.SyncRetry; RunEndOfFrameRetries). Each keeps its
-	 * destination until that attempt, which drains the list every frame; the teardown discards it first.
-	 */
-	struct FEndOfFrameRetry
-	{
-		TWeakPtr<FSpoutSharedSender> Receiver;
-		TRefCountPtr<FRHITexture> Destination;
-		FSpoutStreamToken Token;
-	};
-	TArray<FEndOfFrameRetry> GEndOfFrameRetries;
-
-	/** The receive attempt: 0 the call's own (first) attempt, 1 its end-of-frame attempt. */
-	enum class ESyncAttempt : uint8 { First = 0, EndOfFrame = 1 };
-
-	void ArmEndOfFrameRetry(const TSharedPtr<FSpoutSharedSender>& Receiver, const TRefCountPtr<FRHITexture>& Destination, const FSpoutStreamToken& Token)
-	{
-		for (const FEndOfFrameRetry& E : GEndOfFrameRetries)
-		{
-			if (E.Receiver.HasSameObject(Receiver.Get())) return; // once per receiver and frame
-		}
-		GEndOfFrameRetries.Add({ Receiver, Destination, Token });
-	}
 	void CopyReceivedFrame(FRHICommandListImmediate& Cmd, FRHITexture* Source, FRHITexture* Destination, bool bAfterCpuUpload = false)
 	{
 		if (Source == Destination) return;
@@ -385,8 +353,6 @@ namespace
 		Rec.Pending = Receiver.FrameSync.HasPendingFrame() ? 1 : 0;
 		Rec.ReceivedBefore = Receiver.ReceivedFrameNumber;
 		Rec.TDetect = SpoutInstrument::Now();
-		Rec.TWrap0 = GReceiveCommandStart;
-		Rec.TWrap1 = GReceiveCommandUpdated;
 	}
 
 	/** Measurement builds: what the check stage did. */
@@ -515,7 +481,7 @@ namespace
 				*Receiver.Name.ToString(), Receiver.Async->GetGeneration());
 		}
 		Receiver.bAsyncReceiveActive.store(true);
-		if (Receiver.Async->ConsumeOnRenderThread(RHICmdList, Destination, Receiver.ReceivedFrameNumber, GReceiveCommandStart, GReceiveCommandUpdated))
+		if (Receiver.Async->ConsumeOnRenderThread(RHICmdList, Destination, Receiver.ReceivedFrameNumber))
 		{
 			++Receiver.ReceivedFrameNumber;
 			Receiver.AsyncDeliveredFrames.fetch_add(1); // the status's count only
@@ -542,9 +508,7 @@ namespace
 		TSharedPtr<FSpoutSharedSender> Receiver,
 		TRefCountPtr<FRHITexture> DestTextureRHI,
 		FRHICommandListImmediate& RHICmdList,
-		const FSpoutStreamToken& Token,
-		ESyncAttempt Attempt = ESyncAttempt::First,
-		int32 AccessTimeoutMs = -1)
+		const FSpoutStreamToken& Token)
 	{
 		if (!DestTextureRHI.IsValid())
 		{
@@ -594,29 +558,6 @@ namespace
 			return;
 		}
 
-		// Development switches (at their defaults, a single attempt): the end-of-frame attempt after a refused access (1),
-		// and while the first attempt keeps failing, only that attempt (2); a first attempt that does not wait
-		// (SyncFirstTryOnly).
-		const int32 RetryMode = SpoutLimits::DevRecvSyncRetry();
-		const bool bFirst = Attempt == ESyncAttempt::First;
-		if (bFirst && AccessTimeoutMs < 0 && SpoutLimits::DevRecvSyncFirstTryOnly())
-		{
-			AccessTimeoutMs = 0;
-		}
-		bool bSkipFirst = false;
-		if (bFirst && RetryMode == 2)
-		{
-			// Two refused first attempts in a row (a granted one clears the history): the first attempt is skipped, and made again every 30th frame as a probe.
-			if (FPlatformMath::CountBits(Receiver->SyncFirstRefusedHistory & 0xFFu) >= 2 && Receiver->SyncFramesSinceProbe < 30)
-			{
-				bSkipFirst = true;
-				++Receiver->SyncFramesSinceProbe;
-			}
-			else
-			{
-				Receiver->SyncFramesSinceProbe = 0;
-			}
-		}
 		const bool bRecheckNotification = SpoutLimits::FrameCountRecheck();
 		SPOUT_INSTRUMENT(
 			const bool bInstrument = SpoutInstrument::IsEnabled();
@@ -628,16 +569,8 @@ namespace
 				Rec.CompletionStage = 1;
 				Rec.Generation = static_cast<int64>(Slots.GetGeneration());
 				Slots.ObserveDestination(Rec.Stream);
-				// bit 6: an end-of-frame attempt; bit 7: a first attempt skipped for the end-of-frame one (development switches).
-				Rec.Flags |= (bFirst ? 0 : 64) | (bSkipFirst ? 128 : 0);
 			}
 		)
-		if (bSkipFirst)
-		{
-			ArmEndOfFrameRetry(Receiver, DestTextureRHI, Token);
-			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TRestore = SpoutInstrument::Now(); FinishReceiveRecord(Rec, *Receiver); })
-			return;
-		}
 		FSpoutReceiveCheck Check;
 		const bool bTransfer = SpoutFrameWait::CheckForNewFrame(Receiver->FrameSync,
 			[&](bool bNewFrameAtRead)
@@ -679,20 +612,11 @@ namespace
 			// pending. Once taken it is held until the copy is proven finished (or the native device is removed), even
 			// when the copy is late and its frame discarded: the peer may not write while the read still runs.
 			SPOUT_INSTRUMENT(if (bInstrument) Rec.TAccess0 = SpoutInstrument::Now();)
-			FSpoutTextureAccessScope Access(Receiver->FrameSync, Slots.GetNativeSource(), AccessTimeoutMs);
+			FSpoutTextureAccessScope Access(Receiver->FrameSync, Slots.GetNativeSource());
 			SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = SpoutInstrument::Now(); Rec.Acquired = Access.IsAcquired() ? 1 : 0; })
-			if (bFirst && RetryMode == 2)
-			{
-				Receiver->SyncFirstRefusedHistory = Access.IsAcquired() ? 0u : ((Receiver->SyncFirstRefusedHistory << 1) | 1u);
-			}
 			if (!Access.IsAcquired())
 			{
 				Slots.Abandon(Slot, SpoutAsync::EAbandon::AccessRefused);
-				if (bFirst && RetryMode != 0)
-				{
-					// The frame stays pending: tried once more at the end of this render frame.
-					ArmEndOfFrameRetry(Receiver, DestTextureRHI, Token);
-				}
 				if (Receiver->AccessLogThrottle.ShouldLog())
 				{
 					UE_LOG(LogSpoutPlugin, Warning,
@@ -1195,56 +1119,6 @@ namespace
 void SpoutReceiverInternal::FailNextCpuReadbackForTests() { GFailNextCpuReadback.Store(true); }
 #endif
 
-void SpoutReceiverInternal::RunEndOfFrameRetries()
-{
-	check(IsInRenderingThread());
-	if (GEndOfFrameRetries.Num() == 0)
-	{
-		return;
-	}
-	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_EndOfFrameReceiveRetries);
-	TArray<FEndOfFrameRetry> Retries = MoveTemp(GEndOfFrameRetries);
-	GEndOfFrameRetries.Reset();
-	if (SpoutLimits::DevRecvSyncRetry() == 0)
-	{
-		return; // switched off since they were armed: dropped
-	}
-	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-	// One budget for the frame's end-of-frame attempts, all streams together: each attempt waits for access at most what is left.
-	int64 BudgetLeftUs = SpoutLimits::DevRecvSyncRetryBudgetUs();
-	for (FEndOfFrameRetry& Retry : Retries)
-	{
-		const TSharedPtr<FSpoutSharedSender> Receiver = Retry.Receiver.Pin();
-		if (!Receiver || !Retry.Destination.IsValid() || !FSpoutSession::Get().IsCurrent(Retry.Token))
-		{
-			continue;
-		}
-		const int32 TimeoutMs = static_cast<int32>(FMath::Min<int64>(SpoutLimits::AccessWaitMs(), FMath::Max<int64>(0, BudgetLeftUs) / 1000));
-		const uint64 Before = FPlatformTime::Cycles64();
-		const uint64 PreviousFrame = Receiver->ReceivedFrameNumber;
-		ReceiveOnRenderThread_SharedSlot(Receiver, Retry.Destination, RHICmdList, Retry.Token, ESyncAttempt::EndOfFrame, TimeoutMs);
-		if (PreviousFrame != Receiver->ReceivedFrameNumber)
-		{
-			Receiver->ReceivedFrame = Retry.Destination;
-		}
-		BudgetLeftUs -= static_cast<int64>(FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - Before) * 1000.0);
-	}
-}
-
-void SpoutReceiverInternal::DiscardEndOfFrameRetries()
-{
-	check(IsInRenderingThread());
-	GEndOfFrameRetries.Reset();
-}
-
-#if WITH_DEV_AUTOMATION_TESTS
-int32 SpoutReceiverInternal::GetArmedEndOfFrameRetriesForTests()
-{
-	check(IsInRenderingThread());
-	return GEndOfFrameRetries.Num();
-}
-#endif
-
 UMaterialInstanceDynamic* SpoutReceiverInternal::ResolveConsumerMaterial(
 	FSpoutReceiverOwnership& Ownership,
 	FName ReceiverName,
@@ -1528,15 +1402,11 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			SPOUT_INSTRUMENT(if (SpoutInstrument::BypassMask() & 1) return;)
 			// Native source replacement and destination resolution share ONE render
 			// command. Later game-thread receives cannot replace half of this pair.
-			GReceiveCommandStart = FPlatformTime::Cycles64();
-			GReceiveCommandUpdated = 0;
-			ON_SCOPE_EXIT { GReceiveCommandStart = 0; GReceiveCommandUpdated = 0; };
 			FSpoutD3DContext& RenderContext = FSpoutD3DContext::Get();
 			if (!UpdateSharedReceiverTexture(*Receiver, W, H, SharedHandle, static_cast<DXGI_FORMAT>(Format), RenderContext))
 			{
 				return;
 			}
-			GReceiveCommandUpdated = FPlatformTime::Cycles64();
 			TRefCountPtr<FRHITexture> TextureRHI = TextureResource ? TextureResource->GetTextureRHI() : nullptr;
 			TRefCountPtr<FRHITexture> TargetRHI = OutputResource ? OutputResource->GetRenderTargetTexture() : nullptr;
 			auto IsCompatible = [W, H, PixelFormat](const TRefCountPtr<FRHITexture>& Texture)

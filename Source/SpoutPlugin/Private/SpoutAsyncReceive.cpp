@@ -44,12 +44,10 @@ namespace
 
 	/**
 	 * Render thread only (ConsumeOnRenderThread): the render frame the waits for a copy in progress were counted in,
-	 * and their microseconds so far. Every stream and consumer of the frame shares one bound, read at the frame's first
-	 * call (r.Spout.Dev.Recv.InFlightWaitUs, 1000 by default).
+	 * and their microseconds so far. Every stream and consumer of the frame shares one InFlightWaitBoundMicroseconds.
 	 */
 	uint64 GInFlightWaitFrame = MAX_uint64;
 	int64 GInFlightWaitUsedMicroseconds = 0;
-	int64 GInFlightWaitBoundMicroseconds = 1000;
 
 	/**
 	 * Waits until Fence reached Value, for at most TimeoutMs. False on a timeout and on device
@@ -320,16 +318,6 @@ TUniquePtr<FSpoutAsyncStream> FSpoutAsyncStream::Create(const FName& Name, int32
 	check(IsInRenderingThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncStreamCreate);
 	TUniquePtr<FSpoutAsyncStream> Stream(new FSpoutAsyncStream(Name, InstrumentStream, FrameSync, Identity));
-	// The bounded retention (development switch r.Spout.Dev.Recv.HoldMaxAgeUs), fixed for the stream's life: a fourth slot
-	// and up to two unread images. Off (0): three slots and one unread image.
-	const int32 HoldMaxAgeUs = SpoutLimits::DevRecvHoldMaxAgeUs();
-	if (HoldMaxAgeUs > 0)
-	{
-		Stream->NumSlots = MaxStreamSlots;
-		Stream->HoldMaxAgeCycles = static_cast<int64>(double(HoldMaxAgeUs) / 1e6 / FPlatformTime::GetSecondsPerCycle64());
-		Stream->HoldMaxRun = SpoutLimits::DevRecvHoldMaxRun();
-		Stream->Pool = SpoutAsync::FSlotPool(MaxStreamSlots, 2);
-	}
 	if (!Stream->Initialize(PixelFormat, OutWhy))
 	{
 		return nullptr;
@@ -368,7 +356,7 @@ bool FSpoutAsyncStream::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 		return false;
 	}
 
-	// One frame of the sender's size per slot, charged to the retained-memory budget before anything is made.
+	// Three frames of the sender's size, charged to the retained-memory budget before anything is made.
 	int64 FrameBytes = 0;
 	if (!SpoutLimits::FrameBytes(Identity.Width, Identity.Height, PixelFormat, FrameBytes))
 	{
@@ -508,13 +496,10 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 		const FSpoutAsyncStats Stats = GetStats();
 		UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': asynchronous receive ended (stream object %llu, %.1f s): %lld polls, %lld images published, %lld consumed, ")
 			TEXT("%lld replaced unread, %lld transfers skipped for no free slot, %lld accesses refused, %lld copies failed, %lld copies finished late (discarded), %lld rule violations; ")
-			TEXT("%lld render-thread waits for a copy in progress (%lld then delivered an image; %.1f ms in all); worker thread CPU time %.1f ms.%s"),
+			TEXT("%lld render-thread waits for a copy in progress (%lld then delivered an image; %.1f ms in all); worker thread CPU time %.1f ms."),
 			*Name.ToString(), Generation, WorkerSeconds.load(), Stats.Polls, Stats.Published, Stats.Consumed, Stats.ReplacedUnread, Stats.NoFreeSlot, Stats.AccessRefused,
 			Stats.CopyFailed, Stats.CompletionTimeouts, Stats.RuleViolations, Stats.InFlightWaits, Stats.InFlightWaitsDelivered,
-			double(Stats.InFlightWaitMicroseconds) / 1000.0, double(WorkerCpu100ns.load()) / 10000.0,
-			HoldMaxAgeCycles > 0 ? *FString::Printf(TEXT(" Bounded retention (development switch, %.0f us): %lld calls took the older of two unread images, %lld found it older than the bound, %lld found the source faster than the reader.%s"),
-				double(HoldMaxAgeCycles) * FPlatformTime::GetSecondsPerCycle64() * 1e6, Stats.HoldTakes, Stats.HoldTooOld, Stats.HoldRateBlocked,
-				HoldMaxRun > 0 ? *FString::Printf(TEXT(" Run limit %d: %lld calls took the newest after that many older images in a row."), HoldMaxRun, Stats.HoldRunLimited) : TEXT("")) : TEXT(""));
+			double(Stats.InFlightWaitMicroseconds) / 1000.0, double(WorkerCpu100ns.load()) / 10000.0);
 	}
 	// The objects go to the retirement list with the fence values that prove their work finished: the worker's copies
 	// (written fence, or the event query after a failed signal) and the copies Unreal queued out of the slots (read
@@ -601,7 +586,7 @@ int64 FSpoutAsyncStream::WaitForCopyInFlight(int64 BoundMicroseconds)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncWaitForCopyInFlight);
 	const uint64 Start = FPlatformTime::Cycles64();
-	const int64 Bound = FMath::Clamp<int64>(BoundMicroseconds, 0, MaxInFlightWaitMicroseconds);
+	const int64 Bound = FMath::Clamp<int64>(BoundMicroseconds, 0, InFlightWaitBoundMicroseconds);
 	bool bWaited = false;
 	if (ConsumeWaitTimer)
 	{
@@ -748,8 +733,7 @@ bool FSpoutAsyncStream::TransferOnce()
 	uint64 AcquiredAt = 0;
 	{
 		SPOUT_INSTRUMENT(if (bInstrument) Rec.TAccess0 = SpoutInstrument::Now();)
-		// The worker's own bound: r.Spout.AccessWaitMs unless the development switch r.Spout.Dev.Recv.WorkerAccessWaitMs sets one.
-		FSpoutTextureAccessScope Access(FrameSync, WorkerSource.Get(), static_cast<int32>(SpoutLimits::DevRecvWorkerAccessWaitMs()));
+		FSpoutTextureAccessScope Access(FrameSync, WorkerSource.Get());
 		bAcquired = Access.IsAcquired();
 		AcquiredAt = FPlatformTime::Cycles64();
 		SPOUT_INSTRUMENT(if (bInstrument) { Rec.TAcquire = AcquiredAt; Rec.Acquired = bAcquired ? 1 : 0; })
@@ -849,7 +833,6 @@ bool FSpoutAsyncStream::TransferOnce()
 			if (Sequence != 0)
 			{
 				Gate.OnPublished();
-				Rate.OnPublished();
 			}
 		}
 		else
@@ -901,7 +884,7 @@ bool FSpoutAsyncStream::TransferOnce()
 	return Sequence != 0;
 }
 
-bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, uint64 ReceivedBefore, uint64 CommandStart, uint64 CommandUpdated)
+bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, uint64 ReceivedBefore)
 {
 	check(IsInRenderingThread());
 	if (!Destination || bFailed.load())
@@ -922,10 +905,6 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 			Rec.Generation = static_cast<int64>(Generation);
 			Rec.ReceivedBefore = ReceivedBefore;
 			Rec.ReceivedAfter = ReceivedBefore;
-			// The receive command's start and the end of its source update: the time the render
-			// thread spent before this call, which can include a wait for the frame sync's lock.
-			Rec.TWrap0 = CommandStart;
-			Rec.TWrap1 = CommandUpdated;
 		}
 	)
 	SpoutAsync::FConsumed Taken;
@@ -942,52 +921,15 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 	{
 		GInFlightWaitFrame = GFrameCounterRenderThread;
 		GInFlightWaitUsedMicroseconds = 0;
-		GInFlightWaitBoundMicroseconds = SpoutLimits::DevRecvInFlightWaitUs();
 	}
-	const int64 BudgetLeft = GInFlightWaitBoundMicroseconds - GInFlightWaitUsedMicroseconds;
-	SPOUT_INSTRUMENT(bool bTookOlder = false; int32 LeftUnread = 0;)
-	// The bounded retention's rate guard, once per call: the older of two is taken only while the source is not faster.
-	bool bRateAllowsOlder = false;
-	if (HoldMaxAgeCycles > 0)
-	{
-		FScopeLock Lock(&StateMutex);
-		bRateAllowsOlder = Rate.OnCall();
-	}
+	const int64 BudgetLeft = InFlightWaitBoundMicroseconds - GInFlightWaitUsedMicroseconds;
 	// At most two looks: the second only after a bounded wait for a copy that was in progress at the first.
 	for (int32 Look = 0; Look < 2; ++Look)
 	{
 		bool bWait = false;
 		{
 			FScopeLock Lock(&StateMutex);
-			// The bounded retention: of two unread images, the older is taken when it was captured no longer ago than the
-			// bound and the source is not faster than this reader (the rate guard), and the newer stays for the next call;
-			// otherwise the newest is taken and the older replaced unread.
-			SpoutAsync::ETake Take = SpoutAsync::ETake::Newest;
-			if (HoldMaxAgeCycles > 0 && Pool.ReadyCount() >= 2)
-			{
-				const SpoutAsync::FSlotInfo* Older = Pool.PeekReady(false);
-				if (!bRateAllowsOlder)
-				{
-					++HoldRateBlocked;
-				}
-				else if (HoldMaxRun > 0 && HoldRun >= HoldMaxRun)
-				{
-					++HoldRunLimited;
-				}
-				else if (Older && static_cast<int64>(FPlatformTime::Cycles64()) - Older->Tag <= HoldMaxAgeCycles)
-				{
-					Take = SpoutAsync::ETake::Oldest;
-					++HoldTakes;
-				}
-				else
-				{
-					++HoldTooOld;
-				}
-			}
-			Result = Pool.Consume(Generation, LastReadValue + 1, Taken, Take);
-			// The run of older-image takes ends at any call that takes the newest or finds nothing new.
-			HoldRun = Take == SpoutAsync::ETake::Oldest && Result == SpoutAsync::EConsume::Consumed ? HoldRun + 1 : 0;
-			SPOUT_INSTRUMENT(bTookOlder = Take == SpoutAsync::ETake::Oldest && Result == SpoutAsync::EConsume::Consumed; LeftUnread = Pool.ReadyCount();)
+			Result = Pool.Consume(Generation, LastReadValue + 1, Taken);
 			if (Result == SpoutAsync::EConsume::Consumed)
 			{
 				++LastReadValue;
@@ -1024,8 +966,6 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 			// A wait for a copy in progress shows as the row's own length (tDetect to tRestore); the frame-wait columns
 			// belong to the synchronous receive's SpoutFrameWait and stay unset here.
 			Rec.AsyncOutcome = bConsumed ? 0 : (Result == SpoutAsync::EConsume::Nothing ? 1 : 2);
-			Rec.Pending = LeftUnread;               // images still unread after the call (1 while the retention keeps one)
-			Rec.Flags = bTookOlder ? 64 : 0;        // bit 6: the call took the older of two unread images
 			if (bConsumed)
 			{
 				Rec.Slot = Taken.Slot;
@@ -1085,10 +1025,6 @@ FSpoutAsyncStats FSpoutAsyncStream::GetStats() const
 		Out.CompletionTimeouts = N.Abandoned[static_cast<int32>(SpoutAsync::EAbandon::CompletionTimeout)];
 		Out.PublishedAfterReuse = N.PublishedAfterReuse;
 		Out.RuleViolations = N.RuleViolations;
-		Out.HoldTakes = HoldTakes;
-		Out.HoldTooOld = HoldTooOld;
-		Out.HoldRateBlocked = HoldRateBlocked;
-		Out.HoldRunLimited = HoldRunLimited;
 	}
 	Out.NoFreeSlot = NoSlotSkips.load();
 	Out.InFlightWaits = InFlightWaits.load();

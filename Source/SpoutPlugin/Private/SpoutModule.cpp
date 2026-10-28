@@ -16,8 +16,6 @@ FString FSpoutModule::GetBuildSourceIdentity()
 #include "SpoutAsyncSend.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutLimits.h"
-#include "SpoutReceiver.h"
-#include "Misc/CoreDelegates.h"
 
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
@@ -140,9 +138,6 @@ void FSpoutModule::StartupModule()
 	// The asynchronous sender's flush and frame-end hooks (the default render-target send). They do nothing
 	// while no asynchronous sender exists.
 	FSpoutAsyncSendStream::RegisterHooks();
-	// The synchronous receive's end-of-frame attempts (development switch r.Spout.Dev.Recv.SyncRetry, off by default).
-	// It does nothing while no attempt is armed.
-	EndFrameRetryHandle = FCoreDelegates::OnEndFrameRT.AddStatic(&SpoutReceiverInternal::RunEndOfFrameRetries);
 #endif
 
 #if WITH_EDITOR
@@ -178,8 +173,6 @@ void FSpoutModule::ShutdownModule()
 	USpoutBPFunctionLibrary::GlobalShutdown();
 
 #if PLATFORM_WINDOWS
-	FCoreDelegates::OnEndFrameRT.Remove(EndFrameRetryHandle);
-	EndFrameRetryHandle.Reset();
 	// After the shutdown: its flush step needs the flush hook to resolve what asynchronous senders still owe.
 	FSpoutAsyncSendStream::UnregisterHooks();
 	if (SpoutDllHandle != nullptr)

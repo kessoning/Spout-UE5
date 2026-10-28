@@ -873,31 +873,8 @@ bool FSpoutAsyncBetaStopOutstanding::RunTest(const FString&)
 	return true;
 }
 
-// ---------------------------------------------------------------------------------------------
-// The development switches r.Spout.Dev.Recv.*. Every default keeps the standard receive behaviour; each test sets a
-// switch for itself and restores it.
-// Nothing here is a performance statement.
-// ---------------------------------------------------------------------------------------------
-namespace SpoutRecvDevTests
+namespace SpoutAccessWaitTests
 {
-	/** Sets a console variable for the scope and restores it; the render thread's copy is brought up to date both times. */
-	struct FVariableScope
-	{
-		IConsoleVariable* Variable;
-		FString Before;
-		FVariableScope(const TCHAR* Name, const TCHAR* Value)
-			: Variable(IConsoleManager::Get().FindConsoleVariable(Name)), Before(Variable ? Variable->GetString() : FString())
-		{
-			if (Variable) Variable->Set(Value, ECVF_SetByCode);
-			FlushRenderingCommands();
-		}
-		~FVariableScope()
-		{
-			if (Variable) Variable->Set(*Before, ECVF_SetByCode);
-			FlushRenderingCommands();
-		}
-	};
-
 	/** Records every access attempt's bound; an attempt can be held inside the backend on request. */
 	class FHoldingBackend final : public ISpoutFrameSyncBackend
 	{
@@ -920,106 +897,21 @@ namespace SpoutRecvDevTests
 		virtual void SetNewFrame() override {}
 		virtual bool GetNewFrame() override { return false; }
 	};
-
-	/** Another holder of Name's Spout access mutex, on the calling thread, until Release (or destruction). */
-	struct FOtherHolder
-	{
-		TUniquePtr<ISpoutFrameSyncBackend> Backend;
-		bool bHeld = false;
-		explicit FOtherHolder(const FName& Name)
-		{
-			const FString Text = Name.ToString();
-			const auto Utf8 = StringCast<ANSICHAR>(*Text);
-			Backend = MakeSpoutSdkFrameSyncBackend();
-			if (Backend && Backend->CreateAccessMutex(Utf8.Get()))
-			{
-				bHeld = Backend->CheckTextureAccess(nullptr, 100);
-			}
-		}
-		void Release()
-		{
-			if (Backend)
-			{
-				if (bHeld) Backend->AllowTextureAccess(nullptr);
-				bHeld = false;
-				Backend->CloseAccessMutex();
-				RecycleSpoutSdkFrameSyncBackend(MoveTemp(Backend));
-			}
-		}
-		~FOtherHolder() { Release(); }
-	};
-
-	int32 ArmedRetries()
-	{
-		int32 Armed = -1;
-		ENQUEUE_RENDER_COMMAND(SpoutRecvDevArmed)([&Armed](FRHICommandListImmediate&) { Armed = SpoutReceiverInternal::GetArmedEndOfFrameRetriesForTests(); });
-		FlushRenderingCommands();
-		return Armed;
-	}
-
-	/** What the engine does at the end of a render frame, for the synchronous receive's end-of-frame attempts. */
-	void EndRenderFrame()
-	{
-		ENQUEUE_RENDER_COMMAND(SpoutRecvDevEndFrame)([](FRHICommandListImmediate&) { SpoutReceiverInternal::RunEndOfFrameRetries(); });
-		FlushRenderingCommands();
-	}
-
-	/** Reads the consumer's received texture and compares it with Expected. */
-	bool Holds(SpoutAsyncBetaTests::FConsumer& C, const SpoutAsyncBetaTests::FPixels& Expected)
-	{
-		SpoutAsyncBetaTests::FPixels Got;
-		SpoutAsyncBetaTests::ReadPixels(SpoutAsyncBetaTests::ReceivedTexture(C.Texture), Got);
-		return Got == Expected;
-	}
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevDefaults, "SpoutPlugin.RecvDev.DefaultsAreCandidateSevensBehaviour", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutRecvDevDefaults::RunTest(const FString&)
-{
-	// The frame-sync open check is not a switch; it has its own test (SpoutPlugin.AccessWait.TheFrameSyncOpenCheck...).
-	TestEqual(TEXT("the worker waits r.Spout.AccessWaitMs for access"), SpoutLimits::DevRecvWorkerAccessWaitMs(), SpoutLimits::AccessWaitMs());
-	TestEqual(TEXT("the in-flight wait is bounded at 1 ms per frame"), SpoutLimits::DevRecvInFlightWaitUs(), 1000);
-	TestEqual(TEXT("no retention"), SpoutLimits::DevRecvHoldMaxAgeUs(), 0);
-	TestEqual(TEXT("no run limit on the retention"), SpoutLimits::DevRecvHoldMaxRun(), 0);
-	TestEqual(TEXT("one synchronous attempt per frame"), SpoutLimits::DevRecvSyncRetry(), 0);
-	TestFalse(TEXT("the synchronous first attempt waits for access"), SpoutLimits::DevRecvSyncFirstTryOnly());
-	{
-		SpoutRecvDevTests::FVariableScope Wait(TEXT("r.Spout.Dev.Recv.WorkerAccessWaitMs"), TEXT("99"));
-		TestEqual(TEXT("the worker's wait is clamped to 16 ms"), SpoutLimits::DevRecvWorkerAccessWaitMs(), uint32(16));
-	}
-	{
-		SpoutRecvDevTests::FVariableScope Bound(TEXT("r.Spout.Dev.Recv.InFlightWaitUs"), TEXT("99999"));
-		TestEqual(TEXT("the in-flight bound is clamped to 4 ms"), SpoutLimits::DevRecvInFlightWaitUs(), 4000);
-	}
-	// A stream made with the defaults has three slots.
-	namespace AB = SpoutAsyncBetaTests;
-	if (!AB::RequireSharedSlot(*this)) return false;
-	FSpoutAsyncDevice::Get().ReenableForTest();
-	const FName Name = AB::UniqueName(TEXT("DevDefaults"));
-	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
-	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
-	if (AB::StartAsync(*this, Name, C, Source.Get()))
-	{
-		TestEqual(TEXT("three slots without the retention"), AB::Entry(Name)->Async->GetSlotCount(), 3);
-	}
-	AB::CloseBoth(Name, C);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevOpenCheck, "SpoutPlugin.AccessWait.TheFrameSyncOpenCheckDoesNotWaitForAnAccessWait", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutRecvDevOpenCheck::RunTest(const FString&)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAccessWaitOpenCheck, "SpoutPlugin.AccessWait.TheFrameSyncOpenCheckDoesNotWaitForAnAccessWait", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutAccessWaitOpenCheck::RunTest(const FString&)
 {
 	// The open check reads its flag without the frame sync's lock, so a receive call cannot wait there for an Async
 	// Receive worker that holds the lock through its access wait.
-	namespace RD = SpoutRecvDevTests;
-	RD::FHoldingBackend* Fake = new RD::FHoldingBackend();
+	SpoutAccessWaitTests::FHoldingBackend* Fake = new SpoutAccessWaitTests::FHoldingBackend();
 	FEvent* Entered = FPlatformProcess::GetSynchEventFromPool(false);
 	FEvent* Proceed = FPlatformProcess::GetSynchEventFromPool(true);
 	Fake->Entered = Entered;
 	Fake->Proceed = Proceed;
 	{
 		FSpoutFrameSync Sync{TUniquePtr<ISpoutFrameSyncBackend>(Fake)};
-		TestTrue(TEXT("the fake opens"), Sync.Open("SpoutRecvDevOpenCheck"));
+		TestTrue(TEXT("the fake opens"), Sync.Open("SpoutAccessWaitOpenCheck"));
 		// Another thread waits for access, inside the frame sync's lock, until released here.
 		TFuture<void> Holder = Async(EAsyncExecution::Thread, [&Sync]() { FSpoutTextureAccessScope Access(Sync, nullptr); });
 		TestTrue(TEXT("the other thread is inside its access wait"), Entered->Wait(5000));
@@ -1032,255 +924,12 @@ bool FSpoutRecvDevOpenCheck::RunTest(const FString&)
 		TestTrue(FString::Printf(TEXT("the check did not wait for the access wait (%.1f ms)"), CheckMs), CheckMs < 100.0);
 		Releaser.Wait();
 		Holder.Wait();
-		// The access scope's own bound reaches the backend; without one it is r.Spout.AccessWaitMs.
-		Fake->Entered = nullptr;
-		Fake->Proceed = nullptr;
-		Fake->Timeouts.Reset();
-		{ FSpoutTextureAccessScope Access(Sync, nullptr, 7); }
-		{ FSpoutTextureAccessScope Access(Sync, nullptr); }
-		TestTrue(TEXT("an explicit bound and the default reach the backend"), Fake->Timeouts.Num() == 2 && Fake->Timeouts[0] == 7 && Fake->Timeouts[1] == SpoutLimits::AccessWaitMs());
+		TestTrue(TEXT("the access wait used r.Spout.AccessWaitMs"), Fake->Timeouts.Num() == 1 && Fake->Timeouts[0] == SpoutLimits::AccessWaitMs());
 		Sync.Close();
 		TestFalse(TEXT("the check sees the close"), Sync.IsOpen());
 	}
 	FPlatformProcess::ReturnSynchEventToPool(Entered);
 	FPlatformProcess::ReturnSynchEventToPool(Proceed);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevInFlightBound, "SpoutPlugin.RecvDev.TheInFlightWaitBoundFollowsItsSwitch", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutRecvDevInFlightBound::RunTest(const FString&)
-{
-	namespace AB = SpoutAsyncBetaTests;
-	if (!AB::RequireSharedSlot(*this)) return false;
-	FSpoutAsyncDevice::Get().ReenableForTest();
-	SpoutRecvDevTests::FVariableScope Bound(TEXT("r.Spout.Dev.Recv.InFlightWaitUs"), TEXT("0"));
-	ON_SCOPE_EXIT { SpoutAsyncReceiveTestHooks::DelayCompletionMs = 0; };
-	const FName Name = AB::UniqueName(TEXT("DevBound"));
-	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
-	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
-	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
-	const FSpoutAsyncStats Before = AB::WorkerStats(Name);
-	SpoutAsyncReceiveTestHooks::DelayCompletionMs = 300;
-	AB::Upload(Source.Get(), 2);
-	AB::Send(Name, Source.Get());
-	const double Held = AB::WaitUntil([&] { return AB::WorkerHoldsAccess(Name); }, 2.0);
-	TestTrue(TEXT("the worker's copy of the new image is in progress"), Held > 0.0);
-	if (Held > 0.0)
-	{
-		SpoutAsyncReceiveTestHooks::ResetInFlightWaitBudget = true;
-		AB::Call(Name, C);
-		TestEqual(TEXT("with a bound of 0 the call does not wait for the copy in progress"), AB::WorkerStats(Name).InFlightWaits - Before.InFlightWaits, int64(0));
-	}
-	TestTrue(TEXT("the image still arrives exactly, from a later copy"), AB::ReceiveExact(Name, C, Source.Get()));
-	TestEqual(TEXT("no rule violation in the slot bookkeeping"), AB::WorkerStats(Name).RuleViolations, int64(0));
-	AB::CloseBoth(Name, C);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevRetention, "SpoutPlugin.RecvDev.RetentionTakesTheOlderOfTwoUnreadImagesWithinItsBound", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutRecvDevRetention::RunTest(const FString&)
-{
-	namespace AB = SpoutAsyncBetaTests;
-	namespace RD = SpoutRecvDevTests;
-	if (!AB::RequireSharedSlot(*this)) return false;
-	FSpoutAsyncDevice::Get().ReenableForTest();
-	// 50 ms, the switch's largest bound: the test's own steps between two publications and a call take a few ms.
-	RD::FVariableScope Hold(TEXT("r.Spout.Dev.Recv.HoldMaxAgeUs"), TEXT("50000"));
-	const FName Name = AB::UniqueName(TEXT("DevHold"));
-	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
-	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
-	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
-	TestEqual(TEXT("four slots with the retention"), AB::Entry(Name)->Async->GetSlotCount(), 4);
-	// Two images published with no call between them; each waits until the worker published it.
-	auto PublishAndWait = [&](int32 Sequence, AB::FPixels& Out)
-	{
-		const int64 Published = AB::WorkerStats(Name).Published;
-		AB::Upload(Source.Get(), Sequence);
-		AB::ReadPixels(AB::SourceTexture(Source.Get()), Out);
-		AB::Send(Name, Source.Get());
-		return AB::WaitUntil([&] { return AB::WorkerStats(Name).Published >= Published + 1; }, 2.0) > 0.0;
-	};
-	AB::FPixels S2, S3, S4, S5;
-	const FSpoutAsyncStats Before = AB::WorkerStats(Name);
-	const bool bTwo = PublishAndWait(2, S2) && PublishAndWait(3, S3);
-	TestTrue(TEXT("two images were published unread"), bTwo);
-	if (bTwo)
-	{
-		AB::Call(Name, C);
-		TestTrue(TEXT("the call takes the older of the two"), RD::Holds(C, S2));
-		AB::Call(Name, C);
-		TestTrue(TEXT("and the next call the newer one"), RD::Holds(C, S3));
-		const FSpoutAsyncStats Mid = AB::WorkerStats(Name);
-		TestEqual(TEXT("one call took the older image"), Mid.HoldTakes - Before.HoldTakes, int64(1));
-		TestEqual(TEXT("neither image was replaced unread"), Mid.ReplacedUnread - Before.ReplacedUnread, int64(0));
-	}
-	// Beyond the bound the newest is taken and the older one replaced unread: the retention never shows a stale image.
-	const FSpoutAsyncStats BeforeOld = AB::WorkerStats(Name);
-	const bool bTwoMore = PublishAndWait(4, S4) && PublishAndWait(5, S5);
-	TestTrue(TEXT("two more images were published unread"), bTwoMore);
-	if (bTwoMore)
-	{
-		FPlatformProcess::Sleep(0.08f);
-		AB::Call(Name, C);
-		TestTrue(TEXT("past the bound the call takes the newest"), RD::Holds(C, S5));
-		const FSpoutAsyncStats After = AB::WorkerStats(Name);
-		TestEqual(TEXT("the older one was found beyond the bound"), After.HoldTooOld - BeforeOld.HoldTooOld, int64(1));
-		TestEqual(TEXT("and replaced unread"), After.ReplacedUnread - BeforeOld.ReplacedUnread, int64(1));
-	}
-	TestEqual(TEXT("no rule violation in the slot bookkeeping"), AB::WorkerStats(Name).RuleViolations, int64(0));
-	AB::CloseBoth(Name, C);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevRetentionRun, "SpoutPlugin.RecvDev.RetentionRunLimitTakesTheNewestAfterItsLimit", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutRecvDevRetentionRun::RunTest(const FString&)
-{
-	namespace AB = SpoutAsyncBetaTests;
-	namespace RD = SpoutRecvDevTests;
-	if (!AB::RequireSharedSlot(*this)) return false;
-	FSpoutAsyncDevice::Get().ReenableForTest();
-	RD::FVariableScope Hold(TEXT("r.Spout.Dev.Recv.HoldMaxAgeUs"), TEXT("50000"));
-	RD::FVariableScope Run(TEXT("r.Spout.Dev.Recv.HoldMaxRun"), TEXT("1"));
-	const FName Name = AB::UniqueName(TEXT("DevHoldRun"));
-	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
-	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
-	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
-	auto PublishAndWait = [&](int32 Sequence, AB::FPixels& Out)
-	{
-		const int64 Published = AB::WorkerStats(Name).Published;
-		AB::Upload(Source.Get(), Sequence);
-		AB::ReadPixels(AB::SourceTexture(Source.Get()), Out);
-		AB::Send(Name, Source.Get());
-		return AB::WaitUntil([&] { return AB::WorkerStats(Name).Published >= Published + 1; }, 2.0) > 0.0;
-	};
-	AB::FPixels S2, S3, S4, S5, S6;
-	const FSpoutAsyncStats Before = AB::WorkerStats(Name);
-	// Two unread: the call takes the older (a run of one).
-	if (PublishAndWait(2, S2) && PublishAndWait(3, S3))
-	{
-		AB::Call(Name, C);
-		TestTrue(TEXT("the first call takes the older of two"), RD::Holds(C, S2));
-		// One more published: two unread again, but the run is at its limit, so the call takes the newest.
-		if (PublishAndWait(4, S4))
-		{
-			AB::Call(Name, C);
-			TestTrue(TEXT("at the run limit the call takes the newest"), RD::Holds(C, S4));
-			const FSpoutAsyncStats Mid = AB::WorkerStats(Name);
-			TestEqual(TEXT("one older-image take"), Mid.HoldTakes - Before.HoldTakes, int64(1));
-			TestEqual(TEXT("one call limited by the run"), Mid.HoldRunLimited - Before.HoldRunLimited, int64(1));
-			TestEqual(TEXT("the image behind it was replaced unread"), Mid.ReplacedUnread - Before.ReplacedUnread, int64(1));
-		}
-		else
-		{
-			AddError(TEXT("the third image was not published"));
-		}
-	}
-	else
-	{
-		AddError(TEXT("two images were not published unread"));
-	}
-	// A call that finds nothing new ends the run (and lets the rate guard's average fall back); the next pair is held again.
-	AB::Call(Name, C);
-	const FSpoutAsyncStats BeforeAgain = AB::WorkerStats(Name);
-	if (PublishAndWait(5, S5) && PublishAndWait(6, S6))
-	{
-		AB::Call(Name, C);
-		TestTrue(TEXT("after the run ended the older of two is taken again"), RD::Holds(C, S5));
-		TestEqual(TEXT("one more older-image take"), AB::WorkerStats(Name).HoldTakes - BeforeAgain.HoldTakes, int64(1));
-	}
-	TestEqual(TEXT("no rule violation in the slot bookkeeping"), AB::WorkerStats(Name).RuleViolations, int64(0));
-	AB::CloseBoth(Name, C);
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevSyncRetry, "SpoutPlugin.RecvDev.ARefusedSynchronousReceiveIsTriedAgainAtTheEndOfTheFrame", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutRecvDevSyncRetry::RunTest(const FString&)
-{
-	namespace AB = SpoutAsyncBetaTests;
-	namespace RD = SpoutRecvDevTests;
-	if (!AB::RequireSharedSlot(*this)) return false;
-	// The refused attempts log the plugin's access warning (throttled per receiver), by design.
-	AddExpectedMessage(TEXT("shared-texture access was unavailable"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
-	// The synchronous sender, so that a send has published when it returns.
-	RD::FVariableScope SyncSend(TEXT("r.Spout.Dev.AsyncSend"), TEXT("0"));
-	for (const int32 Mode : { 0, 1, 2 })
-	{
-		RD::FVariableScope Retry(TEXT("r.Spout.Dev.Recv.SyncRetry"), *FString::FromInt(Mode));
-		const FName Name = AB::UniqueName(*FString::Printf(TEXT("DevRetry%d"), Mode));
-		AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = false;
-		TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
-		AB::Upload(Source.Get(), 1);
-		AB::Send(Name, Source.Get());
-		if (!TestTrue(FString::Printf(TEXT("mode %d: the first image arrives synchronously"), Mode), AB::ReceiveExact(Name, C, Source.Get())))
-		{
-			AB::CloseBoth(Name, C);
-			continue;
-		}
-		AB::FPixels S1, S2;
-		AB::ReadPixels(AB::SourceTexture(Source.Get()), S1);
-		AB::Upload(Source.Get(), 2);
-		AB::ReadPixels(AB::SourceTexture(Source.Get()), S2);
-		AB::Send(Name, Source.Get());
-		{
-			RD::FOtherHolder Other(Name);
-			TestTrue(FString::Printf(TEXT("mode %d: another holder took the sender's access"), Mode), Other.bHeld);
-			AB::Call(Name, C);
-			TestTrue(FString::Printf(TEXT("mode %d: the refused receive left the earlier image"), Mode), RD::Holds(C, S1));
-			TestEqual(FString::Printf(TEXT("mode %d: end-of-frame attempts armed"), Mode), RD::ArmedRetries(), Mode == 0 ? 0 : 1);
-			if (Mode == 2)
-			{
-				// Still held at the end of the frame: refused again, and so is the next frame's first attempt.
-				RD::EndRenderFrame();
-				AB::Call(Name, C);
-				RD::EndRenderFrame();
-				// Two refused first attempts in a row: the third frame skips its first attempt and arms the end-of-frame one.
-				AB::Call(Name, C);
-				TestEqual(TEXT("mode 2: the first attempt was skipped"), AB::Entry(Name)->SyncFramesSinceProbe, uint32(1));
-				TestEqual(TEXT("mode 2: the end-of-frame attempt is armed"), RD::ArmedRetries(), 1);
-			}
-			Other.Release();
-		}
-		RD::EndRenderFrame();
-		TestEqual(FString::Printf(TEXT("mode %d: nothing stays armed after the frame's end"), Mode), RD::ArmedRetries(), 0);
-		if (Mode == 0)
-		{
-			TestTrue(TEXT("mode 0: without the switch the image waits for the next frame's call"), RD::Holds(C, S1));
-			AB::Call(Name, C);
-		}
-		TestTrue(FString::Printf(TEXT("mode %d: the image arrives exactly"), Mode), RD::Holds(C, S2));
-		AB::CloseBoth(Name, C);
-	}
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevRetryClose, "SpoutPlugin.RecvDev.ClosingAReceiverDropsItsEndOfFrameAttempt", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutRecvDevRetryClose::RunTest(const FString&)
-{
-	namespace AB = SpoutAsyncBetaTests;
-	namespace RD = SpoutRecvDevTests;
-	if (!AB::RequireSharedSlot(*this)) return false;
-	AddExpectedMessage(TEXT("shared-texture access was unavailable"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
-	RD::FVariableScope SyncSend(TEXT("r.Spout.Dev.AsyncSend"), TEXT("0"));
-	RD::FVariableScope Retry(TEXT("r.Spout.Dev.Recv.SyncRetry"), TEXT("1"));
-	const FName Name = AB::UniqueName(TEXT("DevRetryClose"));
-	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = false;
-	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
-	AB::Upload(Source.Get(), 1);
-	AB::Send(Name, Source.Get());
-	TestTrue(TEXT("the first image arrives"), AB::ReceiveExact(Name, C, Source.Get()));
-	AB::Upload(Source.Get(), 2);
-	AB::Send(Name, Source.Get());
-	{
-		RD::FOtherHolder Other(Name);
-		AB::Call(Name, C);
-		TestEqual(TEXT("an end-of-frame attempt is armed"), RD::ArmedRetries(), 1);
-		AB::Close(Name, C);
-	}
-	RD::EndRenderFrame();
-	TestEqual(TEXT("the closed receiver's attempt was dropped"), RD::ArmedRetries(), 0);
-	TestNull(TEXT("and its entry is gone"), AB::Entry(Name).Get());
-	USpoutBPFunctionLibrary::CloseSender(Name);
-	FlushRenderingCommands();
 	return true;
 }
 

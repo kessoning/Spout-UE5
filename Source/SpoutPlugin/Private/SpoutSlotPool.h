@@ -20,9 +20,8 @@
  * A slot is in exactly one state:
  *   Free      nobody uses it
  *   Writing   the worker's copy into it is in progress (at most one slot at a time)
- *   Ready     its copy completed and the reader has not taken it (at most MaxUnread slots at a time:
- *             the newest image, and with MaxUnread 2 the one before it; MaxUnread 2 is the experimental
- *             retention, r.Spout.Dev.Recv.HoldMaxAgeUs)
+ *   Ready     its copy completed and it is the newest image; the reader has not taken it (at most
+ *             one slot at a time)
  *   Draining  the reader queued a copy out of it; it is free again when the read fence reaches
  *             the value recorded on it
  *
@@ -30,9 +29,8 @@
  *   - a slot is written only when Free, or Draining with its read completed. A Ready slot is never
  *     written: with nothing else available the transfer is skipped and stays owed;
  *   - a slot is read only when Ready, and the reader is given the written value to wait on;
- *   - a newer publication replaces the oldest Ready slot when MaxUnread are Ready already, and the
- *     reader taking the newest replaces every older Ready slot; such a slot is free at once, because
- *     no reader ever touched it. It is counted, and it is not a delivery;
+ *   - a newer publication replaces a Ready slot that was not read; that slot is free at once,
+ *     because no reader ever touched it. It is counted, and it is not a delivery;
  *   - a write that was given up (access refused, copy failed, completion timed out) leaves the slot
  *     Free and never Ready. Its copy may still be in flight on the worker's device; the next
  *     write into the slot is ordered after it on the same device, and no reader sees the slot
@@ -115,28 +113,15 @@ namespace SpoutAsync
 		DroppedOldGeneration = 2  // the newest publication belonged to another generation: dropped unread
 	};
 
-	/** Which unread publication the reader takes when there are two (a pool that keeps two unread). */
-	enum class ETake : std::int32_t
-	{
-		Newest = 0,  // the newest; every older unread one is replaced unread
-		Oldest = 1   // the oldest; the newer one stays ready for the reader's next call
-	};
-
 	class FSlotPool
 	{
 	public:
-		/**
-		 * InMaxUnread is how many publications may wait for the reader: 1 (the newest only; a newer publication
-		 * replaces it) or 2 (the newest and the one before it; a third replaces the oldest).
-		 */
-		explicit FSlotPool(int InNumSlots = 3, int InMaxUnread = 1)
+		explicit FSlotPool(int InNumSlots = 3)
 			: NumSlots(InNumSlots < 1 ? 1 : (InNumSlots > MaxSlots ? MaxSlots : InNumSlots))
-			, MaxUnread(InMaxUnread < 1 ? 1 : (InMaxUnread > 2 ? 2 : InMaxUnread))
 		{
 		}
 
 		int GetNumSlots() const { return NumSlots; }
-		int GetMaxUnread() const { return MaxUnread; }
 		const FSlotInfo& GetSlot(int Slot) const { return Slots[Slot]; }
 		const FSlotCounters& GetCounters() const { return Counters; }
 		bool IsRetired() const { return bRetired; }
@@ -237,10 +222,11 @@ namespace SpoutAsync
 				return 0;
 			}
 			LastWrittenValue = WrittenValue;
-			while (ReadyCount() >= MaxUnread)
+			const int Previous = Find(ESlotState::Ready);
+			if (Previous >= 0)
 			{
 				// Never read, so no reader's copy is pending on it: free at once.
-				Slots[FindReady(false)].State = ESlotState::Free;
+				Slots[Previous].State = ESlotState::Free;
 				++Counters.ReplacedUnread;
 			}
 			if (S.bLastWriteAbandoned)
@@ -263,68 +249,35 @@ namespace SpoutAsync
 		/** Whether a publication waits for the reader. */
 		bool HasReady() const { return Find(ESlotState::Ready) >= 0; }
 
-		/** How many publications wait for the reader (at most the pool's MaxUnread). */
-		int ReadyCount() const
-		{
-			int N = 0;
-			for (int I = 0; I < NumSlots; ++I) N += Slots[I].State == ESlotState::Ready ? 1 : 0;
-			return N;
-		}
-
-		/** The newest (or oldest) publication waiting for the reader, or null when none waits. */
-		const FSlotInfo* PeekReady(bool bNewest) const
-		{
-			const int Slot = FindReady(bNewest);
-			return Slot >= 0 ? &Slots[Slot] : nullptr;
-		}
-
 		/** Whether the worker's copy into a slot is in progress: a newer image may be published shortly. */
 		bool HasWriting() const { return Find(ESlotState::Writing) >= 0; }
 
 		/**
-		 * Takes a publication: the newest (every older one waiting is then replaced unread), or with ETake::Oldest the
-		 * oldest, the newer one staying ready. Publications of another generation, or of a retired pool, are dropped
-		 * unread first. On Consumed the caller must queue, in this order and without fail: a wait on the written fence
-		 * for Out.WrittenValue, its copy out of the slot, and a signal of the read fence with ReadValue. ReadValue must
-		 * rise with every call that consumes.
+		 * Takes the newest publication. On Consumed the caller must queue, in this order and without fail: a wait
+		 * on the written fence for Out.WrittenValue, its copy out of the slot, and a signal of the read fence with
+		 * ReadValue. ReadValue must rise with every call that consumes.
 		 */
-		EConsume Consume(std::uint64_t CurrentGeneration, std::uint64_t ReadValue, FConsumed& Out, ETake Take = ETake::Newest)
+		EConsume Consume(std::uint64_t CurrentGeneration, std::uint64_t ReadValue, FConsumed& Out)
 		{
 			Out = FConsumed();
-			bool bDropped = false;
-			for (int I = 0; I < NumSlots; ++I)
-			{
-				if (Slots[I].State == ESlotState::Ready && (bRetired || Slots[I].Generation != CurrentGeneration))
-				{
-					Slots[I].State = ESlotState::Free;
-					++Counters.DroppedOldGeneration;
-					bDropped = true;
-				}
-			}
-			const int Slot = FindReady(Take == ETake::Newest);
+			const int Slot = Find(ESlotState::Ready);
 			if (Slot < 0)
 			{
-				return bDropped ? EConsume::DroppedOldGeneration : EConsume::Nothing;
+				return EConsume::Nothing;
 			}
 			FSlotInfo& S = Slots[Slot];
+			if (bRetired || S.Generation != CurrentGeneration)
+			{
+				S.State = ESlotState::Free;
+				++Counters.DroppedOldGeneration;
+				return EConsume::DroppedOldGeneration;
+			}
 			if (ReadValue <= LastReadValue)
 			{
-				++Counters.RuleViolations; // the slots stay Ready: nothing was queued for them
+				++Counters.RuleViolations; // the slot stays Ready: nothing was queued for it
 				return EConsume::Nothing;
 			}
 			LastReadValue = ReadValue;
-			if (Take == ETake::Newest)
-			{
-				for (int I = 0; I < NumSlots; ++I)
-				{
-					if (I != Slot && Slots[I].State == ESlotState::Ready)
-					{
-						// Older and never read: free at once, as when a newer publication replaces it.
-						Slots[I].State = ESlotState::Free;
-						++Counters.ReplacedUnread;
-					}
-				}
-			}
 			S.State = ESlotState::Draining;
 			S.ReadValue = ReadValue;
 			++Counters.Consumed;
@@ -363,61 +316,15 @@ namespace SpoutAsync
 			return -1;
 		}
 
-		/** The Ready slot with the highest (or lowest) sequence, or -1. */
-		int FindReady(bool bNewest) const
-		{
-			int Pick = -1;
-			for (int I = 0; I < NumSlots; ++I)
-			{
-				if (Slots[I].State == ESlotState::Ready
-					&& (Pick < 0 || (bNewest ? Slots[I].Sequence > Slots[Pick].Sequence : Slots[I].Sequence < Slots[Pick].Sequence)))
-				{
-					Pick = I;
-				}
-			}
-			return Pick;
-		}
-
 		bool IsInState(int Slot, ESlotState State) const { return Slot >= 0 && Slot < NumSlots && Slots[Slot].State == State; }
 
 		FSlotInfo Slots[MaxSlots];
 		FSlotCounters Counters;
 		int NumSlots;
-		int MaxUnread;
 		std::uint64_t LastSequence = 0;
 		std::uint64_t LastWrittenValue = 0;
 		std::uint64_t LastReadValue = 0;
 		bool bRetired = false;
-	};
-
-	/**
-	 * The bounded retention's rate guard (r.Spout.Dev.Recv.HoldMaxAgeUs): publications per
-	 * reader call, in thousandths, averaged over about 64 calls. A reader slower than its source cannot show every
-	 * frame whatever it takes, so keeping an older image would only add latency: the older of two is taken only while
-	 * the source is at most LimitPermille per thousand faster than the reader. Not thread-safe: called under the
-	 * owner's lock, like the pool.
-	 */
-	class FRateGuard
-	{
-	public:
-		/** A publication (the worker). */
-		void OnPublished() { ++SinceCall; }
-
-		/** A reader call: updates the average and says whether the older of two may be taken. */
-		bool OnCall(std::int64_t LimitPermille = 1030)
-		{
-			// Acc is 64 times the average, so that the integer update has no dead band: a plain "Avg += (x - Avg) / 64"
-			// stops moving within 63 permille of the true rate, and occasional bursts then ratchet it upwards.
-			Acc += SinceCall * 1000 - Acc / 64;
-			SinceCall = 0;
-			return GetPermille() <= LimitPermille;
-		}
-
-		std::int64_t GetPermille() const { return Acc / 64; }
-
-	private:
-		std::int64_t SinceCall = 0;
-		std::int64_t Acc = 64 * 1000;
 	};
 
 	/**
