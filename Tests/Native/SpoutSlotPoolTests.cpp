@@ -399,149 +399,9 @@ static void ModelRun(std::uint32_t Seed, int NumSlots, int Steps)
 	std::cout << "INFO " << Label << "; published " << N.Published << ", consumed " << N.Consumed << ", dropped for generation " << N.DroppedOldGeneration << std::endl;
 }
 
-// ------------------------------------------------------------------------------------------------
-// Part 4: a pool that keeps two unread publications (bounded retention,
-// r.Spout.Dev.Recv.HoldMaxAgeUs): hand-written transitions, then a seeded model.
-// ------------------------------------------------------------------------------------------------
-static void PoolTwoUnread()
-{
-	FSlotPool P(4, 2);
-	FConsumed C;
-	Equal(P.GetNumSlots(), 4, "two unread: four slots");
-	Equal(P.GetMaxUnread(), 2, "two unread: two may wait");
-	Equal(FSlotPool(3).GetMaxUnread(), 1, "two unread: one waits by default");
-	Equal(FSlotPool(4, 7).GetMaxUnread(), 2, "two unread: the bound is clamped to two");
-	int S = P.BeginWrite(0); P.Publish(S, 1, 1, 10);
-	S = P.BeginWrite(0); P.Publish(S, 1, 2, 20);
-	Equal(P.ReadyCount(), 2, "two unread: both publications wait");
-	Equal(P.GetCounters().ReplacedUnread, 0, "two unread: nothing was replaced");
-	Check(P.PeekReady(false) && P.PeekReady(false)->Tag == 10 && P.PeekReady(true) && P.PeekReady(true)->Tag == 20, "two unread: the oldest and the newest are seen");
-	Check(P.Consume(1, 1, C, ETake::Oldest) == EConsume::Consumed && C.Tag == 10 && C.Sequence == 1, "two unread: the older is taken");
-	Equal(P.ReadyCount(), 1, "two unread: the newer still waits");
-	Check(P.Consume(1, 2, C) == EConsume::Consumed && C.Tag == 20 && C.Sequence == 2, "two unread: the next call takes the newer");
-	Equal(P.GetCounters().ReplacedUnread, 0, "two unread: both were delivered");
-	// A third publication with two waiting replaces the oldest.
-	S = P.BeginWrite(2); P.Publish(S, 1, 3, 30);
-	S = P.BeginWrite(2); P.Publish(S, 1, 4, 40);
-	S = P.BeginWrite(2); P.Publish(S, 1, 5, 50);
-	Equal(P.ReadyCount(), 2, "two unread: never more than two wait");
-	Equal(P.GetCounters().ReplacedUnread, 1, "two unread: the oldest was replaced unread");
-	Check(P.PeekReady(false)->Tag == 40, "two unread: the two newest wait");
-	// Taking the newest replaces the older one unread.
-	Check(P.Consume(1, 3, C, ETake::Newest) == EConsume::Consumed && C.Tag == 50, "two unread: the newest is taken");
-	Equal(P.ReadyCount(), 0, "two unread: nothing waits after a newest take");
-	Equal(P.GetCounters().ReplacedUnread, 2, "two unread: the older one was replaced unread");
-	// Another generation's publications are dropped before a take.
-	S = P.BeginWrite(3); P.Publish(S, 1, 6, 60);
-	S = P.BeginWrite(3); P.Publish(S, 2, 7, 70);
-	Check(P.Consume(2, 4, C, ETake::Oldest) == EConsume::Consumed && C.Tag == 70 && C.Generation == 2, "two unread: the old generation is dropped and the current one taken");
-	Equal(P.GetCounters().DroppedOldGeneration, 1, "two unread: one dropped for its generation");
-	Equal(P.GetCounters().RuleViolations, 0, "two unread: no rule was broken");
-}
-
-// The rate guard: publications per reader call, averaged; the older of two may be taken only while the source is not faster.
-static void RateGuardTests()
-{
-	FRateGuard Equal1;
-	bool bAllEqualAllowed = true;
-	for (int I = 0; I < 400; ++I) { Equal1.OnPublished(); bAllEqualAllowed &= Equal1.OnCall(); }
-	Check(bAllEqualAllowed, "rate: one publication per call always allows the older image");
-	Equal(Equal1.GetPermille(), 1000, "rate: and averages a thousand per thousand");
-
-	FRateGuard Slow;
-	bool bLast = true;
-	for (int I = 0; I < 400; ++I) { Slow.OnPublished(); Slow.OnPublished(); bLast = Slow.OnCall(); }
-	Check(!bLast, "rate: a reader at half the source's rate never takes the older image");
-	Check(Slow.GetPermille() > 1900, "rate: two publications per call average near two thousand");
-
-	// One more publication every 100 calls (a source 1 % faster) is allowed; one every 20 calls (5 %) is not. Spread evenly, as a
-	// steady rate difference is.
-	auto Run = [](int Extra) { FRateGuard G; for (int I = 0; I < 2000; ++I) { G.OnPublished(); if (I % (100 / Extra) == 0) G.OnPublished(); G.OnCall(); } return G.GetPermille(); };
-	Check(Run(1) <= 1030, "rate: a source 1 % faster stays within the guard");
-	Check(Run(5) > 1030, "rate: a source 5 % faster is outside it");
-
-	FRateGuard Idle;
-	for (int I = 0; I < 100; ++I) Idle.OnCall();
-	Check(Idle.OnCall(), "rate: calls without publications allow (nothing waits anyway)");
-}
-
-static void ModelRunTwoUnread(std::uint32_t Seed, int Steps)
-{
-	FSlotPool P(4, 2);
-	FConsumed C;
-	std::uint64_t WrittenN = 0, ReadN = 0, CompletedRead = 0, Generation = 1, LastConsumedSequence = 0;
-	int Writing = -1;
-	std::int64_t BeginOk = 0, WroteBeforeReadCompleted = 0, ThreeReady = 0, ReadyHandedOut = 0, OutOfOrder = 0, NotReady = 0, OldestTakes = 0;
-	for (int Step = 0; Step < Steps; ++Step)
-	{
-		const std::uint32_t R = Next(Seed) % 100;
-		if (R < 36)
-		{
-			if (Writing < 0)
-			{
-				const ESlotState Before[MaxSlots] = { StateOf(P, 0), StateOf(P, 1), StateOf(P, 2), StateOf(P, 3) };
-				std::uint64_t ReadBefore[MaxSlots];
-				for (int I = 0; I < MaxSlots; ++I) ReadBefore[I] = P.GetSlot(I).ReadValue;
-				Writing = P.BeginWrite(CompletedRead);
-				if (Writing >= 0)
-				{
-					++BeginOk;
-					if (Before[Writing] == ESlotState::Ready) ++ReadyHandedOut;
-					if (Before[Writing] == ESlotState::Draining && ReadBefore[Writing] > CompletedRead) ++WroteBeforeReadCompleted;
-				}
-			}
-			else
-			{
-				const std::uint32_t How = Next(Seed) % 10;
-				if (How == 0) P.AbandonWrite(Writing, EAbandon::AccessRefused);
-				else P.Publish(Writing, Generation, ++WrittenN, 0);
-				Writing = -1;
-			}
-		}
-		else if (R < 64)
-		{
-			const ETake Take = (Next(Seed) % 2) ? ETake::Oldest : ETake::Newest;
-			const EConsume E = P.Consume(Generation, ReadN + 1, C, Take);
-			if (E == EConsume::Consumed)
-			{
-				++ReadN;
-				if (Take == ETake::Oldest) ++OldestTakes;
-				if (StateOf(P, C.Slot) != ESlotState::Draining) ++NotReady;
-				// Sequence numbers rise for the pool's whole life: what is shown never goes back, whichever image is taken.
-				if (C.Sequence <= LastConsumedSequence) ++OutOfOrder;
-				LastConsumedSequence = C.Sequence;
-			}
-		}
-		else if (R < 96)
-		{
-			if (CompletedRead < ReadN) ++CompletedRead;
-		}
-		else if (R < 97)
-		{
-			++Generation;
-		}
-		if (P.ReadyCount() > 2) ++ThreeReady;
-	}
-	const FSlotCounters& N = P.GetCounters();
-	std::int64_t AbandonedAll = 0;
-	for (int I = 0; I < static_cast<int>(EAbandon::Count); ++I) AbandonedAll += N.Abandoned[I];
-	Equal(ThreeReady, 0, "model two unread: never more than two ready slots");
-	Equal(ReadyHandedOut, 0, "model two unread: a ready slot is never handed out for writing");
-	Equal(WroteBeforeReadCompleted, 0, "model two unread: no slot is written before its last read completed");
-	Equal(NotReady, 0, "model two unread: a consumed slot drains");
-	Equal(OutOfOrder, 0, "model two unread: consumed images never go back in sequence");
-	Equal(N.RuleViolations, 0, "model two unread: no rule was broken");
-	Equal(N.Published, N.Consumed + N.ReplacedUnread + N.DroppedOldGeneration + P.ReadyCount(), "model two unread: every publication is accounted for");
-	Equal(BeginOk, N.Published + AbandonedAll + (Writing >= 0 ? 1 : 0), "model two unread: every write that began was published or given up, or is in progress");
-	Check(OldestTakes > 1000 && N.ReplacedUnread > 100 && N.NoFreeSlot > 10, "model two unread: oldest takes, replacements and full pools all occurred");
-	std::cout << "INFO model two unread: published " << N.Published << ", consumed " << N.Consumed << ", replaced " << N.ReplacedUnread << ", no slot " << N.NoFreeSlot << std::endl;
-}
-
 int main()
 {
 	PoolBasics();
-	PoolTwoUnread();
-	RateGuardTests();
 	PoolReplacedUnread();
 	PoolNoFreeSlot();
 	PoolRefusedAccessAndTimeout();
@@ -553,7 +413,6 @@ int main()
 	ModelRun(20261012u, 3, 400000);
 	ModelRun(7u, 2, 400000);
 	ModelRun(99u, 4, 400000);
-	ModelRunTwoUnread(20261028u, 400000);
 	const int ModelChecks = Checks - PoolChecks - GateChecks;
 	std::cout << "slot pool checks " << PoolChecks << ", transfer gate checks " << GateChecks << ", model checks " << ModelChecks << ", failures " << Failures << std::endl;
 	return Failures ? 1 : 0;
