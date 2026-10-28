@@ -123,6 +123,31 @@ measurements said about a thousandth of a second per frame, and the others were 
 I'm telling you that rather than claiming it's free. I also haven't re-measured the heavy scene from
 the start of this month with it. The viewport sender works exactly as before.
 
+And the last big one of the month: receiving in the background is now the normal way to receive. The
+checkbox lost its Beta label. It's called Async Receive, it sits right under Spout on the example
+receiver actor, and it's ticked unless you untick it. Why the switch? In my long test the old way
+kept freezing for a moment, again and again, when the other app held on to its picture while finishing
+its own drawing. The background way got through the same half hour without those freezes. I also
+compared the two side by side many times. With the background way far fewer frames went missing, the
+picture on screen was rarely more than about 20 thousandths of a second old (the old way sometimes
+showed one more than 50 thousandths old), and Unreal itself spent far less time waiting. The one thing
+that didn't improve: from the moment the other app finishes a picture to the moment Unreal uses it,
+the typical time stayed about the same, sometimes a hair slower. These are timings measured inside
+the game, not on the screen itself.
+
+The old way is still there. Untick the box, or turn the option off on the receive node, and you get
+exactly the receive you had before. One thing to know if you used the Beta checkbox in a test
+project: Unreal can't tell a box you never touched from one you unticked on purpose, so a box that
+was simply left unticked now follows the new default and turns on. If you want a receiver to stay on
+the old way, untick it again and save. Projects made before the checkbox existed just pick up the
+new default. And if you had switched the plugin to its slower fallback that copies pictures through
+the main processor, that setting still wins: receivers keep using it until you switch it back.
+
+I also tried a few ideas to squeeze out even more frames, like holding on to one extra picture, or
+letting the old way try a second time at the end of each frame. Some of them helped a little, but
+each one either made the picture arrive later or made things worse with several streams at once, so
+none of them made it in. I'd rather show you a fresh picture than a complete one that's late.
+
 ---
 
 ## SEPTEMBER 2026 UPDATES

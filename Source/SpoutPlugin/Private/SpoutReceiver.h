@@ -79,13 +79,14 @@ public:
 	 * represent -- sRGB against a 10-bit or float frame -- fails the call with a diagnostic rather
 	 * than being quietly ignored.
 	 *
-	 * bAsyncReceive is the Async Receive (Beta) request. The receive mode belongs to the SESSION, like the
+	 * bAsyncReceive is the Async Receive request (true by default; false asks for the synchronous receive). The
+	 * receive mode belongs to the SESSION, like the
 	 * texture: the first accepted call on an entry fixes it for the entry's life (until Close or global cleanup),
 	 * and a later call asking for the other mode is refused before anything is reserved or queued, with a
 	 * throttled warning, leaving the session and its other consumers as they were. Nothing else selects the
 	 * asynchronous path: the retired r.Spout.AsyncReceive variable is ignored.
 	 */
-	static bool Receive(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto, bool bAsyncReceive = false);
+	static bool Receive(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto, bool bAsyncReceive = true);
 	// Removes the receiver's registry entry, releasing its opened shared texture and cached wraps.
 	static void Close(const FName SpoutName);
 };

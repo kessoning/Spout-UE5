@@ -201,7 +201,7 @@ bool FSpoutRestartPixels::RunTest(const FString&)
 		QueueRestartPattern(Source.Get(), Sequence);
 		TestTrue(*FString::Printf(TEXT("cycle %d send accepted"), Cycle), USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()));
 		FlushRenderingCommands();
-		TestTrue(*FString::Printf(TEXT("cycle %d receive accepted"), Cycle), USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear));
+		TestTrue(*FString::Printf(TEXT("cycle %d receive accepted"), Cycle), USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false));
 		FlushRenderingCommands();
 		TestEqual(*FString::Printf(TEXT("cycle %d open streams took their backends from the pool"), Cycle), NumPooledSpoutSdkFrameSyncBackends(), 0);
 
@@ -214,7 +214,7 @@ bool FSpoutRestartPixels::RunTest(const FString&)
 		QueueRestartPattern(Source.Get(), Sequence + 1);
 		USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get());
 		FlushRenderingCommands();
-		USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+		USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 		Actual.Reset();
 		QueueRestartRead(Texture, W, H, Actual);
 		FlushRenderingCommands();

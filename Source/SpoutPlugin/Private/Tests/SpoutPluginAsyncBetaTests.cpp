@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: MIT
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 //
-// Async Receive (Beta): the per-session receive mode, tested with real transfers through the plugin's own sender
+// Async Receive: the per-session receive mode, tested with real transfers through the plugin's own sender
 // and receiver in this process, on the shared-slot path (r.Spout.SharedSlotInterop 1, the default). What is observed
 // is what actually ran, not the requested values: the effective mode in GetSpoutStreamStatus, the stream's worker
 // object (its generation) and the process's count of live worker objects, and every texel of the received image.
 //
-//   default     both receive nodes and the C++ call stay synchronous unless asked, also with the retired
-//               r.Spout.AsyncReceive set to 1
+//   default     both receive nodes and the C++ call use Async Receive unless synchronous is asked for; the retired
+//               r.Spout.AsyncReceive set to 1 changes nothing
 //   names       two names at once, one asynchronous and one synchronous; closing one leaves the other, its entry
 //               and its slots exactly as they were; the closed name reopens in the other mode
 //   same name   matching consumers share one session; a conflicting consumer is refused in either order and leaves
@@ -178,6 +178,8 @@ namespace SpoutAsyncBetaTests
 		enum class ENode { Receiver, WithMaterial, Cpp };
 		ENode Node = ENode::Receiver;
 		bool bAsync = false;
+		/** Leave the Async Receive argument out of the call, so that the function's own default decides. bAsync is then unused. */
+		bool bDefaultMode = false;
 		UTexture2D* Texture = nullptr;
 		UMaterialInstanceDynamic* Material = nullptr;
 	};
@@ -189,13 +191,19 @@ namespace SpoutAsyncBetaTests
 		switch (C.Node)
 		{
 		case FConsumer::ENode::Receiver:
-			bAccepted = USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, C.Material, C.Texture, nullptr, ESpoutColorSpace::Linear, C.bAsync);
+			bAccepted = C.bDefaultMode
+				? USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, C.Material, C.Texture, nullptr, ESpoutColorSpace::Linear)
+				: USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, C.Material, C.Texture, nullptr, ESpoutColorSpace::Linear, C.bAsync);
 			break;
 		case FConsumer::ENode::WithMaterial:
-			bAccepted = USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, C.Material, NAME_None, C.Texture, nullptr, ESpoutColorSpace::Linear, C.bAsync);
+			bAccepted = C.bDefaultMode
+				? USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, C.Material, NAME_None, C.Texture, nullptr, ESpoutColorSpace::Linear)
+				: USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, C.Material, NAME_None, C.Texture, nullptr, ESpoutColorSpace::Linear, C.bAsync);
 			break;
 		case FConsumer::ENode::Cpp:
-			bAccepted = FSpoutReceiver::Receive(Name, nullptr, NAME_None, C.Material, C.Texture, nullptr, ESpoutColorSpace::Linear, C.bAsync);
+			bAccepted = C.bDefaultMode
+				? FSpoutReceiver::Receive(Name, nullptr, NAME_None, C.Material, C.Texture, nullptr, ESpoutColorSpace::Linear)
+				: FSpoutReceiver::Receive(Name, nullptr, NAME_None, C.Material, C.Texture, nullptr, ESpoutColorSpace::Linear, C.bAsync);
 			break;
 		}
 		FlushRenderingCommands();
@@ -250,7 +258,7 @@ namespace SpoutAsyncBetaTests
 	bool RequireSharedSlot(FAutomationTestBase& Test)
 	{
 		FSpoutD3DContext::Get().InitializeIfNeeded();
-		return Test.TestTrue(TEXT("this process latched the shared-slot path (r.Spout.SharedSlotInterop 1), on which Async Receive (Beta) is tested"),
+		return Test.TestTrue(TEXT("this process latched the shared-slot path (r.Spout.SharedSlotInterop 1), on which Async Receive is tested"),
 			SpoutInterop::IsSharedSlot());
 	}
 
@@ -278,13 +286,23 @@ namespace SpoutAsyncBetaTests
 	}
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaDefault, "SpoutPlugin.AsyncBeta.DefaultIsSynchronousAndTheRetiredSettingIsIgnored", SPOUT_ASYNC_BETA_FLAGS)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaDefault, "SpoutPlugin.AsyncBeta.DefaultIsAsyncReceiveAndSynchronousIsSelectable", SPOUT_ASYNC_BETA_FLAGS)
 bool FSpoutAsyncBetaDefault::RunTest(const FString&)
 {
 	namespace AB = SpoutAsyncBetaTests;
 	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
 
-	// The retired process-wide setting is set to 1 for the whole test: it must not make anything asynchronous.
+#if WITH_METADATA
+	// A new Blueprint node takes its input's default from the function's metadata: Async Receive on.
+	for (const TCHAR* Function : { TEXT("SpoutReceiver"), TEXT("SpoutReceiverWithMaterial") })
+	{
+		const UFunction* F = USpoutBPFunctionLibrary::StaticClass()->FindFunctionByName(Function);
+		TestTrue(FString::Printf(TEXT("%s: a new node's Async Receive input defaults to true"), Function), F && F->GetMetaData(TEXT("CPP_Default_bAsyncReceive")) == TEXT("true"));
+	}
+#endif
+
+	// The retired process-wide setting is set to 1 for the whole test: it changes nothing, in either mode.
 	IConsoleVariable* Retired = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive"));
 	if (!TestNotNull(TEXT("the retired setting is still registered"), Retired)) return false;
 	const FString RetiredBefore = Retired->GetString();
@@ -298,10 +316,12 @@ bool FSpoutAsyncBetaDefault::RunTest(const FString&)
 		{ TEXT("the C++ receive"), AB::FConsumer::ENode::Cpp } };
 	for (const FCase& Case : Cases)
 	{
+		// The call leaves the Async Receive argument out: the function's default decides.
 		const FName Name = AB::UniqueName(TEXT("Default"));
 		TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
 		AB::FConsumer C;
-		C.Node = Case.Node; // bAsync left at its default
+		C.Node = Case.Node;
+		C.bDefaultMode = true;
 		for (int32 Sequence = 1; Sequence <= 3; ++Sequence)
 		{
 			AB::Upload(Source.Get(), Sequence);
@@ -309,21 +329,140 @@ bool FSpoutAsyncBetaDefault::RunTest(const FString&)
 			TestTrue(FString::Printf(TEXT("%s: sequence %d arrives exactly"), Case.What, Sequence), AB::ReceiveExact(Name, C, Source.Get()));
 		}
 		const FSpoutStreamStatus S = AB::Status(Name);
-		TestTrue(FString::Printf(TEXT("%s: requested synchronous by default"), Case.What), S.RequestedReceiveMode == ESpoutReceiveMode::Synchronous);
-		TestTrue(FString::Printf(TEXT("%s: and effective synchronous, with the retired setting at 1"), Case.What), S.EffectiveReceiveMode == ESpoutReceiveMode::Synchronous);
+		TestTrue(FString::Printf(TEXT("%s: requested Async Receive by default"), Case.What), S.RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
+		TestTrue(FString::Printf(TEXT("%s: and effective Async Receive"), Case.What), S.EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
 		TestTrue(FString::Printf(TEXT("%s: no note"), Case.What), S.ReceiveModeNote.IsEmpty());
-		TestEqual(FString::Printf(TEXT("%s: no worker object for this name"), Case.What), AB::WorkerGeneration(Name), uint64(0));
-		TestEqual(FString::Printf(TEXT("%s: and none in the process"), Case.What), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
-		const TSharedPtr<FSpoutSharedSender> E = AB::Entry(Name);
-		TestTrue(FString::Printf(TEXT("%s: delivered through the synchronous shared slots"), Case.What), E && E->SlotReceive.IsValid() && E->SlotTransfers.load() >= 3);
+		TestTrue(FString::Printf(TEXT("%s: a worker object for this name"), Case.What), AB::WorkerGeneration(Name) != 0);
+		TestEqual(FString::Printf(TEXT("%s: one worker in the process"), Case.What), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore + 1);
 		AB::Close(Name, C);
 		USpoutBPFunctionLibrary::CloseSender(Name);
 		FlushRenderingCommands();
+		TestEqual(FString::Printf(TEXT("%s: closing the receiver ends its worker"), Case.What), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+	}
+
+	for (const FCase& Case : Cases)
+	{
+		// The synchronous receive, asked for explicitly.
+		const FName Name = AB::UniqueName(TEXT("Synchronous"));
+		TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+		AB::FConsumer C;
+		C.Node = Case.Node;
+		C.bAsync = false;
+		for (int32 Sequence = 1; Sequence <= 3; ++Sequence)
+		{
+			AB::Upload(Source.Get(), Sequence);
+			TestTrue(FString::Printf(TEXT("%s, synchronous: send accepted"), Case.What), AB::Send(Name, Source.Get()));
+			TestTrue(FString::Printf(TEXT("%s, synchronous: sequence %d arrives exactly"), Case.What, Sequence), AB::ReceiveExact(Name, C, Source.Get()));
+		}
+		const FSpoutStreamStatus S = AB::Status(Name);
+		TestTrue(FString::Printf(TEXT("%s: requested synchronous when asked"), Case.What), S.RequestedReceiveMode == ESpoutReceiveMode::Synchronous);
+		TestTrue(FString::Printf(TEXT("%s: and effective synchronous, with the retired setting at 1"), Case.What), S.EffectiveReceiveMode == ESpoutReceiveMode::Synchronous);
+		TestTrue(FString::Printf(TEXT("%s, synchronous: no note"), Case.What), S.ReceiveModeNote.IsEmpty());
+		TestEqual(FString::Printf(TEXT("%s, synchronous: no worker object for this name"), Case.What), AB::WorkerGeneration(Name), uint64(0));
+		TestEqual(FString::Printf(TEXT("%s, synchronous: and none in the process"), Case.What), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+		const TSharedPtr<FSpoutSharedSender> E = AB::Entry(Name);
+		TestTrue(FString::Printf(TEXT("%s: delivered through the synchronous shared slots"), Case.What), E && E->SlotReceive.IsValid() && E->SlotTransfers.load() >= 3);
+		AB::Close(Name, C);
+
+		// Switching at run time: after Close Receiver, a receive that leaves the argument out opens Async Receive.
+		AB::FConsumer D;
+		D.Node = Case.Node;
+		D.bDefaultMode = true;
+		AB::Upload(Source.Get(), 11);
+		AB::Send(Name, Source.Get());
+		TestTrue(FString::Printf(TEXT("%s: reopened with the default, the image arrives exactly"), Case.What), AB::ReceiveExact(Name, D, Source.Get()));
+		TestTrue(FString::Printf(TEXT("%s: and the reopened session uses Async Receive"), Case.What), AB::Status(Name).EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
+		AB::Close(Name, D);
+		USpoutBPFunctionLibrary::CloseSender(Name);
+		FlushRenderingCommands();
+		TestEqual(FString::Printf(TEXT("%s: no worker left"), Case.What), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
 	}
 
 	Retired->Set(*RetiredBefore, ECVF_SetByCode);
 	Retired->ClearFlags(ECVF_SetByMask);
 	Retired->SetFlags(RetiredPriority);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaCpuPath, "SpoutPlugin.AsyncBeta.TheCpuReceivePathSettingStillAppliesWhileItIsZero", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutAsyncBetaCpuPath::RunTest(const FString&)
+{
+	// r.Spout.GPUReceiver 0 selects the CPU readback path for every receiver, and a default receive honours it too:
+	// no worker while it is 0, the CPU path delivers, the note says why; at 1 the session starts its worker.
+	namespace AB = SpoutAsyncBetaTests;
+	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	IConsoleVariable* Path = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.GPUReceiver"));
+	if (!TestNotNull(TEXT("the receive path setting is registered"), Path)) return false;
+	const int32 PathBefore = Path->GetInt();
+	const EConsoleVariableFlags PathPriority = static_cast<EConsoleVariableFlags>(Path->GetFlags() & ECVF_SetByMask);
+	const int32 WorkersBefore = FSpoutAsyncStream::GetLiveStreams();
+	const FName Name = AB::UniqueName(TEXT("CpuPath"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+	AB::FConsumer C;
+	C.Node = AB::FConsumer::ENode::Receiver;
+	C.bDefaultMode = true;
+
+	Path->Set(0, ECVF_SetByCode);
+	for (int32 Sequence = 1; Sequence <= 3; ++Sequence)
+	{
+		AB::Upload(Source.Get(), Sequence);
+		AB::Send(Name, Source.Get());
+		TestTrue(FString::Printf(TEXT("CPU path: sequence %d arrives exactly"), Sequence), AB::ReceiveExact(Name, C, Source.Get()));
+	}
+	FSpoutStreamStatus S = AB::Status(Name);
+	TestTrue(TEXT("the session asked for Async Receive (the default)"), S.RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("but runs synchronously while the setting is 0"), S.EffectiveReceiveMode == ESpoutReceiveMode::Synchronous);
+	TestTrue(FString::Printf(TEXT("and says why ('%s')"), *S.ReceiveModeNote), S.ReceiveModeNote.Contains(TEXT("r.Spout.GPUReceiver is 0")));
+	TestEqual(TEXT("no worker for this name"), AB::WorkerGeneration(Name), uint64(0));
+	TestEqual(TEXT("and none in the process"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+
+	Path->Set(1, ECVF_SetByCode);
+	AB::Upload(Source.Get(), 9);
+	AB::Send(Name, Source.Get());
+	TestTrue(TEXT("setting back at 1: the image arrives exactly"), AB::ReceiveExact(Name, C, Source.Get()));
+	S = AB::Status(Name);
+	TestTrue(TEXT("and the session now uses Async Receive"), S.EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("with no note left"), S.ReceiveModeNote.IsEmpty());
+	TestTrue(TEXT("through its worker"), AB::WorkerGeneration(Name) != 0);
+
+	AB::Close(Name, C);
+	USpoutBPFunctionLibrary::CloseSender(Name);
+	FlushRenderingCommands();
+	TestEqual(TEXT("no worker left"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+
+	// A sender Async Receive refuses (RGBA16F): after the setting went to 0 and back, the note gives the refusal's own
+	// reason again, not the setting.
+	AddExpectedMessage(TEXT("was requested but is not used"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
+	const FName Half = AB::UniqueName(TEXT("CpuPathHalf"));
+	TStrongObjectPtr<UTextureRenderTarget2D> HalfSource(AB::MakeSource(32, 16, PF_FloatRGBA));
+	AB::FConsumer H;
+	H.Node = AB::FConsumer::ENode::Receiver;
+	H.bDefaultMode = true;
+	AB::Upload(HalfSource.Get(), 1);
+	AB::Send(Half, HalfSource.Get());
+	TestTrue(TEXT("RGBA16F at 1: arrives exactly, synchronously"), AB::ReceiveExact(Half, H, HalfSource.Get()));
+	TestTrue(TEXT("RGBA16F at 1: the note gives the format"), AB::Status(Half).ReceiveModeNote.Contains(TEXT("BGRA8 and RGBA8")));
+	Path->Set(0, ECVF_SetByCode);
+	AB::Upload(HalfSource.Get(), 2);
+	AB::Send(Half, HalfSource.Get());
+	TestTrue(TEXT("RGBA16F at 0: arrives exactly"), AB::ReceiveExact(Half, H, HalfSource.Get()));
+	TestTrue(TEXT("RGBA16F at 0: the note names the setting"), AB::Status(Half).ReceiveModeNote.Contains(TEXT("r.Spout.GPUReceiver is 0")));
+	Path->Set(1, ECVF_SetByCode);
+	AB::Upload(HalfSource.Get(), 3);
+	AB::Send(Half, HalfSource.Get());
+	TestTrue(TEXT("RGBA16F back at 1: arrives exactly"), AB::ReceiveExact(Half, H, HalfSource.Get()));
+	const FSpoutStreamStatus HS = AB::Status(Half);
+	TestTrue(FString::Printf(TEXT("RGBA16F back at 1: the note gives the format again ('%s')"), *HS.ReceiveModeNote), HS.ReceiveModeNote.Contains(TEXT("BGRA8 and RGBA8")));
+	TestTrue(TEXT("RGBA16F back at 1: still synchronous"), HS.EffectiveReceiveMode == ESpoutReceiveMode::Synchronous);
+	TestEqual(TEXT("RGBA16F: no worker"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
+	AB::Close(Half, H);
+	USpoutBPFunctionLibrary::CloseSender(Half);
+	FlushRenderingCommands();
+
+	Path->Set(PathBefore, ECVF_SetByCode);
+	Path->ClearFlags(ECVF_SetByMask);
+	Path->SetFlags(PathPriority);
 	return true;
 }
 
@@ -349,7 +488,7 @@ bool FSpoutAsyncBetaNames::RunTest(const FString&)
 		TestTrue(FString::Printf(TEXT("B (synchronous): sequence %d arrives exactly"), Sequence), AB::ReceiveExact(B, ConsumerB, SourceB.Get()));
 	}
 	const FSpoutStreamStatus StatusA = AB::Status(A), StatusB = AB::Status(B);
-	TestTrue(TEXT("A requested Async Receive (Beta)"), StatusA.RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("A requested Async Receive"), StatusA.RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
 	TestTrue(TEXT("and A actually uses it"), StatusA.EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
 	TestTrue(TEXT("A has no fallback note"), StatusA.ReceiveModeNote.IsEmpty());
 	TestTrue(TEXT("B requested the synchronous receive"), StatusB.RequestedReceiveMode == ESpoutReceiveMode::Synchronous);
@@ -504,7 +643,7 @@ bool FSpoutAsyncBetaFallback::RunTest(const FString&)
 		TestTrue(FString::Printf(TEXT("RGBA16F: sequence %d still arrives exactly, synchronously"), Sequence), AB::ReceiveExact(Name, C, Half.Get()));
 	}
 	FSpoutStreamStatus S = AB::Status(Name);
-	TestTrue(TEXT("RGBA16F: requested Async Receive (Beta)"), S.RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("RGBA16F: requested Async Receive"), S.RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
 	TestTrue(TEXT("RGBA16F: but effective synchronous"), S.EffectiveReceiveMode == ESpoutReceiveMode::Synchronous);
 	TestTrue(TEXT("RGBA16F: and the status says why"), S.ReceiveModeNote.Contains(TEXT("BGRA8 and RGBA8")));
 	TestEqual(TEXT("RGBA16F: no worker"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
@@ -518,7 +657,7 @@ bool FSpoutAsyncBetaFallback::RunTest(const FString&)
 	C.Texture = nullptr; // the format changed: the session's texture is replaced, the old one is no longer this caller's
 	TestTrue(TEXT("BGRA8: arrives exactly, asynchronously"), AB::ReceiveExact(Name, C, Bgra.Get()));
 	S = AB::Status(Name);
-	TestTrue(TEXT("BGRA8: effective Async Receive (Beta)"), S.EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("BGRA8: effective Async Receive"), S.EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
 	TestTrue(TEXT("BGRA8: the note is cleared"), S.ReceiveModeNote.IsEmpty());
 	TestEqual(TEXT("BGRA8: one worker"), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore + 1);
 	AB::Close(Name, C);
@@ -549,7 +688,7 @@ bool FSpoutAsyncBetaIdentity::RunTest(const FString&)
 	UTexture2D* const Held = C.Texture;
 	TestFalse(TEXT("sender gone: the receive is refused"), AB::Call(Name, C));
 	TestTrue(TEXT("sender gone: the caller keeps its texture"), C.Texture == Held);
-	TestTrue(TEXT("sender gone: the session still requests Async Receive (Beta)"), AB::Status(Name).RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("sender gone: the session still requests Async Receive"), AB::Status(Name).RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta);
 
 	// It restarts at another size: a new identity, a new worker generation, the same mode.
 	TStrongObjectPtr<UTextureRenderTarget2D> Large(AB::MakeSource(96, 48, PF_B8G8R8A8));
@@ -643,7 +782,7 @@ namespace SpoutAsyncBetaTests
 		const bool bArrived = ReceiveExact(Name, C, Source);
 		Test.TestTrue(TEXT("the first image arrives"), bArrived);
 		const bool bAsync = Status(Name).EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta && Entry(Name) && Entry(Name)->Async;
-		Test.TestTrue(TEXT("through Async Receive (Beta)"), bAsync);
+		Test.TestTrue(TEXT("through Async Receive"), bAsync);
 		return bArrived && bAsync;
 	}
 
@@ -688,7 +827,7 @@ bool FSpoutAsyncBetaLateCopy::RunTest(const FString&)
 	const FSpoutAsyncStats After = AB::WorkerStats(Name);
 	TestTrue(TEXT("the late copy was discarded, never published"), After.CompletionTimeouts >= Before.CompletionTimeouts + 1);
 	TestTrue(TEXT("the image still arrives exactly, from a later copy"), AB::ReceiveExact(Name, C, Source.Get()));
-	TestTrue(TEXT("still through Async Receive (Beta): one late copy does not end the stream"), AB::Status(Name).EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
+	TestTrue(TEXT("still through Async Receive: one late copy does not end the stream"), AB::Status(Name).EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta);
 	TestTrue(TEXT("the sender's access is free again"), AB::WaitUntil([&] { return AB::AccessFreeForAnotherHolder(Name); }, 1.0) > 0.0);
 	TestEqual(TEXT("no rule violation in the slot bookkeeping"), AB::WorkerStats(Name).RuleViolations, int64(0));
 	AB::CloseBoth(Name, C);

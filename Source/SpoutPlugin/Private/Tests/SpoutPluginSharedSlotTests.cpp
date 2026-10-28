@@ -171,7 +171,7 @@ namespace SpoutSharedSlotTests
 	/** One receive call, completed on the render thread. */
 	bool Receive(const FName& Name, UTexture2D*& Texture, UMaterialInstanceDynamic*& Material, ESpoutColorSpace Mode = ESpoutColorSpace::Linear)
 	{
-		const bool bAccepted = USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, Mode);
+		const bool bAccepted = USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, Mode, /*bAsyncReceive: the synchronous receive under test*/ false);
 		FlushRenderingCommands();
 		return bAccepted && Texture;
 	}
@@ -285,8 +285,8 @@ bool FSpoutSlotFormats::RunTest(const FString&)
 	IConsoleVariable* Path = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.GPUReceiver"));
 	const int32 PreviousPath = Path->GetInt();
 	const EConsoleVariableFlags PreviousPriority = static_cast<EConsoleVariableFlags>(Path->GetFlags() & ECVF_SetByMask);
-	// These receives do not ask for Async Receive (Beta), so they use the synchronous paths under test whatever the
-	// retired r.Spout.AsyncReceive holds.
+	// These receives ask for the synchronous receive (Receive above), so they use the synchronous paths under test
+	// whatever the retired r.Spout.AsyncReceive holds.
 	const int64 WrapsBefore = SpoutInterop::GetWrapCallCount();
 
 	struct FCase { EPixelFormat Format; bool bLinear; ESpoutColorSpace Mode; };

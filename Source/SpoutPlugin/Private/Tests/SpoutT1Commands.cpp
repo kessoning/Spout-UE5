@@ -175,7 +175,7 @@ namespace
 					}
 					break;
 				case SpoutT1::EAction::Receive:
-					USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+					USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: these checks cover the synchronous receive*/ false);
 					FlushRenderingCommands();
 					break;
 				case SpoutT1::EAction::Verify:
@@ -335,7 +335,7 @@ namespace
 			FlushRenderingCommands();
 			UTexture2D* Texture = nullptr;
 			UMaterialInstanceDynamic* Material = nullptr;
-			USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+			USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: these checks cover the synchronous receive*/ false);
 			FlushRenderingCommands();
 			bPixels = Texture && ReadLinear(RHIOf(Texture)) == ReadLinear(Resource->GetRenderTargetTexture());
 			USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material);

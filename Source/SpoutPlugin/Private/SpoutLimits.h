@@ -65,7 +65,7 @@ namespace SpoutLimits
 	bool FrameCountRecheck();
 
 	// There is no process-wide switch for the asynchronous receive. r.Spout.AsyncReceive is retired: still
-	// registered, ignored, and it logs a warning when set. Async Receive (Beta) is requested per receiver session
+	// registered, ignored, and it logs a warning when set. Async Receive is chosen per receiver session
 	// (FSpoutReceiver::Receive, bAsyncReceive) and decided once per session; see FSpoutSharedSender. A stream on the
 	// asynchronous path makes no publication wait: r.Spout.FrameWaitMs applies to the synchronous path only.
 
@@ -76,7 +76,7 @@ namespace SpoutLimits
 	void WarnIfRetiredSettingsSet();
 
 	/**
-	 * r.Spout.AsyncReceive.GpuPriority, clamped to -7..7. A diagnostic of Async Receive (Beta), 0 by default:
+	 * r.Spout.AsyncReceive.GpuPriority, clamped to -7..7. A diagnostic of Async Receive, 0 by default:
 	 * the GPU scheduling priority asked for the worker's device relative to the process's other
 	 * devices (IDXGIDevice::SetGPUThreadPriority). With 0 the call is not made. Read once, when the
 	 * worker's device is created.

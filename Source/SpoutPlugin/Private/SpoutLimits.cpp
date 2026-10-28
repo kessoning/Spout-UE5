@@ -37,26 +37,26 @@ namespace
 		TEXT("Experimental. 1: the sender's frame notification is read again while the texture access lock is held, and a receive call that found nothing new still copies ")
 		TEXT("when the sender published since the previous call. 0 (default): off. Always on while r.Spout.FrameWaitMs is above 0."),
 		ECVF_RenderThreadSafe);
-	// Retired and ignored. The receive mode is a per-receiver setting (Async Receive (Beta)) and nothing reads this
-	// variable to choose a path. It stays registered so that old command lines and configuration files do not fail, and
-	// it says so when set.
+	// Retired and ignored. The receive mode is a per-receiver setting (Async Receive, on by default) and nothing reads
+	// this variable to choose a path. It stays registered so that old command lines and configuration files do not fail,
+	// and it says so when set.
 	void WarnRetiredAsyncReceive(IConsoleVariable* Variable)
 	{
 		if (Variable && Variable->GetInt() != 0)
 		{
 			UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("r.Spout.AsyncReceive is retired and ignored: it no longer selects the receive path of any stream. ")
-				TEXT("Async Receive (Beta) is chosen per receiver (the Async Receive (Beta) input of Spout Receiver and Spout Receiver With Material, ")
+				TEXT("Async Receive is chosen per receiver (the Async Receive input of Spout Receiver and Spout Receiver With Material, on by default, ")
 				TEXT("or the example receiver actor's Details), and a receiver that does not ask for it stays synchronous."));
 		}
 	}
 	TAutoConsoleVariable<int32> GSpoutAsyncReceive(TEXT("r.Spout.AsyncReceive"), 0,
-		TEXT("Retired and ignored. It no longer selects the receive path of any stream: Async Receive (Beta) is a per-receiver setting ")
-		TEXT("(the Async Receive (Beta) input of Spout Receiver and Spout Receiver With Material). Setting it to anything but 0 only logs this warning."),
+		TEXT("Retired and ignored. It no longer selects the receive path of any stream: Async Receive is a per-receiver setting ")
+		TEXT("(the Async Receive input of Spout Receiver and Spout Receiver With Material, on by default). Setting it to anything but 0 only logs this warning."),
 		FConsoleVariableDelegate::CreateStatic(&WarnRetiredAsyncReceive),
 		ECVF_Default);
 	TAutoConsoleVariable<int32> GSpoutAsyncReceiveGpuPriority(TEXT("r.Spout.AsyncReceive.GpuPriority"), 0,
-		TEXT("Internal diagnostic of Async Receive (Beta), for receivers that opted in. 0 (default): the GPU scheduling priority of the worker's device is left alone. ")
+		TEXT("Internal diagnostic of Async Receive, for receivers that use it. 0 (default): the GPU scheduling priority of the worker's device is left alone. ")
 		TEXT("Otherwise, clamped to -7..7, the priority asked for that device relative to the process's other devices. Read once, when the worker's device is created."),
 		ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> GSpoutSharedSlotInterop(TEXT("r.Spout.SharedSlotInterop"), 1,

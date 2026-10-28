@@ -136,15 +136,27 @@ What they do and do not do:
 - A receiver still samples a single shared texture that the sender overwrites. These settings do
   not make receiving lossless between independent clocks, and they do not remove latency.
 
-### Async Receive (Beta) (off by default)
+### Async Receive (the default)
 
-Async Receive (Beta) is chosen per receiver: the `Async Receive (Beta)` input of Spout Receiver and
-Spout Receiver With Material, or the checkbox of the same name on the shipped receiver example
-(Spout > Experimental). It moves receive work off the render thread: a worker thread with its own
-device takes the sender's texture and waits for the copy, and the render thread only queues a copy
-of the newest completed image (waiting at most 1 ms per frame for a copy already in progress, below).
-It is off by default and it is not part of the qualified behaviour of this release.
+Async Receive is the default receive mode. It is chosen per receiver: the `Async Receive` input of
+Spout Receiver and Spout Receiver With Material (on by default), or the checkbox of the same name on
+the shipped receiver example (Spout section of its Details, on by default). Turn it off for the
+synchronous receive. It moves receive work off the render thread: a worker thread with its own device
+takes the sender's texture and waits for the copy, and the render thread only queues a copy of the
+newest completed image (waiting at most 1 ms per frame for a copy already in progress, below). Until
+the end of October 2026 it was an opt-in beta, off by default.
 
+- **Existing Blueprints.** When a Blueprint loads, Unreal rebuilds its nodes against the plugin. A
+  receive node's Async Receive input that was left at its earlier default (off) takes the new default
+  (on). A checked input and a connected input are kept. Nodes saved before the input existed get it
+  at its default (on). Unreal saves no difference between a box left unchecked and one unchecked on
+  purpose, so a box unchecked in a project saved with a pre-release build of this setting turns on.
+  To keep a receiver synchronous, uncheck its box again (it is then saved as a choice) or connect a
+  value to the input. Placed receiver examples behave the same way: one that never changed the
+  setting follows the new default. The plugin does not modify assets.
+- **The CPU readback setting still applies.** While `r.Spout.GPUReceiver` is 0, a session that asked
+  for Async Receive uses the CPU readback path instead (no worker), and its status says so; at 1 it
+  starts its worker again, or reports again why it cannot.
 - **Per sender name, fixed while open.** The mode belongs to the receiver session of a name, which
   every graph receiving that name shares. The first accepted receive decides it; a later call for
   the same name asking for the other mode is refused (false, outputs untouched, a throttled
@@ -156,17 +168,42 @@ It is off by default and it is not part of the qualified behaviour of this relea
   format is not BGRA8 or RGBA8, when the worker's device or resources cannot be created, or after
   the worker failed. A later sender size, format or handle is tried again.
 - **Console variables.** `r.Spout.AsyncReceive` is retired: still registered, ignored, and it logs a
-  warning when set to anything but 0. It cannot turn the asynchronous path on for any receiver.
-  `r.Spout.AsyncReceive.GpuPriority` (default 0) is a diagnostic for receivers that opted in.
+  warning when set to anything but 0. It selects nothing for any receiver.
+  `r.Spout.AsyncReceive.GpuPriority` (default 0) is a diagnostic for Async Receive sessions.
   `r.Spout.FrameWaitMs` and the frame-count recheck apply to the synchronous path only.
-- **Performance is a trade-off, not a gain.** In one measured pair on one laptop (RTX 2060, UE 5.8,
-  a counter-strip receive under GPU load), the asynchronous receive cut the render thread's receive
+- **Measured against the synchronous receive.** On the RTX 2060 laptop, UE 5.8 packaged, in a
+  GPU-bound test scene at the highest Unreal scalability level at which the scene alone meets the
+  release test's frame-pacing limits, receiving the plugin's native test sender at 1080p. That
+  sender holds Spout's access lock until its GPU work completes. Runs of 180 seconds with the
+  sender at 59.94 and 60.06 fps, about
+  10,800 frames each, one stream. Every time below is a software observation inside the game
+  process, not a measurement of the display.
+  - Missing frames: 98 to 252 with Async Receive, 310 to 996 with the synchronous receive.
+  - Freezes (more than three Unreal frames without a new image while the sender published): 0 to 1
+    with Async Receive, 29 to 108 with the synchronous receive.
+  - Age of the image in use, 99th percentile: 17.8 to 20.5 ms with Async Receive, 51.5 to 134 ms
+    with the synchronous receive.
+  - From the sender's publication to Unreal's use of the image, median: 6.3 to 8.8 ms with Async
+    Receive, 6.5 to 8.2 ms with the synchronous receive. At these rates the median is equal, or up
+    to about 1 ms later with Async Receive.
+  - Render-thread time spent in the receive call: 0.14 to 0.22 s per 180 s with Async Receive, 7.1 to
+    9.0 s with the synchronous receive.
+  - Frame-time 99th percentile: 16.67 to 16.79 ms in both modes in these runs. That is not a
+    frame-pacing result for other scenes or loads.
+  - Cost: one worker thread per stream (13 to 18 ms of CPU time per second each, measured) and
+    three image slots per stream.
+  - Four simultaneous 1080p streams received from four such senders (a heavier contention case than
+    the release tests' four-stream scenario): the measured stream showed about 92.6 to 92.8 % of
+    its sender's frames with Async Receive and about 87.6 % with the synchronous receive, which then
+    spent about 45 s per 180 s of render-thread time receiving. The scene no longer held 60 fps in
+    either mode (frame-time 99th percentile 20.1 to 21.3 ms). Single runs per mode.
+- **An earlier measured pair, under GPU load.** In one pair on the same laptop (UE 5.8, a
+  counter-strip receive under GPU load), the asynchronous receive cut the render thread's receive
   call p99 from 1.79 ms to 0.002 ms and delivered every publication (100% against 97.1%), but the
   frame-interval p99 was 3.24 ms worse and the age of the final copy was 3.87 ms worse on average
   and 15.19 ms worse at p99. Under light load the frame p99 was effectively unchanged. One pair is
-  not a general, causal or cross-machine result, and the original targets for this mode (3 ms
-  better frame p99, at most 1 ms / 1.5 ms worse image age) were not met. Measure it in your own
-  project before relying on it.
+  not a general, causal or cross-machine result. Measure your own project, in both modes if frame
+  pacing or latency matters to it.
 - **Frames at equal frame rates.** When the sender and Unreal run at about the same frame rate, the
   worker's copy of one frame can complete just after Unreal's receive call, and its copy of the next
   frame just before the following call. The earlier frame is then never shown: the previous frame
@@ -201,6 +238,9 @@ It is off by default and it is not part of the qualified behaviour of this relea
   leaves no worker thread behind.
 - It runs on either [interop path](#interop-path). Its tests and the measurement above used the
   default shared-slot path; the D3D11-on-12 path was exercised only by targeted checks.
+- Untested: senders other than the plugin's native test sender and the plugin's own sender, other
+  GPUs and machines, and sender rates other than about 60 fps (one 60 fps sender into a 30 fps
+  Unreal excepted, above).
 
 Viewport requests coalesce by name until presentation. Estimates reserve three image equivalents per
 received output (CPU mip plus GPU recreation overlap), two per sender resource, four per receiver native state (shared/staging/upload/cache
@@ -231,9 +271,13 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
 
 ## Performance and diagnostics
 
+- Where the waits below run: with the defaults, Async Receive and the asynchronous render-target send
+  take Spout's access on their worker threads, so their waits do not hold the render thread. The
+  synchronous receive (Async Receive off, or `r.Spout.GPUReceiver 0`), the viewport sender and the
+  synchronous render-target send (a diagnostic) wait on the render thread.
 - Named and keyed texture-access attempts wait for a bounded time. When a peer holds the shared
   texture, each attempt waits at most `r.Spout.AccessWaitMs` (default 2 ms, clamped to 0 to 10) and
-  ends as soon as the peer releases it. The wait runs on the render thread. The bound applies to
+  ends as soon as the peer releases it. The wait runs on the thread that makes the attempt. The bound applies to
   each attempt, not to a frame: every sender publish and every receiver copy that finds its texture
   busy is a separate attempt, so several busy streams can each add up to the bound in the same
   frame, and a peer that keeps a texture locked costs up to the bound on every frame for that
@@ -258,7 +302,8 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
   attempts poll against a high-resolution clock and ended at 2.0 ms in testing, but can still be
   delayed by thread scheduling. A wait that the peer ends by releasing the texture is not affected.
 - If the peer still holds the texture when the wait ends, the transfer is skipped and the next call
-  retries. A sender skips that frame and publishes the next one once the texture is free. A
+  retries (an Async Receive worker tries again without waiting for Unreal's next frame). A sender
+  skips that frame and publishes the next one once the texture is free. A
   receiver keeps the new frame pending and copies on a later call, but it copies whatever the
   sender has published by then: Spout keeps one texture per sender, so a frame the sender replaces
   in the meantime is lost, not queued. Each skip is logged as "shared-texture access was
@@ -325,9 +370,10 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
     the frame. Measured on the laptop with the earlier synchronous render-target send, in a scene
     that ran at 40 to 43 fps with no Spout activity, sending one 1080p stream at 60 fps lowered the
     scene to about 35 fps (the waiting is inferred, not timed directly).
-- Receiving one 1080p 60 fps stream lowered the 40 to 43 fps scene above to about 39.5 fps. In a light
-  scene at 60 fps on the same laptop, receiving had no measurable cost. Measure your own scene with
-  and without the streams.
+- With the synchronous receive (the default before Async Receive), receiving one 1080p 60 fps stream
+  lowered the 40 to 43 fps scene above to about 39.5 fps. In a light scene at 60 fps on the same
+  laptop, receiving had no measurable cost. The same scene was not measured this way with Async
+  Receive. Measure your own scene with and without the streams.
 - Closing a render-target sender, stopping the session, or flushing the rendering commands gives
   each frame still owed one access attempt. If a receiver holds the texture then, that frame is
   abandoned and never announced: a receiver keeps the last frame it saw. The plugin promises that
@@ -340,7 +386,9 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
   throttled warning: one name has one source.
 - A sender that keeps its texture locked while it waits for its own GPU work makes receive attempts
   wait or skip whenever that GPU work is queued behind other work. On a busy GPU this can be on
-  most frames.
+  most frames. With Async Receive those attempts are the worker's; its measured delivery against
+  such a sender is in [Async Receive](#async-receive-the-default). The figures below are the
+  synchronous receive's.
   - Measured in the laptop scene above with the plugin's native test sender, which holds Spout's
     access lock until its GPU work completes, at the default 2 ms wait and 1080p 60 fps.
   - The sender held the texture longer than 2 ms on 29 to 45 % of its frames, and the receiver

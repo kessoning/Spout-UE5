@@ -113,15 +113,20 @@ public:
 	int32 InstrumentId = -1;
 
 	/**
-	 * Receiver role only, Async Receive (Beta), off by default: the asynchronous receive of this stream at its
+	 * Receiver role only, Async Receive (the default): the asynchronous receive of this stream at its
 	 * current sender identity, or null while the stream uses the synchronous path. Created only for a session
-	 * opened with Async Receive (Beta); created, used and replaced on the render thread; destroyed there or by
+	 * opened with Async Receive; created, used and replaced on the render thread; destroyed there or by
 	 * ReleaseResources. While it exists it is the only user of FrameSync's access and notification calls, and its
 	 * worker thread is the only thread that takes Spout access for this stream. AsyncRefusedFor is the identity
 	 * the asynchronous path was last refused for, so a refusal is logged once and not retried on every frame.
 	 */
 	TUniquePtr<FSpoutAsyncStream> Async;
 	FSpoutAsyncStream::FIdentity AsyncRefusedFor;
+	/**
+	 * Receiver role only: whether this session, opened with Async Receive, currently steps aside for the CPU readback
+	 * path because r.Spout.GPUReceiver is 0 (logged once per change). Render thread only.
+	 */
+	bool bAsyncDeferredToCpuPath = false;
 
 	/**
 	 * Receiver role only: the receive mode of this session. One entry is one session per name, so the mode is
@@ -137,11 +142,11 @@ public:
 	/**
 	 * Receiver role only: what the most recent render-thread receive actually used, written there and read on the
 	 * game thread by GetSpoutStreamStatus. bAsyncReceiveActive is true only while this session's worker exists and
-	 * has not failed. AsyncReceiveNote says why a session that asked for Async Receive (Beta) runs synchronously.
+	 * has not failed. AsyncReceiveNote says why a session that asked for Async Receive runs synchronously.
 	 */
 	std::atomic<bool> bAsyncReceiveActive{false};
 	/**
-	 * Receiver role only: frames Async Receive (Beta) delivered (its render-thread copy queued), for the status's
+	 * Receiver role only: frames Async Receive delivered (its render-thread copy queued), for the status's
 	 * FramesSubmitted. The asynchronous path does not complete transfers through FrameSync, so they are counted here;
 	 * cumulative for the entry like FrameSync's own count. Render thread writes, any thread reads. Status only.
 	 */

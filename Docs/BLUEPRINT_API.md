@@ -59,7 +59,7 @@ static bool SpoutReceiverWithMaterial(FName SpoutName, UMaterialInstanceDynamic*
     FName TextureParameterName, UTexture2D*& OutTexture,
     UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,
     ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto,
-    bool bAsyncReceive = false);
+    bool bAsyncReceive = true);
 static bool ReleaseReceiverMaterialBinding(FName SpoutName,
     UMaterialInstanceDynamic* ConsumerMaterial, FName TextureParameterName);
 ```
@@ -74,8 +74,8 @@ completed image, including late attachment and resource recreation while the sen
 Unchanged targets skip repeat copies. Same-name consumers must agree on resolved color space;
 conflicting calls return false without changing the existing output. Close the receiver before
 changing interpretation, or let a source pixel-format change establish a new interpretation.
-The advanced `Async Receive (Beta)` input (`bAsyncReceive`, default false) follows the same
-per-name rule; see [Async Receive (Beta)](#async-receive-beta).
+The advanced `Async Receive` input (`bAsyncReceive`, default true) follows the same per-name rule;
+see [Async Receive](#async-receive).
 
 `ReleaseReceiverMaterialBinding` removes one MID/parameter binding and keeps the receiver open.
 It restores the previous texture (or the engine default) only while the parameter still points
@@ -92,11 +92,11 @@ static bool SpoutReceiver(const FName SpoutName,
                           UTexture2D*& OutTexture,
                           UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr,
                           ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto,
-                          bool bAsyncReceive = false);
+                          bool bAsyncReceive = true);
 ```
 
 Receives a stream and updates the outputs. `OptionalOutputRenderTarget`, `ColorSpace` and
-`Async Receive (Beta)` (`bAsyncReceive`) are advanced-display pins (hidden until expanded).
+`Async Receive` (`bAsyncReceive`, on by default) are advanced-display pins (hidden until expanded).
 
 - Inputs: `SpoutName` (must match the sender); `InputMaterial` (optional base material to create
   a dynamic instance from); `TextureParameterName` (texture parameter to bind, defaults to
@@ -127,18 +127,22 @@ Receives a stream and updates the outputs. `OptionalOutputRenderTarget`, `ColorS
 - Common mistakes: not validating `OutMat`/`OutTexture` before use; a texture parameter name
   that does not exist in the material; a name mismatch with the sender.
 
-## Async Receive (Beta)
+## Async Receive
 
-`Async Receive (Beta)` is an opt-in input of both receive nodes (`bAsyncReceive`, default false)
-and a checkbox of the shipped receiver example. It moves receive work off the render thread: a
-worker thread takes the sender's texture and waits for the copy, and the render thread only queues
-a copy of the newest completed image. It may improve delivery under load, but it can increase
-frame-time spikes or image latency. It is a beta setting: it is off by default, it is not part of
-the qualified behaviour of this release, and it is not a general frame-rate or latency improvement
-(see [limitations](LIMITATIONS.md#async-receive-beta-off-by-default)).
+`Async Receive` is an advanced input of both receive nodes (`bAsyncReceive`, default true) and a
+checkbox of the shipped receiver example, on by default. It moves receive work off the render
+thread: a worker thread takes the sender's texture and waits for the copy, and the render thread
+only queues a copy of the newest completed image. Turn it off for the synchronous receive, where the
+render thread waits for each copy. Its measured differences from the synchronous receive, and their
+limits, are in [limitations](LIMITATIONS.md#async-receive-the-default). Until the end of October
+2026 it was an opt-in beta named `Async Receive (Beta)`, off by default.
 
-- **Default:** off. Existing graphs, assets, projects and C++ callers stay synchronous; opening an
-  older graph adds the new advanced pin with the value false.
+- **Default:** on, for new nodes, C++ callers that leave the argument out, and the example actor.
+- **Existing graphs:** when a graph loads, a node's input left at the earlier default (off) takes the
+  new default (on); a checked input and a connected input are kept; a node saved before the input
+  existed gets it at its default (on). Unreal saves no difference between a box left unchecked and
+  one unchecked on purpose. To keep a receiver synchronous, uncheck the box again or connect a value.
+  The plugin does not modify assets.
 - **Scope: one sender name.** There is one receiver session per name, shared by every graph that
   receives it, and the receive mode belongs to that session. Two different names can use different
   modes at the same time; changing or closing one never touches another, and the sender role of a
@@ -158,18 +162,21 @@ the qualified behaviour of this release, and it is not a general frame-rate or l
   delivering frames. That happens for senders whose format is not BGRA8 or RGBA8, when the worker's
   device or resources cannot be created, and after a worker failure. The reason is logged once and
   reported in the status (below). A later sender size, format or handle is tried again.
+- **CPU readback:** while `r.Spout.GPUReceiver` is 0, a session that asked for it uses the CPU
+  readback path instead (no worker), and the status says so; at 1 it starts its worker again, or
+  reports again why it cannot.
 - **Status:** `GetSpoutStreamStatus(Name, Receiver)` reports `RequestedReceiveMode` (what the session
   was opened with), `EffectiveReceiveMode` (what the most recent receive actually used; synchronous
   until the worker runs) and `ReceiveModeNote` (why a session that asked for it runs synchronously).
   A requested mode is never reported as the effective one on its own.
-- **Example actor:** `BP_SpoutReceiverExample` has an instance-editable **Async Receive (Beta)**
-  checkbox under **Spout > Experimental**, off by default and saved with the actor. It is wired to
-  this input. Two example actors with the same Spout Name must use the same value.
+- **Example actor:** `BP_SpoutReceiverExample` has an instance-editable **Async Receive**
+  checkbox under **Spout**, on by default; a value that differs from that default is saved with the
+  actor. It is wired to this input. Two example actors with the same Spout Name must use the same
+  value. Its variable keeps its earlier name, `AsyncReceiveBeta`, so that saved values stay attached.
 - **Console variables:** `r.Spout.AsyncReceive` is retired. It is still registered so old command
-  lines do not fail, it logs a warning when set to anything but 0, and it selects nothing: an
-  unchecked receiver stays synchronous whatever it holds. `r.Spout.AsyncReceive.GpuPriority`
-  (default 0) remains a diagnostic for sessions that opted in. `r.Spout.FrameWaitMs` applies to
-  the synchronous path only.
+  lines do not fail, it logs a warning when set to anything but 0, and it selects nothing.
+  `r.Spout.AsyncReceive.GpuPriority` (default 0) remains a diagnostic for Async Receive sessions.
+  `r.Spout.FrameWaitMs` applies to the synchronous path only.
 
 ---
 
@@ -305,12 +312,12 @@ How the Spout Receiver node interprets the received bytes.
 ### ESpoutReceiveMode
 
 How a receiver session moves frames, as reported by `GetSpoutStreamStatus`. It is chosen through
-the `Async Receive (Beta)` input; see [Async Receive (Beta)](#async-receive-beta).
+the `Async Receive` input; see [Async Receive](#async-receive).
 
 | Value | Meaning |
 |---|---|
-| `Synchronous` | The render thread takes the sender's texture and waits for the copy. The default. |
-| `AsyncBeta` | Async Receive (Beta): a worker thread takes the sender's texture and waits for the copy; the render thread queues a copy of the newest completed image. |
+| `Synchronous` | The render thread takes the sender's texture and waits for the copy. Selected by turning Async Receive off. Also what the status reports for a name with no receiver session. |
+| `AsyncBeta` (shown as Async Receive) | Async Receive, the default: a worker thread takes the sender's texture and waits for the copy; the render thread queues a copy of the newest completed image. The value keeps its earlier name so that saved Blueprint values stay valid. |
 
 ## Struct: FSenderStruct
 
@@ -341,7 +348,7 @@ not wait), native-failure count and last native error. An active role can be awa
 successful transfer; `bHasFrame` means a submitted frame has been recorded, not that a foreign peer
 has displayed it. CPU receive uploads may still be queued when submission is recorded. For a
 receiver it also reports `RequestedReceiveMode`, `EffectiveReceiveMode` and `ReceiveModeNote`; see
-[Async Receive (Beta)](#async-receive-beta).
+[Async Receive](#async-receive).
 
 `GetSpoutRuntimeStatus()` returns interop availability, active roles, pending/peak commands,
 rejected admissions and current/peak/rejected resource reservations. Queries do not initialize the

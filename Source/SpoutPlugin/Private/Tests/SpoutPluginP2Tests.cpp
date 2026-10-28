@@ -97,7 +97,7 @@ bool FSpoutP2FailedDiscovery::RunTest(const FString&)
 	for (int32 Index = 0; Index < 2000; ++Index)
 	{
 		const FName Name(*FString::Printf(TEXT("P2_Missing_%u_%d"), FPlatformProcess::GetCurrentProcessId(), Index));
-		if (USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name,nullptr,NAME_None,Texture,nullptr,ESpoutColorSpace::Auto)) return false;
+		if (USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name,nullptr,NAME_None,Texture,nullptr,ESpoutColorSpace::Auto, /*bAsyncReceive: the synchronous receive under test*/ false)) return false;
 	}
 	TestEqual(TEXT("failed discovery leaves no native records"), FSpoutSenderRegistry::Get().Num(), RegistryBefore);
 	TestEqual(TEXT("failed discovery leaves no session records"), FSpoutSession::Get().NumStreams(), SessionBefore);

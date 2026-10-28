@@ -3,7 +3,7 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * Implements the asynchronous receive path, Async Receive (Beta): off by default and requested per receiver session.
+ * Implements the asynchronous receive path, Async Receive: the default, chosen per receiver session.
  * See SpoutAsyncReceive.h for the design and the ownership rules, and SpoutSlotPool.h for the
  * bookkeeping.
  */

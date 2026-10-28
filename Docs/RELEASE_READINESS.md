@@ -34,7 +34,11 @@ For 1.0.0 the release pipeline:
   limits; that level is chosen by measurement and fixed before the run. The render-target send is
   asynchronous by default, so the release test's send-access criteria judge frames abandoned for
   access, not failed access attempts, and every frame must still be published or counted from the
-  send's per-frame outcome log; the original attempt counts are reported beside them;
+  send's per-frame outcome log; the original attempt counts are reported beside them. The receive is
+  Async Receive by default: for a receive shown by its log to have run on the worker from start to
+  end, the receive-contention ratio of failed access attempts to publications is reported, not
+  gated, because the worker counts every failed poll; delivery, freeze, recovery and every other
+  criterion apply unchanged, and a synchronous receive is judged by the original criteria;
 - measures the same scene at its default quality with no Spout activity, with one stream sent,
   with one received, and with both. This shows the plugin's cost in a scene that keeps the GPU busy
   (see [limitations](LIMITATIONS.md)). It is a measurement, not a gate. The asynchronous

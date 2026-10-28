@@ -31,7 +31,7 @@ The receiver has two implementations, selected at runtime by the console variabl
 
 | Value | Path | Behavior |
 |---|---|---|
-| `1` (default) | GPU-direct | Opens the sender's shared DX11 texture and copies it into the UE RHI destination on the GPU: by default the plugin's native DX11 device copies it into a plugin-owned slot and Unreal copies the slot into the destination (the render thread waits at most 100 ms for the native copy); with `r.Spout.SharedSlotInterop 0`, through D3D11-on-12 wrapping (see [Limitations](LIMITATIONS.md#interop-path)). No staging texture, no Map/Unmap, no per-frame CPU copy. |
+| `1` (default) | GPU-direct | Opens the sender's shared DX11 texture and copies it into the UE RHI destination on the GPU: by default the plugin's native DX11 device copies it into a plugin-owned slot and Unreal copies the slot into the destination (with the synchronous receive the render thread waits at most 100 ms for the native copy; with Async Receive, the default, a worker thread does the copy and the waiting, see [Async Receive](#async-receive)); with `r.Spout.SharedSlotInterop 0`, through D3D11-on-12 wrapping (see [Limitations](LIMITATIONS.md#interop-path)). No staging texture, no Map/Unmap, no per-frame CPU copy. |
 | `0` | Legacy CPU readback | Copies into a CPU-readable staging texture, maps it, and uploads via `FRHICommandList::UpdateTexture2D`. Kept for debugging and parity with older builds. More expensive at high resolution. |
 
 Both paths produce visually identical output. The difference is performance only. Unless you
@@ -47,22 +47,25 @@ Where to set the CVar:
 The value is read once per receive call on the game thread, so changes take effect on the next
 call with no restart needed.
 
-## Async Receive (Beta)
+## Async Receive
 
-Both receive nodes have an advanced **Async Receive (Beta)** input, and the shipped
-`BP_SpoutReceiverExample` has a checkbox of the same name under **Spout > Experimental** in its
-Details. It is off by default. When on, a worker thread takes the sender's texture and waits for
-the copy, and the render thread only queues a copy of the newest completed image. That can improve
-delivery under load, but it can also increase frame-time spikes or image latency: it is a beta
-trade-off, not a speed-up.
+Both receive nodes have an advanced **Async Receive** input, and the shipped
+`BP_SpoutReceiverExample` has a checkbox of the same name under **Spout** in its Details. It is on
+by default. A worker thread takes the sender's texture and waits for the copy, and the render
+thread only queues a copy of the newest completed image. Turn it off for the synchronous receive,
+where the render thread waits for each copy. The measured differences between the two, and their
+limits, are in [limitations](LIMITATIONS.md#async-receive-the-default). Until the end of October
+2026 it was an opt-in beta, off by default; a graph saved with its box unchecked takes the new
+default when it loads, unless the box is unchecked again or a value is connected.
 
 The setting applies per sender name. All graphs and actors receiving one name share one receiver
 session, the first accepted receive decides its mode, and a call asking for the other mode is
 refused and logged until the receiver is closed. To change it, set it before Play, or close the
 receiver and receive again. A sender format other than BGRA8 or RGBA8, or a failure of the worker,
 makes the session run synchronously; `GetSpoutStreamStatus` reports the requested mode, the
-effective mode and why. Details: [Async Receive (Beta)](BLUEPRINT_API.md#async-receive-beta) and
-[limitations](LIMITATIONS.md#async-receive-beta-off-by-default).
+effective mode and why. While `r.Spout.GPUReceiver` is 0, a session that asked for Async Receive
+uses the CPU readback path instead. Details: [Async Receive](BLUEPRINT_API.md#async-receive) and
+[limitations](LIMITATIONS.md#async-receive-the-default).
 
 ## Colour space
 

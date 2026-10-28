@@ -324,9 +324,9 @@ use. The original signature below remains available; its Out Mat pin is an outpu
 shared receiver open. It restores the previous texture or engine default only if that parameter
 still points to the receiver's image. A later manual change or another sender's binding survives.
 
-`bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr, ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto, bool bAsyncReceive = false)`
+`bool SpoutReceiver(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget = nullptr, ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto, bool bAsyncReceive = true)`
 
-Receives a stream. `OptionalOutputRenderTarget`, `ColorSpace` and `Async Receive (Beta)` are advanced-display pins.
+Receives a stream. `OptionalOutputRenderTarget`, `ColorSpace` and `Async Receive` are advanced-display pins.
 Returns true when the sender exists and a receive was enqueued. Outputs Out Mat and Out Texture.
 Texture Parameter Name defaults to `SpoutTexture` when empty. Validate outputs before use.
 
@@ -347,13 +347,15 @@ The Optional Output Render Target must match the incoming frame's pixel format e
 single-sampled. A mismatched target is left untouched and the mismatch is logged; the call still
 succeeds and Out Texture still updates. Size differences are resolved by resizing the target.
 
-Async Receive (Beta) (`bAsyncReceive`, default off; also a checkbox under Spout > Experimental on the
-receiver example) moves receive work off the render thread. It may improve delivery under load, but
-can increase frame-time spikes or image latency. It applies per sender name: the first accepted
-receive decides the mode of the shared session, a call asking for the other mode is refused and
-logged until Close Receiver, and nothing switches an open session. Senders other than BGRA8 or
-RGBA8, or a worker failure, make the session run synchronously; the stream status reports the
-requested mode, the effective mode and why. `r.Spout.AsyncReceive` is retired and ignored.
+Async Receive (`bAsyncReceive`, on by default; also a checkbox under Spout on the receiver
+example) moves receive work off the render thread: a worker thread takes the sender's texture and
+waits for each copy. Turn it off for the synchronous receive. It applies per sender name: the first
+accepted receive decides the mode of the shared session, a call asking for the other mode is refused
+and logged until Close Receiver, and nothing switches an open session. Senders other than BGRA8 or
+RGBA8, or a worker failure, make the session run synchronously, and so does `r.Spout.GPUReceiver 0`
+(the CPU readback path); the stream status reports the requested mode, the effective mode and why.
+Graphs saved before this was the default take the new default when they load, unless their box is
+unchecked again or a value is connected. `r.Spout.AsyncReceive` is retired and ignored.
 
 ### Operational status
 

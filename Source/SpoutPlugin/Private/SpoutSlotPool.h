@@ -3,7 +3,7 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * The bookkeeping of an asynchronous receive stream (experimental, off by default): which private
+ * The bookkeeping of an asynchronous receive stream (Async Receive, the default): which private
  * slot a worker may write, which one the render thread reads, and what starts a worker transfer.
  *
  * A worker thread copies the sender's shared texture into a slot and publishes it; the render

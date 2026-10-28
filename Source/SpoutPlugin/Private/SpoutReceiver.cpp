@@ -11,8 +11,9 @@
  *   - CPU path (CVar=0): copies into a D3D11 STAGING texture, maps it and uploads
  *     through the RHI. It uses the native device in shared-slot mode and the
  *     D3D11-on-12 device on the legacy wrap path.
- * A receiver session may instead ask for Async Receive (Beta) (SpoutAsyncReceive.h): requested per session
- * through Receive's bAsyncReceive, fixed by the session's first accepted call, never by a process-wide setting.
+ * By default a receiver session uses Async Receive instead (SpoutAsyncReceive.h): chosen per session through
+ * Receive's bAsyncReceive (true by default), fixed by the session's first accepted call, never by a process-wide
+ * setting. A session that asks for the synchronous receive (bAsyncReceive false) uses the paths above.
  */
 #include "SpoutReceiver.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -405,7 +406,7 @@ namespace
 #endif
 
 	/**
-	 * Async Receive (Beta), off by default. bAsyncRequested is the session's own request, decided by the first
+	 * Async Receive, the default. bAsyncRequested is the session's own request, decided by the first
 	 * accepted receive of this entry and carried by every render command of it; no process-wide setting is read.
 	 * Returns false when this call is to use the synchronous path: the session did not ask for it, a precondition
 	 * failed, or the stream's worker failed. For a session that did not ask nothing here is created.
@@ -416,16 +417,47 @@ namespace
 	 *
 	 * What the call ends up using is recorded on the entry (bAsyncReceiveActive, and the reason when a session
 	 * that asked for it runs synchronously), so the status never reports a requested mode as the effective one.
+	 *
+	 * bGPUPath is r.Spout.GPUReceiver as the call read it. At 0 that setting selects the CPU readback path for every
+	 * receiver, so a session that asked for Async Receive steps aside meanwhile: no worker is kept, the stream uses
+	 * the CPU path, and the note says why. At 1 again, the next call starts a worker.
 	 */
-	bool ReceiveOnRenderThread_Async(FSpoutSharedSender& Receiver, bool bAsyncRequested, FRHITexture* Destination, EPixelFormat PixelFormat, FRHICommandListImmediate& RHICmdList)
+	bool ReceiveOnRenderThread_Async(FSpoutSharedSender& Receiver, bool bAsyncRequested, bool bGPUPath, FRHITexture* Destination, EPixelFormat PixelFormat, FRHICommandListImmediate& RHICmdList)
 	{
 		check(IsInRenderingThread());
+		if (bAsyncRequested && !bGPUPath)
+		{
+			if (!Receiver.bAsyncDeferredToCpuPath)
+			{
+				Receiver.bAsyncDeferredToCpuPath = true;
+				if (Receiver.Async && Receiver.Async->HasFailed())
+				{
+					// The worker failed before the setting changed: say so before it is let go below.
+					UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive stopped (%s); the stream uses the synchronous path."),
+						*Receiver.Name.ToString(), *Receiver.Async->GetFailure());
+				}
+				// A refusal or a failure recorded before is looked at again once the setting is back at 1, so that the
+				// note then gives the reason that holds at that time, not this one.
+				Receiver.AsyncRefusedFor = FSpoutAsyncStream::FIdentity();
+				Receiver.SetAsyncReceiveNote(TEXT("Async Receive is not used while r.Spout.GPUReceiver is 0: the stream uses the CPU readback path."));
+				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': r.Spout.GPUReceiver is 0, so this Async Receive session uses the CPU readback path until it is 1 again."),
+					*Receiver.Name.ToString());
+			}
+			bAsyncRequested = false;
+		}
+		else if (bAsyncRequested && Receiver.bAsyncDeferredToCpuPath)
+		{
+			// Back from the CPU path. The identity is tried again (below): a new worker clears the note, and a refusal
+			// (an unsupported format, an unavailable device) logs and records its own reason.
+			Receiver.bAsyncDeferredToCpuPath = false;
+		}
 		if (!bAsyncRequested)
 		{
 			if (Receiver.Async)
 			{
-				// Not reachable while the mode is fixed per entry; kept so that an entry that is not asking can
-				// never keep a worker. Back to the synchronous path, from the current image.
+				// Reached while r.Spout.GPUReceiver is 0 (above); otherwise not reachable while the mode is fixed per
+				// entry, and kept so that an entry that is not asking can never keep a worker. Back to the synchronous
+				// path, from the current image.
 				Receiver.Async.Reset();
 				Receiver.FrameSync.RequestCurrentFrame();
 			}
@@ -444,9 +476,9 @@ namespace
 		{
 			if (Receiver.Async->HasFailed())
 			{
-				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive (Beta) stopped (%s); the stream uses the synchronous path."),
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive stopped (%s); the stream uses the synchronous path."),
 					*Receiver.Name.ToString(), *Receiver.Async->GetFailure());
-				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive (Beta) stopped: %s"), *Receiver.Async->GetFailure()));
+				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive stopped: %s"), *Receiver.Async->GetFailure()));
 				Receiver.AsyncRefusedFor = Identity;
 			}
 			Receiver.Async.Reset();
@@ -471,13 +503,13 @@ namespace
 			{
 				Receiver.AsyncRefusedFor = Identity;
 				Receiver.bAsyncReceiveActive.store(false);
-				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive (Beta) is not available for this sender: %s"), *Why));
-				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive (Beta) was requested but is not used (%s); the stream uses the synchronous path."),
+				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive is not available for this sender: %s"), *Why));
+				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive was requested but is not used (%s); the stream uses the synchronous path."),
 					*Receiver.Name.ToString(), *Why);
 				return false;
 			}
 			Receiver.SetAsyncReceiveNote(FString());
-			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': Async Receive (Beta) started (worker generation %llu)."),
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': Async Receive started (worker generation %llu)."),
 				*Receiver.Name.ToString(), Receiver.Async->GetGeneration());
 		}
 		Receiver.bAsyncReceiveActive.store(true);
@@ -1266,10 +1298,10 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("Spout receiver '%s': refused a receive asking for %s, because the open receiver for this name uses %s. ")
 				TEXT("Every consumer of one Spout name shares one receiver and one receive mode, fixed when it opened. ")
-				TEXT("Use the same Async Receive (Beta) setting for every consumer of the name, or Close Receiver and receive again to change it."),
+				TEXT("Use the same Async Receive setting for every consumer of the name, or Close Receiver and receive again to change it."),
 				*SpoutName.ToString(),
-				bAsyncReceive ? TEXT("Async Receive (Beta)") : TEXT("the synchronous receive"),
-				Receiver->bAsyncReceiveRequested ? TEXT("Async Receive (Beta)") : TEXT("the synchronous receive"));
+				bAsyncReceive ? TEXT("Async Receive") : TEXT("the synchronous receive"),
+				Receiver->bAsyncReceiveRequested ? TEXT("Async Receive") : TEXT("the synchronous receive"));
 		}
 		return false;
 	}
@@ -1385,7 +1417,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		Receiver->bAsyncReceiveRequested = bAsyncReceive;
 		if (bAsyncReceive)
 		{
-			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': opened with Async Receive (Beta) requested. It stays in this mode until Close Receiver."), *SpoutName.ToString());
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': opened with Async Receive requested. It stays in this mode until Close Receiver."), *SpoutName.ToString());
 		}
 	}
 	const bool bAsyncRequested = Receiver->bAsyncReceiveRequested;
@@ -1432,9 +1464,9 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			}
 			const uint64 PreviousFrame = Receiver->ReceivedFrameNumber;
 			bool bCpuUploaded = false;
-			if (ReceiveOnRenderThread_Async(*Receiver, bAsyncRequested, TextureRHI, PixelFormat, RHICmdList))
+			if (ReceiveOnRenderThread_Async(*Receiver, bAsyncRequested, bUseGPUPath, TextureRHI, PixelFormat, RHICmdList))
 			{
-				// Async Receive (Beta), requested by this session: the worker made the transfer; nothing more here.
+				// Async Receive, requested by this session: the worker made the transfer; nothing more here.
 			}
 			else if (bUseGPUPath)
 			{

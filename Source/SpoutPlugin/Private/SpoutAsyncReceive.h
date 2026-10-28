@@ -3,8 +3,8 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * The asynchronous receive path: Async Receive (Beta), off by default. A receiver session asks for it through the
- * Async Receive (Beta) input of the receive functions (FSpoutReceiver::Receive, bAsyncReceive); the session's first
+ * The asynchronous receive path: Async Receive, the default. A receiver session uses it unless the Async Receive
+ * input of the receive functions (FSpoutReceiver::Receive, bAsyncReceive) is off; the session's first
  * accepted call fixes the request for the session's life. No process-wide setting enables it (r.Spout.AsyncReceive
  * is retired and ignored).
  *
@@ -18,8 +18,8 @@
  * InFlightWaitBoundMicroseconds (1 ms per render frame for all streams together), so that a copy completing just
  * after the call is shown now rather than lost when the next copy completes before the next call.
  *
- * The synchronous path stays the default. A stream uses this path only while every precondition
- * holds; otherwise, and after any failure here, it uses the synchronous path and says why once.
+ * A stream uses this path only while every precondition holds; otherwise, and after any failure
+ * here, it uses the synchronous path and says why once.
  *
  * Parts:
  *   FSpoutAsyncDevice  one native D3D11 device per process, on the adapter Unreal renders with
@@ -184,7 +184,7 @@ public:
 	uint64 GetGeneration() const { return Generation; }
 	/**
 	 * Stream objects alive in the process, any thread. Each owns its worker thread and joins it before it is gone,
-	 * so 0 means no worker runs. Diagnostics and tests: a receiver that did not ask for Async Receive (Beta) never
+	 * so 0 means no worker runs. Diagnostics and tests: a receiver that asked for the synchronous receive never
 	 * adds one, and a closed one leaves none behind.
 	 */
 	static int32 GetLiveStreams();

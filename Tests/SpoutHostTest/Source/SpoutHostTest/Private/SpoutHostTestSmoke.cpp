@@ -60,10 +60,12 @@ namespace SpoutHostTest
 
 		constexpr double DefaultDeadlineSeconds = 600.0;
 
-		// The development switch r.Spout.Dev.AsyncSend: a render-target sender then announces its frames
-		// from a worker, a few milliseconds after SpoutSender returned, so a receiver opened in the same process in the
-		// same frame may find nothing announced yet. With the switch on, a receiver cycle's image must arrive within this
-		// many frames of the cycle's first accepted receive; with it off, the first accepted receive must deliver it.
+		// Two things defer a receiver cycle's image by a few frames. The asynchronous render-target send (the default;
+		// development switch r.Spout.Dev.AsyncSend) announces its frames from a worker, a few milliseconds after
+		// SpoutSender returned, so a receiver opened in the same process in the same frame may find nothing announced
+		// yet. Async Receive (the default receive mode) starts its worker in the first accepted receive and delivers from
+		// a later one. With either, a receiver cycle's image must arrive within this many frames of the cycle's first
+		// accepted receive; with both off, the first accepted receive must deliver it.
 		constexpr int32 AsyncSendSettleBudgetFrames = 60;
 		int32 GCycleFirstReceiveFrame = -1;
 		int32 GMaxCycleSettleFrames = 0;
@@ -735,9 +737,10 @@ namespace SpoutHostTest
 		}
 		if (ActualPixels.IsEmpty() || ActualPixels != SourcePixels || ActualPixels[0]!=ExpectedPixel)
 		{
-			if (IsDevAsyncSendOn() && StepFrames - GCycleFirstReceiveFrame < AsyncSendSettleBudgetFrames)
+			const bool bAsyncReceive = USpoutBPFunctionLibrary::GetSpoutStreamStatus(LifecycleSenderName, ESpoutType::Receiver).RequestedReceiveMode == ESpoutReceiveMode::AsyncBeta;
+			if ((IsDevAsyncSendOn() || bAsyncReceive) && StepFrames - GCycleFirstReceiveFrame < AsyncSendSettleBudgetFrames)
 			{
-				return false;   // receive again on the next cycle frame (development switch only)
+				return false;   // receive again on the next cycle frame (an asynchronous send or receive only)
 			}
 			FailAndFinish(TEXT("receiver cycle: completed pixels differ from source before close"));
 			return false;

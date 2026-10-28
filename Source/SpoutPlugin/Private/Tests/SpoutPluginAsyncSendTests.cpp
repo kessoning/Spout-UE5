@@ -1281,7 +1281,7 @@ bool FSpoutAsyncSendOutcomeLogRestart::RunTest(const FString&)
 
 // ---------------------------------------------------------------------------------------------
 // Lifecycle under contention, same-name restart, one name one source, and the asynchronous sender with Async Receive
-// (Beta) in the same process.
+// in the same process.
 // ---------------------------------------------------------------------------------------------
 
 namespace SpoutAsyncSendTests
@@ -1292,7 +1292,7 @@ namespace SpoutAsyncSendTests
 		return FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Receiver);
 	}
 
-	/** An Async Receive (Beta) receiver of Name in this process. */
+	/** An Async Receive receiver of Name in this process. */
 	struct FBetaReceiver
 	{
 		UTexture2D* Texture = nullptr;
@@ -1589,7 +1589,7 @@ bool FSpoutAsyncSendBetaDrain::RunTest(const FString&)
 	AS::Upload(Late.Get(), 99);
 	AS::Send(Name, Source.Get());
 	AS::FBetaReceiver B;
-	TestTrue(TEXT("the first image arrives through Async Receive (Beta)"), B.ReceiveExact(Name, Source.Get()) && B.IsAsync(Name));
+	TestTrue(TEXT("the first image arrives through Async Receive"), B.ReceiveExact(Name, Source.Get()) && B.IsAsync(Name));
 	for (int32 I = 2; I <= 20; ++I)
 	{
 		AS::Upload(Source.Get(), I);
@@ -1622,14 +1622,14 @@ bool FSpoutAsyncSendBetaDrain::RunTest(const FString&)
 	TestFalse(TEXT("the two workers never held the access mutex at the same time"), bOverlap);
 	TestTrue(FString::Printf(TEXT("the samples saw the sender's worker holding access during the receive calls (%d samples)"), SenderHeldSamples), SenderHeldSamples > 0);
 	TestTrue(TEXT("the long copy is published once proven"), AS::WaitUntil([&] { return AS::Stats(Name).Published() == PublishedBefore + 1; }, 3.0) > 0.0);
-	TestTrue(TEXT("and Async Receive (Beta) then delivers exactly that image"), B.ReceiveExact(Name, Late.Get()));
+	TestTrue(TEXT("and Async Receive then delivers exactly that image"), B.ReceiveExact(Name, Late.Get()));
 	if (RxE)
 	{
 		AddInfo(FString::Printf(TEXT("the receiver's failed acquisitions during the sender's long copy: %lld"), int64(RxE->FrameSync.GetFailedAcquireCount()) - RxMissesBefore));
 	}
 	TestEqual(TEXT("no rule violation in the receiver's slot bookkeeping"), B.Stats(Name).RuleViolations, int64(0));
-	AS::CheckIdentity(*this, Name, TEXT("after Async Receive (Beta) received the asynchronous send"));
-	TestTrue(TEXT("still through Async Receive (Beta)"), B.IsAsync(Name));
+	AS::CheckIdentity(*this, Name, TEXT("after Async Receive received the asynchronous send"));
+	TestTrue(TEXT("still through Async Receive"), B.IsAsync(Name));
 	S.Reset();   // the test holds no entry when the streams close
 	RxE.Reset();
 	B.Close(Name);
@@ -1662,7 +1662,7 @@ bool FSpoutAsyncSendBetaLateCopy::RunTest(const FString&)
 	AS::Upload(Fourth.Get(), 4);
 	AS::Send(Name, Source.Get());
 	AS::FBetaReceiver B;
-	if (!TestTrue(TEXT("the first image arrives through Async Receive (Beta)"), B.ReceiveExact(Name, Source.Get()) && B.IsAsync(Name))) { B.Close(Name); AS::CloseSender(Name); return false; }
+	if (!TestTrue(TEXT("the first image arrives through Async Receive"), B.ReceiveExact(Name, Source.Get()) && B.IsAsync(Name))) { B.Close(Name); AS::CloseSender(Name); return false; }
 	TSharedPtr<FSpoutSharedSender> S = AS::SenderEntry(Name);
 	TSharedPtr<FSpoutSharedSender> RxE = AS::ReceiverEntry(Name);
 	const int64 Baseline = S ? int64(S->FrameSync.GetFailedAcquireCount()) - AS::Stats(Name).FailedAttempts : -1;

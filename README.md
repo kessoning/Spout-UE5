@@ -253,11 +253,12 @@ naming it, rather than being published as something it is not.
   input reuses your material without allocating a new one on each call. Pass null for texture-only use.
 - The original `SpoutReceiver` signature remains available for existing graphs and C++ callers.
   Its material reference is an output pin in Blueprint; prefer the new node for repeated material use.
-- **Async Receive (Beta)**, an advanced input of both nodes and a checkbox on the receiver example
-  (Spout > Experimental), is off by default. It moves receive work off the render thread, which may
-  improve delivery under load but can increase frame-time spikes or image latency. It applies per
-  sender name and is fixed while that receiver is open; see
-  [Async Receive (Beta)](Docs/BLUEPRINT_API.md#async-receive-beta).
+- **Async Receive**, an advanced input of both nodes and a checkbox on the receiver example
+  (Spout section of its Details), is on by default. A worker thread takes the sender's texture and
+  waits for each copy, so the render thread does not; turn it off for the synchronous receive. It
+  applies per sender name and is fixed while that receiver is open. Existing graphs whose box was
+  left unchecked take the new default when they load; see
+  [Async Receive](Docs/BLUEPRINT_API.md#async-receive).
 - The **Spout Name** must exactly match the name used by the sender.
 - The function outputs:
   - `OutTexture` – a transient `UTexture2D` updated from the Spout stream.
@@ -375,9 +376,11 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
 
 - Shared-texture access is held until the GPU copy completes. This prevents handing a texture
   to another process while it is still being read or written, but can stall Unreal's render
-  thread. On the default shared-slot path the render thread waits at most 100 ms for a receive's
-  native copy and at most 1 s for Unreal's copy into a send slot; a copy that does not finish in
-  time is not published. On the D3D11-on-12 path (`r.Spout.SharedSlotInterop 0`) UE 5.3 waits for
+  thread. With Async Receive (the default) a worker thread waits for the receive's copy, and the
+  render thread waits at most 1 ms per frame for a copy already in progress. With the synchronous
+  receive, on the default shared-slot path, the render thread waits at most 100 ms for the
+  receive's native copy. On that path the wait for Unreal's copy into a send slot is at most 1 s;
+  a copy that does not finish in time is not published. On the D3D11-on-12 path (`r.Spout.SharedSlotInterop 0`) UE 5.3 waits for
   GPU idle at the Unreal-to-interop boundary and UE 5.4+ uses a submission-order barrier. Measure
   frame time in your target workload.
 

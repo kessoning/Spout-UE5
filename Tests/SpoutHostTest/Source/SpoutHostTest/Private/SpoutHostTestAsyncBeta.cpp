@@ -6,8 +6,8 @@
 // (or -SpoutAsyncBetaCheck=<report.json> [-SpoutAsyncBetaSeconds=] [-SpoutAsyncBetaName=] on the command line, which also
 // works in Shipping builds)
 //
-// The Async Receive (Beta) check of a packaged host (Scripts/AsyncReceiveBeta/README.md). The level it runs in holds
-// shipped receiver examples (BP_SpoutReceiverExample) whose Async Receive (Beta) setting was SAVED with the level; the
+// The Async Receive check of a packaged host (Scripts/AsyncReceiveBeta/README.md). The level it runs in holds
+// shipped receiver examples (BP_SpoutReceiverExample) whose Async Receive setting was SAVED with the level (or left at the class default); the
 // check sets nothing on them. It publishes a moving pattern under the given name (the example receives "Spout") with the
 // plugin's own sender, for the given time, then records what each example's saved setting is, what GetSpoutStreamStatus
 // reports as requested and effective, and whether the example's received texture holds exactly one of the published
@@ -168,7 +168,7 @@ namespace SpoutHostTestAsyncBeta
 			E.Label = A->GetName();
 			E.bHasSetting = AsyncProperty != nullptr;
 			E.bSavedAsync = AsyncProperty && AsyncProperty->GetPropertyValue_InContainer(A);
-			UE_LOG(LogTemp, Display, TEXT("SpoutHostTest.AsyncBetaCheck: example %s, saved Async Receive (Beta) = %s%s"),
+			UE_LOG(LogTemp, Display, TEXT("SpoutHostTest.AsyncBetaCheck: example %s, saved Async Receive = %s%s"),
 				*E.Label, E.bSavedAsync ? TEXT("true") : TEXT("false"), E.bHasSetting ? TEXT("") : TEXT(" (the example has no such setting)"));
 			GRun->Examples.Add(MoveTemp(E));
 		}

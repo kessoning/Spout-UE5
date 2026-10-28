@@ -640,6 +640,21 @@ namespace SpoutHostTest
 		Json += FString::Printf(TEXT("    \"usesReceiver\": %s,\n"), bUsesReceiver ? TEXT("true") : TEXT("false"));
 		Json += FString::Printf(TEXT("    \"receiverMode\": \"%s\",\n"),
 			bGpuReceiverPath ? TEXT("gpu-direct") : TEXT("cpu-fallback"));
+		// Which receive mode each stream actually ran when the measurement ended (Async Receive is the default; the
+		// CPU fallback setting makes it step aside), so results of different modes are never mixed.
+		Json += TEXT("    \"receiveModes\": [");
+		if (bUsesReceiver)
+		{
+			const UEnum* ModeEnum = StaticEnum<ESpoutReceiveMode>();
+			for (int32 Index = 0; Index < SenderNames.Num(); ++Index)
+			{
+				const FSpoutStreamStatus S = USpoutBPFunctionLibrary::GetSpoutStreamStatus(SenderNames[Index], ESpoutType::Receiver);
+				Json += FString::Printf(TEXT("%s{\"requested\": \"%s\", \"effective\": \"%s\", \"note\": \"%s\"}"), Index ? TEXT(", ") : TEXT(""),
+					*ModeEnum->GetNameStringByValue(static_cast<int64>(S.RequestedReceiveMode)), *ModeEnum->GetNameStringByValue(static_cast<int64>(S.EffectiveReceiveMode)),
+					*EscapeJson(S.ReceiveModeNote));
+			}
+		}
+		Json += TEXT("],\n");
 		Json += TEXT("    \"cvars\": {\n");
 		Json += FString::Printf(TEXT("      \"r.Spout.GPUReceiver\": %d,\n"), bGpuReceiverPath ? 1 : 0);
 		Json += FString::Printf(TEXT("      \"r.Spout.MaxRetainedMiB\": %d\n"), IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.MaxRetainedMiB"))->GetInt());

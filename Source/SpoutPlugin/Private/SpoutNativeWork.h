@@ -4,7 +4,7 @@
 
 /**
  * The native device's fences, waits and proofs, shared by every user of the plugin's native D3D11 device: the
- * synchronous shared-slot paths (SpoutSharedSlot.h), Async Receive (Beta) (SpoutAsyncReceive.h) and the asynchronous
+ * synchronous shared-slot paths (SpoutSharedSlot.h), Async Receive (SpoutAsyncReceive.h) and the asynchronous
  * render-target sender (SpoutAsyncSend.h). Defined in SpoutSharedSlot.cpp, next to the shared-slot path's own
  * helpers; the rules are those of SpoutSharedSlot.h and SpoutSlotRules.h:
  *   - access to a texture a peer uses is given back only once the native GPU work on it is proven finished (its fence

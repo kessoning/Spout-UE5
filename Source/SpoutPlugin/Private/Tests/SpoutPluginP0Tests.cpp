@@ -140,7 +140,7 @@ bool FSpoutP0Pixels::RunTest(const FString&)
 			FPlatformProcess::ReturnSynchEventToPool(Gate);
 			Gate = FPlatformProcess::GetSynchEventFromPool(true);
 			ENQUEUE_RENDER_COMMAND(SpoutP0DelayReceive)([Gate](FRHICommandListImmediate&) { Gate->Wait(10000); });
-			const bool Accepted = USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+			const bool Accepted = USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 			TestTrue(TEXT("first receive accepted before InitRHI"), Accepted);
 			TArray<FColor> Actual;
 			QueueRead(Texture, W, H, Actual);
@@ -156,7 +156,7 @@ bool FSpoutP0Pixels::RunTest(const FString&)
 			QueuePattern(Source.Get(), Frame + 11);
 			USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get());
 			FlushRenderingCommands();
-			USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+			USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 			Actual.Reset(); QueueRead(Texture, W, H, Actual);
 			if (Texture) Texture->UpdateResource();
 			FlushRenderingCommands();
@@ -164,7 +164,7 @@ bool FSpoutP0Pixels::RunTest(const FString&)
 			QueuePattern(Source.Get(), Frame + 21);
 			USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get());
 			FlushRenderingCommands();
-			USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+			USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 			Actual.Reset(); QueueRead(Texture, W, H, Actual); FlushRenderingCommands();
 			TestTrue(TEXT("same-size receive restores writable resource after UpdateResource"), Actual == MakePattern(W, H, Frame + 21));
 		}
@@ -273,7 +273,7 @@ bool FSpoutP0ExternalPixels::RunTest(const FString&)
 		const double ReceiveDeadline = FPlatformTime::Seconds() + 10.0;
 		while (IsReady && (Verified < 8 || Widths.Num() < 2) && FPlatformTime::Seconds() < ReceiveDeadline)
 		{
-			if (USpoutBPFunctionLibrary::SpoutReceiver(FName(*ForeignName), nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear) && Texture)
+			if (USpoutBPFunctionLibrary::SpoutReceiver(FName(*ForeignName), nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false) && Texture)
 			{
 				const int32 W = Texture->GetSizeX(), H = Texture->GetSizeY();
 				TArray<FColor> Actual; QueueRead(Texture, W, H, Actual); FlushRenderingCommands();
@@ -342,16 +342,16 @@ bool FSpoutP0Layouts::RunTest(const FString&)
 	unsigned int ForeignW = 0, ForeignH = 0; HANDLE ForeignHandle = nullptr; DWORD ForeignFormat = 0;
 	TestTrue(TEXT("foreign metadata remains intact after collision"), Foreign.GetSenderInfo(Utf8.Get(), ForeignW, ForeignH, ForeignHandle, ForeignFormat) && ForeignW == 64 && ForeignH == 16 && ForeignFormat == Desc.Format);
 	UMaterialInstanceDynamic* Material = nullptr; UTexture2D* Texture = nullptr;
-	USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+	USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 	FlushRenderingCommands();
 	TSharedPtr<FSpoutSharedSender> Receiver = FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Receiver);
 	TestTrue(TEXT("native size mismatch refused before installation"), Receiver && !Receiver->SharedTexture);
 	Foreign.UpdateSender(Utf8.Get(), 32, 16, Handle, DXGI_FORMAT_R8G8B8A8_UNORM);
-	USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+	USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 	FlushRenderingCommands();
 	TestTrue(TEXT("native format mismatch refused before installation"), Receiver && !Receiver->SharedTexture);
 	Foreign.UpdateSender(Utf8.Get(), 32, 16, Handle, Desc.Format);
-	USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear);
+	USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 	FlushRenderingCommands();
 	TestTrue(TEXT("corrected advertisement can reconnect"), Receiver && !!Receiver->SharedTexture);
 	USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material);

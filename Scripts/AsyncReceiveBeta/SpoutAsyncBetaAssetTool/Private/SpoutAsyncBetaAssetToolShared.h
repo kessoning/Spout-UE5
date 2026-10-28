@@ -18,4 +18,19 @@ namespace SpoutAsyncBetaAsset
 	inline const TCHAR* const Tooltip = TEXT("Moves receive work off the render thread. May improve delivery under load, but can increase frame-time spikes or image latency. ")
 		TEXT("Applies when this actor's receiver opens: every actor receiving the same Spout Name must use the same setting (a conflicting one is refused and logged), ")
 		TEXT("and a change takes effect after Close Receiver, for example on the next Play.");
+
+	/**
+	 * Promotion (-Mode=Promote): Async Receive leaves Beta and is the default. The variable keeps its name, so that
+	 * values saved on placed examples stay attached to it; its label, category, tooltip and class default change.
+	 */
+	inline const TCHAR* const PromotedFriendlyName = TEXT("Async Receive");
+	inline const TCHAR* const PromotedCategory = TEXT("Spout");
+	inline const TCHAR* const PromotedTooltip = TEXT("On by default: a worker thread takes the sender's texture and waits for each copy, so the render thread does not. ")
+		TEXT("Turn it off for the synchronous receive, where the render thread waits for each copy. ")
+		TEXT("Applies when this actor's receiver opens: every actor receiving the same Spout Name must use the same setting (a conflicting one is refused and logged), ")
+		TEXT("and a change takes effect after Close Receiver, for example on the next Play.");
+
+	/** The migration fixture (-Mode=MakeFixtures): receive nodes saved by an earlier plugin, in each state of the input. */
+	inline const TCHAR* const FixtureAssetPath = TEXT("/Game/Migration/BP_MigrationReceive");
+	inline const FName FixtureVarName(TEXT("ChosenReceiveMode"));
 }

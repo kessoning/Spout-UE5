@@ -72,6 +72,33 @@ from the August preparation.
   rather than through the D3D11-on-12 device that shares Unreal's graphics queue.
 - See `Docs/LIMITATIONS.md` (Interop path).
 
+#### Async Receive becomes the default (end of October 2026)
+- **Async Receive is the default receive mode.** The `bAsyncReceive` input of `SpoutReceiver` and
+  `SpoutReceiverWithMaterial` now defaults to true, and so does `FSpoutReceiver::Receive` for C++
+  callers that leave it out. Its display name is "Async Receive" (it was "Async Receive (Beta)").
+  The synchronous receive stays available per receiver: set the input to false.
+- **The receiver example:** its checkbox is "Async Receive" under Spout (it was "Async Receive (Beta)"
+  under Spout > Experimental), on by default, with a new tooltip. The variable keeps its name,
+  `AsyncReceiveBeta`, so values saved on placed examples stay attached. The asset was changed with
+  Unreal's editor API and saved by UE 5.3.
+- **Existing Blueprints:** when a graph loads, Unreal rebuilds its nodes. A receive node's input left
+  at its earlier default (false) takes the new default (true); a checked input and a connected input
+  are kept; a node saved before the input existed gets it at true. Unreal records no difference
+  between a box left unchecked and one unchecked on purpose, so a box unchecked in a graph saved with
+  a pre-release build of this setting turns on. Unchecking it again saves it as a choice. Placed
+  examples that never changed the setting follow the new class default. The plugin does not modify
+  assets.
+- **`r.Spout.GPUReceiver 0` still selects the CPU readback path:** a session that asked for Async
+  Receive steps aside while it is 0 (no worker; `ReceiveModeNote` says why) and at 1 starts its
+  worker again, or reports again why it cannot (an earlier refusal is looked at again). Before, a session that asked for Async Receive used the worker whatever it held.
+- `ESpoutReceiveMode::AsyncBeta` keeps its name, so saved Blueprint values and comparisons stay
+  valid; it is displayed as "Async Receive". Log lines and status notes say "Async Receive".
+- Retention, run limits and synchronous retry variants evaluated during development were not
+  adopted; their development switches (`r.Spout.Dev.Recv.*`) were removed before this release and
+  were never in a published build. The synchronous receive is unchanged.
+- Measured against the synchronous receive, and the limits of those measurements: Docs/LIMITATIONS.md
+  (Async Receive). Every time there is a software observation, not a display measurement.
+
 #### Async Receive (Beta) (October 2026, off by default, not qualified)
 - Added an opt-in **Async Receive (Beta)** setting per receiver: a `bAsyncReceive` input (default
   false, advanced pin, display name "Async Receive (Beta)") on `SpoutReceiver` and

@@ -163,12 +163,12 @@ namespace SpoutHostTest
 		bool Bound=false;
 		for(auto* Mesh : Meshes) if(auto* MID=Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0))) Bound |= MID->K2_GetTextureParameterValue(TEXT("SpoutTexture")) != nullptr;
 		if (Verified<64 || Widths.Num()<2 || !Bound) { Error=FString::Printf(TEXT("shipped receiver failed sustained Blueprint/material/resize qualification (%d frames, %d sizes, bound=%d)"),Verified,Widths.Num(),Bound); return false; }
-		// Async Receive (Beta) is off unless an instance sets it. This spawned example keeps the class default, so its
-		// session must have asked for, and run, the synchronous receive.
+		// Async Receive is on unless an instance turns it off. This spawned example keeps the class default, so its
+		// session must have asked for, and run, Async Receive.
 		const FSpoutStreamStatus ExampleStatus=USpoutBPFunctionLibrary::GetSpoutStreamStatus(ReceiverName,ESpoutType::Receiver);
-		const bool bExampleSynchronous=ExampleStatus.RequestedReceiveMode==ESpoutReceiveMode::Synchronous && ExampleStatus.EffectiveReceiveMode==ESpoutReceiveMode::Synchronous;
-		if (FReport* Report=FReport::Get()) Report->SetField(TEXT("shippedReceiverDefaultSynchronous"),bExampleSynchronous?TEXT("true"):TEXT("false"));
-		if (!bExampleSynchronous) { Error=TEXT("the shipped receiver example with its default setting did not run the synchronous receive"); return false; }
+		const bool bExampleAsync=ExampleStatus.RequestedReceiveMode==ESpoutReceiveMode::AsyncBeta && ExampleStatus.EffectiveReceiveMode==ESpoutReceiveMode::AsyncBeta;
+		if (FReport* Report=FReport::Get()) Report->SetField(TEXT("shippedReceiverDefaultAsyncReceive"),bExampleAsync?TEXT("true"):TEXT("false"));
+		if (!bExampleAsync) { Error=FString::Printf(TEXT("the shipped receiver example with its default setting did not run Async Receive (note '%s')"),*ExampleStatus.ReceiveModeNote); return false; }
 		Receiver->Destroy(); FlushRenderingCommands();
 		if (USpoutBPFunctionLibrary::GetSpoutStreamStatus(ReceiverName,ESpoutType::Receiver).bActive) { Error=TEXT("shipped receiver EndPlay did not close its session"); return false; }
 		SetEvent(Stop);
@@ -233,10 +233,10 @@ namespace SpoutHostTest
 			const double Deadline=FPlatformTime::Seconds()+10.0;
 			while (ReadyToRead && (Verified<8 || Widths.Num()<2) && FPlatformTime::Seconds()<Deadline)
 			{
-				if (USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(FName(*Name),nullptr,NAME_None,Texture,nullptr,ESpoutColorSpace::Linear) && Texture)
+				if (USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(FName(*Name),nullptr,NAME_None,Texture,nullptr,ESpoutColorSpace::Linear,/*bAsyncReceive: the synchronous GPU and CPU paths*/ false) && Texture)
 				{
 					const auto Pixels=ReadPixels(Texture->GetResource(),Texture->GetSizeX(),Texture->GetSizeY());
-					// Nothing asked for Async Receive (Beta) here: the session must request and run the synchronous receive.
+					// This receiver asked for the synchronous receive: the session must request and run it.
 					const FSpoutStreamStatus Status=USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName(*Name),ESpoutType::Receiver);
 					bSynchronous &= Status.RequestedReceiveMode==ESpoutReceiveMode::Synchronous && Status.EffectiveReceiveMode==ESpoutReceiveMode::Synchronous;
 					if (Pixels.Num() && Pixels[0].A==255)
@@ -251,9 +251,9 @@ namespace SpoutHostTest
 			}
 			SetEvent(Stop); const bool Stopped=FinishPeer(Peer,3.0);
 			if (!Stopped || !Match || Verified<8 || Widths.Num()<2) { Error=TEXT("native sender pixels, progress, resize, or shutdown failed"); return false; }
-			if (!bSynchronous) { Error=TEXT("a receiver that did not ask for Async Receive (Beta) did not run the synchronous receive"); return false; }
+			if (!bSynchronous) { Error=TEXT("a receiver that asked for the synchronous receive did not run it"); return false; }
 		}
-		// Async Receive (Beta), asked for by this one receiver, from the same independent native sender: exact pixels
+		// Async Receive, asked for explicitly by this one receiver, from the same independent native sender: exact pixels
 		// across the sender's resizes (every size change is a new sender identity, so a new worker), every verified frame
 		// read while the status reported the asynchronous path as effective, the request recorded throughout, no
 		// fallback note, and the receiver inactive after Close Receiver.
@@ -300,7 +300,7 @@ namespace SpoutHostTest
 			}
 			if (!Stopped || !Match || !bRequested || !Note.IsEmpty() || Verified<8 || Widths.Num()<2 || !bInactive)
 			{
-				Error=FString::Printf(TEXT("Async Receive (Beta) from the native sender failed (stopped %d, match %d, requested %d, final note '%s', notes seen %d, verified %d, sizes %d, inactive after close %d)"),
+				Error=FString::Printf(TEXT("Async Receive from the native sender failed (stopped %d, match %d, requested %d, final note '%s', notes seen %d, verified %d, sizes %d, inactive after close %d)"),
 					Stopped?1:0, Match?1:0, bRequested?1:0, *Note, NoteSamples, Verified, Widths.Num(), bInactive?1:0);
 				return false;
 			}

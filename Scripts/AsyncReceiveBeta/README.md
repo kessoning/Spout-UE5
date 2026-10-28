@@ -1,7 +1,7 @@
-# Async Receive (Beta): example asset and validation tools
+# Async Receive: example asset and validation tools
 
-Validation and authoring tools for the per-receiver Async Receive (Beta) setting. None of this is part of
-the plugin or of a release archive.
+Validation and authoring tools for the per-receiver Async Receive setting. The folder and some names still say
+"Beta" from when the setting was an opt-in beta. None of this is part of the plugin or of a release archive.
 
 ## `SpoutAsyncBetaAssetTool` (editor-only module)
 
@@ -14,9 +14,11 @@ Commandlet `-run=SpoutAsyncBetaAsset`:
 
 | Mode | What it does |
 |---|---|
-| `Inspect` | Reports the example's variables, the generated property's editor flags and metadata (DisplayName, Category, ToolTip, instance-editable), its class default, how the receive node's `bAsyncReceive` input is connected, the compile result, and which engine saved the package. Reconstructs the receive nodes against the compiled plugin first, so an unmigrated asset shows what an old graph becomes when opened (the new pin, default false). With `-Map=`, also the saved values of the example actors in that level. |
+| `Inspect` | Reports the example's variables, the generated property's editor flags and metadata (DisplayName, Category, ToolTip, instance-editable), its class default, how the receive node's `bAsyncReceive` input is connected, the compile result, and which engine saved the package. Reconstructs the receive nodes against the compiled plugin first, so an unmigrated asset shows what an old graph becomes when opened (the new pin at the plugin's default). With `-Map=`, also the saved values of the example actors in that level; with `-Asset=`, another Blueprint than the example (each receive node's input value, creation default and links are reported). |
 | `Migrate` | Adds the instance-editable variable `AsyncReceiveBeta` (display name "Async Receive (Beta)", default false, category `Spout\|Experimental`, the setting's tooltip plus the apply rule) and connects it to the `Async Receive (Beta)` input of every receive node of the example. Compiles, and saves with the running engine. Refuses an already migrated asset. |
-| `MakeLevel` | Saves a validation level with one example actor (the example always receives the name `Spout`): with `-AsyncOn` the placed instance has Async Receive (Beta) set, without it the instance keeps the class default (false). |
+| `MakeLevel` | Saves a validation level with one example actor (the example always receives the name `Spout`): with `-AsyncOn` the placed instance has the setting set to true, with `-AsyncOff` set to false, and with neither it keeps the class default. A value equal to the class default is not saved with the level. |
+| `Promote` | Makes Async Receive the example's default: the example's variable keeps its name (`AsyncReceiveBeta`) and its connections; its display name becomes "Async Receive", its category Spout, its tooltip the one without "Beta", and its class default true. Compiles, checks that the class default is true, and saves with the running engine. Refuses an example without the variable or one already promoted. |
+| `MakeFixtures` | Run with an earlier plugin: saves `/Game/Migration/BP_MigrationReceive`, an actor Blueprint with receive nodes in each state of the input, named by their comment (`unchecked`, `checked`, `connected` to a bool variable, `material-unchecked`). `Inspect -Asset=/Game/Migration/BP_MigrationReceive` under a later plugin then reports each node's input after Unreal's reconstruction (value, creation default, links). |
 
 The editor console command `SpoutAsyncBeta.DetailsShot <map> <actor label> <out.png> [quit]`, run in the
 full editor, renders the editor's own Details panel of that actor's Spout categories to a PNG. The

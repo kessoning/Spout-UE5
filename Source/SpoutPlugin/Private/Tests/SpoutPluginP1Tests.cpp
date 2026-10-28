@@ -92,32 +92,32 @@ bool FSpoutP1Fanout::RunTest(const FString&)
 		Upload(Source.Get(), 19);
 		USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
 		UTexture2D* Texture = nullptr; UMaterialInstanceDynamic* Material = nullptr;
-		TestTrue(TEXT("texture-only consumer accepted first"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::Linear));
+		TestTrue(TEXT("texture-only consumer accepted first"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false));
 		FlushRenderingCommands();
 		for (UTextureRenderTarget2D* Target : { A.Get(), B.Get() })
 		{
-			TestTrue(TEXT("late consumer accepted while sender is paused"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, Target, ESpoutColorSpace::Linear));
+			TestTrue(TEXT("late consumer accepted while sender is paused"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, Target, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false));
 			TestTrue(TEXT("late target receives full ramp and alpha"), Read(Target->GetResource(), 256, 16) == Pattern(256, 16, 19));
 		}
 		A->UpdateResource();
-		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, A.Get(), ESpoutColorSpace::Linear);
+		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, A.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 		TestTrue(TEXT("recreated target catches up without upstream publication"), Read(A->GetResource(), 256, 16) == Pattern(256, 16, 19));
 		if (Texture) Texture->UpdateResource();
-		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::Linear);
+		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 		TestTrue(TEXT("recreated shared output restores last completed image"), Texture && Read(Texture->GetResource(), 256, 16) == Pattern(256, 16, 19));
-		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, Bad.Get(), ESpoutColorSpace::Linear);
+		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, Bad.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 		TestEqual(TEXT("incompatible target width remains unchanged"), Bad->SizeX, 8);
 		TestEqual(TEXT("incompatible target height remains unchanged"), Bad->SizeY, 8);
 		UTexture2D* Before = Texture;
-		TestFalse(TEXT("conflicting color request refused"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::SRGB));
+		TestFalse(TEXT("conflicting color request refused"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::SRGB, /*bAsyncReceive: the synchronous receive under test*/ false));
 		TestTrue(TEXT("conflict leaves output identity unchanged"), Texture == Before);
 		if (!GPU)
 		{
 			Upload(Source.Get(), 23); USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
 			SpoutReceiverInternal::FailNextCpuReadbackForTests();
-			USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, B.Get(), ESpoutColorSpace::Linear);
+			USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, B.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 			TestTrue(TEXT("failed readback keeps previous completed output"), Read(B->GetResource(), 256, 16) == Pattern(256, 16, 19));
-			USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, B.Get(), ESpoutColorSpace::Linear);
+			USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, B.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 			TestTrue(TEXT("retry receives last upstream image without new publication"), Read(B->GetResource(), 256, 16) == Pattern(256, 16, 23));
 		}
 		USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material); USpoutBPFunctionLibrary::CloseSender(Name); FlushRenderingCommands();
@@ -181,7 +181,7 @@ bool FSpoutP1Color::RunTest(const FString&)
 		{
 			const FString ModeCase = Case + TEXT(", receiver ") + UEnum::GetValueAsString(Mode);
 			UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr;
-			const bool bAccepted = USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, Mode);
+			const bool bAccepted = USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, Mode, /*bAsyncReceive: the synchronous receive under test*/ false);
 			TestTrue(ModeCase + TEXT(": accepted"), bAccepted && Texture);
 			if (Texture)
 			{

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
-// The asynchronous receive, Async Receive (Beta): off by default and requested per receiver session. Its
+// The asynchronous receive, Async Receive: the default, chosen per receiver session. Its
 // per-session contract (default, independent names, same-name conflicts, close and reopen, fallback) is tested with
 // real transfers in SpoutPluginAsyncBetaTests.cpp.
 //
@@ -32,7 +32,7 @@ bool FSpoutAsyncOffByDefault::RunTest(const FString&)
 {
 	// r.Spout.AsyncReceive is retired: still registered so old command lines do not fail, 0 by default, and
 	// setting it only logs that it is ignored. That it selects nothing is tested with real transfers in
-	// SpoutPlugin.AsyncBeta.DefaultIsSynchronousAndTheRetiredSettingIsIgnored.
+	// SpoutPlugin.AsyncBeta.DefaultIsAsyncReceiveAndSynchronousIsSelectable.
 	IConsoleVariable* Variable = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive"));
 	if (!Variable)
 	{

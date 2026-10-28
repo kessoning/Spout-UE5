@@ -19,16 +19,16 @@
   "Docs/manual_screenshots/SP-017_add-sender-node.png",
   "Docs/manual_screenshots/SP-018_timer-setup.png"
  ],
- "basis": "recorded for the committed PDF: the manual was regenerated from these inputs and its text compared page by page with the committed PDF (pypdf 6.19.0): identical on all 17 pages; the committed PDF's bytes are kept",
+ "basis": "generated",
  "inputs": {
-  "Docs/USER_MANUAL_SOURCE.md": "9c349df1d7b39a21c1e41ebcdf1623b10c69ef49f861129d8096d73f9e7bd845",
-  "Docs/build_user_manual.py": "a94130ee2c7314b88594781a5fa412bdac1ab2efca400150adcddbbb07477995",
+  "Docs/USER_MANUAL_SOURCE.md": "f42dd52fdf23f5b50e6aa82dd5234258ea7f4b323b6139571e37da112a6d0620",
+  "Docs/build_user_manual.py": "c134d44375fc7ca074678d7bc6be254919c36a5d878d53650075d8c53bf07202",
   "SpoutPlugin.uplugin": "2423d19cbdb4c9c43cca0876b5c574846ce773f2caf0db9f2a79667adfcca018",
   "build.ps1": "ff82c13ea6ee42da78f52188831bdf4923fddef82cb06d57333cd804dd4f4b7c"
  },
  "pdf": {
   "path": "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf",
-  "sha256": "25a50d26fdbb7989f9d4263616518ffd0fe66d4c9d73799d01d3c768e0898aa0"
+  "sha256": "ef9c546f075830fec4c66762831e2e3b682c1bb8efe325bab07bcc742b05c046"
  },
  "what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them"
 }
