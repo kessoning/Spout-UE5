@@ -327,6 +327,7 @@ TUniquePtr<FSpoutAsyncStream> FSpoutAsyncStream::Create(const FName& Name, int32
 	{
 		Stream->NumSlots = MaxStreamSlots;
 		Stream->HoldMaxAgeCycles = static_cast<int64>(double(HoldMaxAgeUs) / 1e6 / FPlatformTime::GetSecondsPerCycle64());
+		Stream->HoldMaxRun = SpoutLimits::DevRecvHoldMaxRun();
 		Stream->Pool = SpoutAsync::FSlotPool(MaxStreamSlots, 2);
 	}
 	if (!Stream->Initialize(PixelFormat, OutWhy))
@@ -511,8 +512,9 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 			*Name.ToString(), Generation, WorkerSeconds.load(), Stats.Polls, Stats.Published, Stats.Consumed, Stats.ReplacedUnread, Stats.NoFreeSlot, Stats.AccessRefused,
 			Stats.CopyFailed, Stats.CompletionTimeouts, Stats.RuleViolations, Stats.InFlightWaits, Stats.InFlightWaitsDelivered,
 			double(Stats.InFlightWaitMicroseconds) / 1000.0, double(WorkerCpu100ns.load()) / 10000.0,
-			HoldMaxAgeCycles > 0 ? *FString::Printf(TEXT(" Bounded retention (development switch, %.0f us): %lld calls took the older of two unread images, %lld found it older than the bound, %lld found the source faster than the reader."),
-				double(HoldMaxAgeCycles) * FPlatformTime::GetSecondsPerCycle64() * 1e6, Stats.HoldTakes, Stats.HoldTooOld, Stats.HoldRateBlocked) : TEXT(""));
+			HoldMaxAgeCycles > 0 ? *FString::Printf(TEXT(" Bounded retention (development switch, %.0f us): %lld calls took the older of two unread images, %lld found it older than the bound, %lld found the source faster than the reader.%s"),
+				double(HoldMaxAgeCycles) * FPlatformTime::GetSecondsPerCycle64() * 1e6, Stats.HoldTakes, Stats.HoldTooOld, Stats.HoldRateBlocked,
+				HoldMaxRun > 0 ? *FString::Printf(TEXT(" Run limit %d: %lld calls took the newest after that many older images in a row."), HoldMaxRun, Stats.HoldRunLimited) : TEXT("")) : TEXT(""));
 	}
 	// The objects go to the retirement list with the fence values that prove their work finished: the worker's copies
 	// (written fence, or the event query after a failed signal) and the copies Unreal queued out of the slots (read
@@ -968,6 +970,10 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 				{
 					++HoldRateBlocked;
 				}
+				else if (HoldMaxRun > 0 && HoldRun >= HoldMaxRun)
+				{
+					++HoldRunLimited;
+				}
 				else if (Older && static_cast<int64>(FPlatformTime::Cycles64()) - Older->Tag <= HoldMaxAgeCycles)
 				{
 					Take = SpoutAsync::ETake::Oldest;
@@ -979,6 +985,8 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 				}
 			}
 			Result = Pool.Consume(Generation, LastReadValue + 1, Taken, Take);
+			// The run of older-image takes ends at any call that takes the newest or finds nothing new.
+			HoldRun = Take == SpoutAsync::ETake::Oldest && Result == SpoutAsync::EConsume::Consumed ? HoldRun + 1 : 0;
 			SPOUT_INSTRUMENT(bTookOlder = Take == SpoutAsync::ETake::Oldest && Result == SpoutAsync::EConsume::Consumed; LeftUnread = Pool.ReadyCount();)
 			if (Result == SpoutAsync::EConsume::Consumed)
 			{
@@ -1080,6 +1088,7 @@ FSpoutAsyncStats FSpoutAsyncStream::GetStats() const
 		Out.HoldTakes = HoldTakes;
 		Out.HoldTooOld = HoldTooOld;
 		Out.HoldRateBlocked = HoldRateBlocked;
+		Out.HoldRunLimited = HoldRunLimited;
 	}
 	Out.NoFreeSlot = NoSlotSkips.load();
 	Out.InFlightWaits = InFlightWaits.load();

@@ -980,6 +980,7 @@ bool FSpoutRecvDevDefaults::RunTest(const FString&)
 	TestEqual(TEXT("the worker waits r.Spout.AccessWaitMs for access"), SpoutLimits::DevRecvWorkerAccessWaitMs(), SpoutLimits::AccessWaitMs());
 	TestEqual(TEXT("the in-flight wait is bounded at 1 ms per frame"), SpoutLimits::DevRecvInFlightWaitUs(), 1000);
 	TestEqual(TEXT("no retention"), SpoutLimits::DevRecvHoldMaxAgeUs(), 0);
+	TestEqual(TEXT("no run limit on the retention"), SpoutLimits::DevRecvHoldMaxRun(), 0);
 	TestEqual(TEXT("one synchronous attempt per frame"), SpoutLimits::DevRecvSyncRetry(), 0);
 	TestFalse(TEXT("the synchronous first attempt waits for access"), SpoutLimits::DevRecvSyncFirstTryOnly());
 	{
@@ -1133,6 +1134,67 @@ bool FSpoutRecvDevRetention::RunTest(const FString&)
 		const FSpoutAsyncStats After = AB::WorkerStats(Name);
 		TestEqual(TEXT("the older one was found beyond the bound"), After.HoldTooOld - BeforeOld.HoldTooOld, int64(1));
 		TestEqual(TEXT("and replaced unread"), After.ReplacedUnread - BeforeOld.ReplacedUnread, int64(1));
+	}
+	TestEqual(TEXT("no rule violation in the slot bookkeeping"), AB::WorkerStats(Name).RuleViolations, int64(0));
+	AB::CloseBoth(Name, C);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevRetentionRun, "SpoutPlugin.RecvDev.RetentionRunLimitTakesTheNewestAfterItsLimit", SPOUT_ASYNC_BETA_FLAGS)
+bool FSpoutRecvDevRetentionRun::RunTest(const FString&)
+{
+	namespace AB = SpoutAsyncBetaTests;
+	namespace RD = SpoutRecvDevTests;
+	if (!AB::RequireSharedSlot(*this)) return false;
+	FSpoutAsyncDevice::Get().ReenableForTest();
+	RD::FVariableScope Hold(TEXT("r.Spout.Dev.Recv.HoldMaxAgeUs"), TEXT("50000"));
+	RD::FVariableScope Run(TEXT("r.Spout.Dev.Recv.HoldMaxRun"), TEXT("1"));
+	const FName Name = AB::UniqueName(TEXT("DevHoldRun"));
+	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
+	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
+	auto PublishAndWait = [&](int32 Sequence, AB::FPixels& Out)
+	{
+		const int64 Published = AB::WorkerStats(Name).Published;
+		AB::Upload(Source.Get(), Sequence);
+		AB::ReadPixels(AB::SourceTexture(Source.Get()), Out);
+		AB::Send(Name, Source.Get());
+		return AB::WaitUntil([&] { return AB::WorkerStats(Name).Published >= Published + 1; }, 2.0) > 0.0;
+	};
+	AB::FPixels S2, S3, S4, S5, S6;
+	const FSpoutAsyncStats Before = AB::WorkerStats(Name);
+	// Two unread: the call takes the older (a run of one).
+	if (PublishAndWait(2, S2) && PublishAndWait(3, S3))
+	{
+		AB::Call(Name, C);
+		TestTrue(TEXT("the first call takes the older of two"), RD::Holds(C, S2));
+		// One more published: two unread again, but the run is at its limit, so the call takes the newest.
+		if (PublishAndWait(4, S4))
+		{
+			AB::Call(Name, C);
+			TestTrue(TEXT("at the run limit the call takes the newest"), RD::Holds(C, S4));
+			const FSpoutAsyncStats Mid = AB::WorkerStats(Name);
+			TestEqual(TEXT("one older-image take"), Mid.HoldTakes - Before.HoldTakes, int64(1));
+			TestEqual(TEXT("one call limited by the run"), Mid.HoldRunLimited - Before.HoldRunLimited, int64(1));
+			TestEqual(TEXT("the image behind it was replaced unread"), Mid.ReplacedUnread - Before.ReplacedUnread, int64(1));
+		}
+		else
+		{
+			AddError(TEXT("the third image was not published"));
+		}
+	}
+	else
+	{
+		AddError(TEXT("two images were not published unread"));
+	}
+	// A call that finds nothing new ends the run (and lets the rate guard's average fall back); the next pair is held again.
+	AB::Call(Name, C);
+	const FSpoutAsyncStats BeforeAgain = AB::WorkerStats(Name);
+	if (PublishAndWait(5, S5) && PublishAndWait(6, S6))
+	{
+		AB::Call(Name, C);
+		TestTrue(TEXT("after the run ended the older of two is taken again"), RD::Holds(C, S5));
+		TestEqual(TEXT("one more older-image take"), AB::WorkerStats(Name).HoldTakes - BeforeAgain.HoldTakes, int64(1));
 	}
 	TestEqual(TEXT("no rule violation in the slot bookkeeping"), AB::WorkerStats(Name).RuleViolations, int64(0));
 	AB::CloseBoth(Name, C);

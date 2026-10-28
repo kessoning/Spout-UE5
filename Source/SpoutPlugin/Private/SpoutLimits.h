@@ -139,6 +139,13 @@ namespace SpoutLimits
 	int32 DevRecvHoldMaxAgeUs();
 
 	/**
+	 * r.Spout.Dev.Recv.HoldMaxRun (default 0 = no limit, clamped to 0..8): with the bounded retention on, at most this
+	 * many receive calls in a row take the older of two unread images; the next call that finds two takes the newest.
+	 * It ends a stretch in which every call shows the image one publication behind. Read when a stream is created.
+	 */
+	int32 DevRecvHoldMaxRun();
+
+	/**
 	 * r.Spout.Dev.Recv.SyncRetry (default 0): the synchronous shared-slot receive's second attempt. 0: none. 1: a
 	 * receive whose access was refused tries once more at the end of the same render frame. 2: as 1, and while the
 	 * first attempt keeps failing it is skipped and only the end-of-frame attempt is made (probing the first attempt

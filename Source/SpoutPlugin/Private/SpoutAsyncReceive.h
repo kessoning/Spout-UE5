@@ -159,6 +159,8 @@ struct FSpoutAsyncStats
 	int64 HoldTooOld = 0;
 	/** ... and calls that found two unread images while the source was faster than the reader (the rate guard). */
 	int64 HoldRateBlocked = 0;
+	/** ... and calls that found two unread images after r.Spout.Dev.Recv.HoldMaxRun older-image takes in a row. */
+	int64 HoldRunLimited = 0;
 };
 
 class FSpoutAsyncStream final : public FRunnable
@@ -275,11 +277,15 @@ private:
 	/** Slots of this stream (three, or four with the bounded retention) and the retention's age bound in cycles (0: off). Fixed by Create. */
 	int32 NumSlots = 3;
 	int64 HoldMaxAgeCycles = 0;
-	/** Bounded retention: its rate guard and counters, guarded by StateMutex. */
+	/** The retention's limit on older-image takes in a row (0: none). Fixed by Create. */
+	int32 HoldMaxRun = 0;
+	/** Bounded retention: its rate guard, the current run of older-image takes and its counters, guarded by StateMutex. */
 	SpoutAsync::FRateGuard Rate;
+	int32 HoldRun = 0;
 	int64 HoldTakes = 0;
 	int64 HoldTooOld = 0;
 	int64 HoldRateBlocked = 0;
+	int64 HoldRunLimited = 0;
 
 	// Unreal's device: the slots and both fences live there.
 	Microsoft::WRL::ComPtr<ID3D12Fence> WrittenFence;
