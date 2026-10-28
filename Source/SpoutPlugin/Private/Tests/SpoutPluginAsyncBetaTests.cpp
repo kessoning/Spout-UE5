@@ -976,7 +976,7 @@ namespace SpoutRecvDevTests
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevDefaults, "SpoutPlugin.RecvDev.DefaultsAreCandidateSevensBehaviour", SPOUT_ASYNC_BETA_FLAGS)
 bool FSpoutRecvDevDefaults::RunTest(const FString&)
 {
-	TestFalse(TEXT("the frame-sync open check takes its lock"), SpoutLimits::DevRecvLockFreeOpenCheck());
+	// The frame-sync open check is not a switch; it has its own test (SpoutPlugin.AccessWait.TheFrameSyncOpenCheck...).
 	TestEqual(TEXT("the worker waits r.Spout.AccessWaitMs for access"), SpoutLimits::DevRecvWorkerAccessWaitMs(), SpoutLimits::AccessWaitMs());
 	TestEqual(TEXT("the in-flight wait is bounded at 1 ms per frame"), SpoutLimits::DevRecvInFlightWaitUs(), 1000);
 	TestEqual(TEXT("no retention"), SpoutLimits::DevRecvHoldMaxAgeUs(), 0);
@@ -1006,52 +1006,44 @@ bool FSpoutRecvDevDefaults::RunTest(const FString&)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevOpenCheck, "SpoutPlugin.RecvDev.TheLockFreeOpenCheckDoesNotWaitForAnAccessWait", SPOUT_ASYNC_BETA_FLAGS)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutRecvDevOpenCheck, "SpoutPlugin.AccessWait.TheFrameSyncOpenCheckDoesNotWaitForAnAccessWait", SPOUT_ASYNC_BETA_FLAGS)
 bool FSpoutRecvDevOpenCheck::RunTest(const FString&)
 {
+	// The open check reads its flag without the frame sync's lock, so a receive call cannot wait there for an Async
+	// Receive worker that holds the lock through its access wait.
 	namespace RD = SpoutRecvDevTests;
-	for (const bool bLockFree : { false, true })
+	RD::FHoldingBackend* Fake = new RD::FHoldingBackend();
+	FEvent* Entered = FPlatformProcess::GetSynchEventFromPool(false);
+	FEvent* Proceed = FPlatformProcess::GetSynchEventFromPool(true);
+	Fake->Entered = Entered;
+	Fake->Proceed = Proceed;
 	{
-		RD::FVariableScope Switch(TEXT("r.Spout.Dev.Recv.LockFreeOpenCheck"), bLockFree ? TEXT("1") : TEXT("0"));
-		RD::FHoldingBackend* Fake = new RD::FHoldingBackend();
-		FEvent* Entered = FPlatformProcess::GetSynchEventFromPool(false);
-		FEvent* Proceed = FPlatformProcess::GetSynchEventFromPool(true);
-		Fake->Entered = Entered;
-		Fake->Proceed = Proceed;
-		{
-			FSpoutFrameSync Sync{TUniquePtr<ISpoutFrameSyncBackend>(Fake)};
-			TestTrue(TEXT("the fake opens"), Sync.Open("SpoutRecvDevOpenCheck"));
-			// Another thread waits for access, inside the frame sync's lock, until released here.
-			TFuture<void> Holder = Async(EAsyncExecution::Thread, [&Sync]() { FSpoutTextureAccessScope Access(Sync, nullptr); });
-			TestTrue(TEXT("the other thread is inside its access wait"), Entered->Wait(5000));
-			// Released 300 ms from now, from yet another thread, so that a blocked check here ends.
-			TFuture<void> Releaser = Async(EAsyncExecution::Thread, [Proceed]() { FPlatformProcess::Sleep(0.3f); Proceed->Trigger(); });
-			const double Start = FPlatformTime::Seconds();
-			const bool bOpen = Sync.IsOpen();
-			const double CheckMs = (FPlatformTime::Seconds() - Start) * 1000.0;
-			TestTrue(TEXT("the stream is open"), bOpen);
-			if (bLockFree)
-			{
-				TestTrue(FString::Printf(TEXT("with the switch on the check did not wait for the access wait (%.1f ms)"), CheckMs), CheckMs < 100.0);
-			}
-			else
-			{
-				TestTrue(FString::Printf(TEXT("with the switch off the check waited for the frame sync's lock, as candidate 7 does (%.1f ms)"), CheckMs), CheckMs > 150.0);
-			}
-			Releaser.Wait();
-			Holder.Wait();
-			// The access scope's own bound reaches the backend; without one it is r.Spout.AccessWaitMs.
-			Fake->Entered = nullptr;
-			Fake->Proceed = nullptr;
-			Fake->Timeouts.Reset();
-			{ FSpoutTextureAccessScope Access(Sync, nullptr, 7); }
-			{ FSpoutTextureAccessScope Access(Sync, nullptr); }
-			TestTrue(TEXT("an explicit bound and the default reach the backend"), Fake->Timeouts.Num() == 2 && Fake->Timeouts[0] == 7 && Fake->Timeouts[1] == SpoutLimits::AccessWaitMs());
-			Sync.Close();
-		}
-		FPlatformProcess::ReturnSynchEventToPool(Entered);
-		FPlatformProcess::ReturnSynchEventToPool(Proceed);
+		FSpoutFrameSync Sync{TUniquePtr<ISpoutFrameSyncBackend>(Fake)};
+		TestTrue(TEXT("the fake opens"), Sync.Open("SpoutRecvDevOpenCheck"));
+		// Another thread waits for access, inside the frame sync's lock, until released here.
+		TFuture<void> Holder = Async(EAsyncExecution::Thread, [&Sync]() { FSpoutTextureAccessScope Access(Sync, nullptr); });
+		TestTrue(TEXT("the other thread is inside its access wait"), Entered->Wait(5000));
+		// Released 300 ms from now, from yet another thread, so that a blocked check here would end.
+		TFuture<void> Releaser = Async(EAsyncExecution::Thread, [Proceed]() { FPlatformProcess::Sleep(0.3f); Proceed->Trigger(); });
+		const double Start = FPlatformTime::Seconds();
+		const bool bOpen = Sync.IsOpen();
+		const double CheckMs = (FPlatformTime::Seconds() - Start) * 1000.0;
+		TestTrue(TEXT("the stream is open"), bOpen);
+		TestTrue(FString::Printf(TEXT("the check did not wait for the access wait (%.1f ms)"), CheckMs), CheckMs < 100.0);
+		Releaser.Wait();
+		Holder.Wait();
+		// The access scope's own bound reaches the backend; without one it is r.Spout.AccessWaitMs.
+		Fake->Entered = nullptr;
+		Fake->Proceed = nullptr;
+		Fake->Timeouts.Reset();
+		{ FSpoutTextureAccessScope Access(Sync, nullptr, 7); }
+		{ FSpoutTextureAccessScope Access(Sync, nullptr); }
+		TestTrue(TEXT("an explicit bound and the default reach the backend"), Fake->Timeouts.Num() == 2 && Fake->Timeouts[0] == 7 && Fake->Timeouts[1] == SpoutLimits::AccessWaitMs());
+		Sync.Close();
+		TestFalse(TEXT("the check sees the close"), Sync.IsOpen());
 	}
+	FPlatformProcess::ReturnSynchEventToPool(Entered);
+	FPlatformProcess::ReturnSynchEventToPool(Proceed);
 	return true;
 }
 

@@ -119,6 +119,15 @@ from the August preparation.
   test sender (300 s runs), distinct-frame delivery was 97.3 to 99.8 % at 59.94, 60 and 60.06 fps,
   against 96.6 % before at 59.94 fps, with 8 to 289 ms of waiting per 300 s; frames near that
   alignment can still be lost. Async Receive stays opt-in and off by default.
+- Render-thread stall fix (end of October 2026): the receive call's check that a stream's frame
+  sync is open no longer takes the frame sync's lock. The Async Receive worker holds that lock while
+  it waits for the sender's access (up to `r.Spout.AccessWaitMs`), so the render thread could wait
+  there before the receive call proper, unbounded by the 1 ms in-flight limit. The check's answer
+  was advisory at every caller before as well (everything that needs an open stream checks again
+  under the lock), so it now reads the flag directly; senders and synchronous receivers use the same
+  check. On the RTX 2060 laptop (180 s runs at 59.94 and 60.06 fps), render-thread waits above 1 ms
+  before the call fell from 1 to 15 per run (one of 17 ms) to 1, and with four receive streams from
+  79 to 1; delivery and latency did not change measurably. Internal; no setting changed.
 
 #### Experimental receive settings (October 2026, off by default, not yet qualified)
 - Added four experimental console variables for the receive path: `r.Spout.FrameCountRecheck`,

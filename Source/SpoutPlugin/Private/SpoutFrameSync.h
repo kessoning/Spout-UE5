@@ -222,6 +222,7 @@ public:
 	 */
 	void Close();
 
+	/** Lock-free and advisory: the stream may close or open right after it answers (see the definition). */
 	bool IsOpen() const;
 
 	/** Sender: call after GPU copy completion, before releasing access. */
@@ -403,7 +404,7 @@ private:
 	/** Null-terminated copy of the name Open() succeeded with. Empty when nothing is open. */
 	TArray<ANSICHAR> OpenUtf8Name;
 
-	/** Written under Mutex only. An atomic so that IsOpen may read it without Mutex (r.Spout.Dev.Recv.LockFreeOpenCheck). */
+	/** Written under Mutex only. An atomic so that IsOpen reads it without Mutex. */
 	std::atomic<bool> bOpen{false};
 	bool bAccessHeld = false;
 	/** Whether a frame is pending, and with the experimental settings on the read history. */

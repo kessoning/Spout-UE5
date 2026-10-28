@@ -317,14 +317,12 @@ void FSpoutFrameSync::Close()
 
 bool FSpoutFrameSync::IsOpen() const
 {
-	// Development switch: without the lock, the receive call cannot wait here for an Async Receive worker
-	// that holds Mutex through its access wait. bOpen is written under Mutex only.
-	if (SpoutLimits::DevRecvLockFreeOpenCheck())
-	{
-		return bOpen.load();
-	}
-	FScopeLock Lock(&Mutex);
-	return bOpen;
+	// Read without Mutex. An Async Receive worker holds Mutex through its access wait (up to r.Spout.AccessWaitMs), and
+	// taking it here would make the render thread's receive call wait for that worker.
+	// The answer is advisory at every call site, locked or not: a caller that finds the stream closed opens it (Open
+	// re-checks under Mutex), and everything that relies on an open stream re-checks bOpen under Mutex. bOpen is written
+	// under Mutex only.
+	return bOpen.load();
 }
 
 void FSpoutFrameSync::PublishFrame()

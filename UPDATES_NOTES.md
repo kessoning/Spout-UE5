@@ -101,6 +101,14 @@ before. It's still not perfect: two
 apps on separate clocks can still drop the odd frame. The Beta checkbox is still off unless you turn it
 on.
 
+Then I found a hidden hiccup in that same Beta mode. Before fetching a picture, Unreal checks that the
+connection is still open, and that little check had to queue behind the background helper whenever
+the helper was waiting for the other app. Usually that was nothing, but now and then Unreal's drawing
+work stood still for several thousandths of a second, once for 17. Now the check just looks without
+queuing. In my tests those stalls went from up to 15 per three-minute run to a single one, and from 79
+to 1 with four streams at once, while the pictures arrived just as often and just as fast as before.
+The normal receive mode and sending use the same check, so they got it too.
+
 Right at the end of the month I changed how sending works, and this one is on for everyone. Sending a
 picture out of Unreal used to make Unreal wait until the copy was done, which on a busy graphics card
 cost frame rate. Now a little helper does that waiting in the background. In my laptop test scene

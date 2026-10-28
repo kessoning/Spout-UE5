@@ -109,14 +109,8 @@ namespace SpoutLimits
 	int32 DevAsyncSendDrainAfter();
 
 	// ---- Receive development switches (development only, not supported settings). Every default is the standard
-	// receive behaviour; each switch selects one experimental variant of the receive path. ----
-
-	/**
-	 * r.Spout.Dev.Recv.LockFreeOpenCheck != 0 (default 0): the receive call's check that a stream's frame sync is open
-	 * reads an atomic instead of taking the frame sync's lock. Async Receive's worker holds that lock through its
-	 * access wait, so with 0 the render thread can wait for it there.
-	 */
-	bool DevRecvLockFreeOpenCheck();
+	// receive behaviour; each switch selects one experimental variant of the receive path. The receive call's open
+	// check is always lock-free and has no switch: FSpoutFrameSync::IsOpen. ----
 
 	/**
 	 * r.Spout.Dev.Recv.WorkerAccessWaitMs (default -1): Async Receive's worker's access wait. -1 uses

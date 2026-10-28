@@ -73,9 +73,6 @@ namespace
 		TEXT("1 also waits for the end of Unreal's frame on its GPU queue, at most 100 ms."),
 		ECVF_Default);
 	// Receive development switches (SpoutLimits.h). Development only; every default is the standard receive behaviour.
-	TAutoConsoleVariable<int32> GSpoutDevRecvLockFreeOpenCheck(TEXT("r.Spout.Dev.Recv.LockFreeOpenCheck"), 0,
-		TEXT("Development switch, not a supported setting. 1: the receive call's frame-sync open check does not take the frame sync's lock. 0 (default): it does."),
-		ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> GSpoutDevRecvWorkerAccessWaitMs(TEXT("r.Spout.Dev.Recv.WorkerAccessWaitMs"), -1,
 		TEXT("Development switch, not a supported setting. Async Receive's worker's access wait in ms, clamped to 0..16; -1 (default): r.Spout.AccessWaitMs."),
 		ECVF_Default);
@@ -130,7 +127,6 @@ int32 SpoutLimits::AsyncReceiveGpuPriority() { return FMath::Clamp(GSpoutAsyncRe
 bool SpoutLimits::SharedSlotInteropRequested() { return GSpoutSharedSlotInterop.GetValueOnAnyThread() != 0; }
 bool SpoutLimits::DevAsyncSend() { return GSpoutDevAsyncSend.GetValueOnAnyThread() != 0; }
 int32 SpoutLimits::DevAsyncSendDrainAfter() { return GSpoutDevAsyncSendDrainAfter.GetValueOnAnyThread() != 0 ? 1 : 0; }
-bool SpoutLimits::DevRecvLockFreeOpenCheck() { return GSpoutDevRecvLockFreeOpenCheck.GetValueOnAnyThread() != 0; }
 uint32 SpoutLimits::DevRecvWorkerAccessWaitMs() { const int32 V = GSpoutDevRecvWorkerAccessWaitMs.GetValueOnAnyThread(); return V < 0 ? AccessWaitMs() : static_cast<uint32>(FMath::Min(V, 16)); }
 int32 SpoutLimits::DevRecvInFlightWaitUs() { return FMath::Clamp(GSpoutDevRecvInFlightWaitUs.GetValueOnAnyThread(), 0, 4000); }
 int32 SpoutLimits::DevRecvHoldMaxAgeUs() { return FMath::Clamp(GSpoutDevRecvHoldMaxAgeUs.GetValueOnAnyThread(), 0, 50000); }
