@@ -406,16 +406,18 @@ namespace SpoutAsync
 		/** A reader call: updates the average and says whether the older of two may be taken. */
 		bool OnCall(std::int64_t LimitPermille = 1030)
 		{
-			Permille += (SinceCall * 1000 - Permille) / 64;
+			// Acc is 64 times the average, so that the integer update has no dead band: a plain "Avg += (x - Avg) / 64"
+			// stops moving within 63 permille of the true rate, and occasional bursts then ratchet it upwards.
+			Acc += SinceCall * 1000 - Acc / 64;
 			SinceCall = 0;
-			return Permille <= LimitPermille;
+			return GetPermille() <= LimitPermille;
 		}
 
-		std::int64_t GetPermille() const { return Permille; }
+		std::int64_t GetPermille() const { return Acc / 64; }
 
 	private:
 		std::int64_t SinceCall = 0;
-		std::int64_t Permille = 1000;
+		std::int64_t Acc = 64 * 1000;
 	};
 
 	/**

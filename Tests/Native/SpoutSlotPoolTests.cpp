@@ -454,8 +454,9 @@ static void RateGuardTests()
 	Check(!bLast, "rate: a reader at half the source's rate never takes the older image");
 	Check(Slow.GetPermille() > 1900, "rate: two publications per call average near two thousand");
 
-	// 101 publications per 100 calls (a source 1 % faster) is allowed; 105 per 100 (5 %) is not.
-	auto Run = [](int Extra) { FRateGuard G; for (int I = 0; I < 2000; ++I) { G.OnPublished(); if (I % 100 < Extra) G.OnPublished(); G.OnCall(); } return G.GetPermille(); };
+	// One more publication every 100 calls (a source 1 % faster) is allowed; one every 20 calls (5 %) is not. Spread evenly, as a
+	// steady rate difference is.
+	auto Run = [](int Extra) { FRateGuard G; for (int I = 0; I < 2000; ++I) { G.OnPublished(); if (I % (100 / Extra) == 0) G.OnPublished(); G.OnCall(); } return G.GetPermille(); };
 	Check(Run(1) <= 1030, "rate: a source 1 % faster stays within the guard");
 	Check(Run(5) > 1030, "rate: a source 5 % faster is outside it");
 
