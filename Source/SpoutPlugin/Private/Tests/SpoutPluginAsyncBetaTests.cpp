@@ -1145,6 +1145,8 @@ bool FSpoutRecvDevSyncRetry::RunTest(const FString&)
 	namespace AB = SpoutAsyncBetaTests;
 	namespace RD = SpoutRecvDevTests;
 	if (!AB::RequireSharedSlot(*this)) return false;
+	// The refused attempts log the plugin's access warning (throttled per receiver), by design.
+	AddExpectedMessage(TEXT("shared-texture access was unavailable"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	// The synchronous sender, so that a send has published when it returns.
 	RD::FVariableScope SyncSend(TEXT("r.Spout.Dev.AsyncSend"), TEXT("0"));
 	for (const int32 Mode : { 0, 1, 2 })
@@ -1203,6 +1205,7 @@ bool FSpoutRecvDevRetryClose::RunTest(const FString&)
 	namespace AB = SpoutAsyncBetaTests;
 	namespace RD = SpoutRecvDevTests;
 	if (!AB::RequireSharedSlot(*this)) return false;
+	AddExpectedMessage(TEXT("shared-texture access was unavailable"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	RD::FVariableScope SyncSend(TEXT("r.Spout.Dev.AsyncSend"), TEXT("0"));
 	RD::FVariableScope Retry(TEXT("r.Spout.Dev.Recv.SyncRetry"), TEXT("1"));
 	const FName Name = AB::UniqueName(TEXT("DevRetryClose"));
