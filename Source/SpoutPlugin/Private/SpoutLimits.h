@@ -107,6 +107,53 @@ namespace SpoutLimits
 	 * fence signalled behind the frame's own work, or 100 ms after the fill. Read per send.
 	 */
 	int32 DevAsyncSendDrainAfter();
+
+	// ---- Receive development switches (development only, not supported settings). Every default is the standard
+	// receive behaviour; each switch selects one experimental variant of the receive path. ----
+
+	/**
+	 * r.Spout.Dev.Recv.LockFreeOpenCheck != 0 (default 0): the receive call's check that a stream's frame sync is open
+	 * reads an atomic instead of taking the frame sync's lock. Async Receive's worker holds that lock through its
+	 * access wait, so with 0 the render thread can wait for it there.
+	 */
+	bool DevRecvLockFreeOpenCheck();
+
+	/**
+	 * r.Spout.Dev.Recv.WorkerAccessWaitMs (default -1): Async Receive's worker's access wait. -1 uses
+	 * r.Spout.AccessWaitMs; otherwise 0..16 ms. The worker waits off the render thread.
+	 */
+	uint32 DevRecvWorkerAccessWaitMs();
+
+	/**
+	 * r.Spout.Dev.Recv.InFlightWaitUs (default 1000, clamped to 0..4000): Async Receive's per-render-frame bound on the
+	 * render thread's waits for a copy in progress, shared by every stream.
+	 */
+	int32 DevRecvInFlightWaitUs();
+
+	/**
+	 * r.Spout.Dev.Recv.HoldMaxAgeUs (default 0 = off, clamped to 0..50000): Async Receive's bounded retention. With a
+	 * value, a stream created afterwards keeps up to two unread images (one more slot) and a receive call that finds
+	 * two takes the older one when its capture (the worker's access time) is at most this old, keeping the newer for
+	 * the next call; otherwise it takes the newest. Read when a stream is created.
+	 */
+	int32 DevRecvHoldMaxAgeUs();
+
+	/**
+	 * r.Spout.Dev.Recv.SyncRetry (default 0): the synchronous shared-slot receive's second attempt. 0: none. 1: a
+	 * receive whose access was refused tries once more at the end of the same render frame. 2: as 1, and while the
+	 * first attempt keeps failing it is skipped and only the end-of-frame attempt is made (probing the first attempt
+	 * every 30 frames).
+	 */
+	int32 DevRecvSyncRetry();
+
+	/** r.Spout.Dev.Recv.SyncFirstTryOnly != 0 (default 0): the synchronous receive's first attempt does not wait for access (0 ms); only the retry waits. */
+	bool DevRecvSyncFirstTryOnly();
+
+	/**
+	 * r.Spout.Dev.Recv.SyncRetryBudgetUs (default 2000, clamped to 0..10000): the end-of-frame attempts of one render
+	 * frame, all streams together, wait for access at most this long in all.
+	 */
+	int32 DevRecvSyncRetryBudgetUs();
 }
 
 // Lifetime follows the actual retained texture/entry, including old outputs held by callers.

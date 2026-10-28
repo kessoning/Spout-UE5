@@ -317,6 +317,12 @@ void FSpoutFrameSync::Close()
 
 bool FSpoutFrameSync::IsOpen() const
 {
+	// Development switch: without the lock, the receive call cannot wait here for an Async Receive worker
+	// that holds Mutex through its access wait. bOpen is written under Mutex only.
+	if (SpoutLimits::DevRecvLockFreeOpenCheck())
+	{
+		return bOpen.load();
+	}
 	FScopeLock Lock(&Mutex);
 	return bOpen;
 }
@@ -436,7 +442,7 @@ void FSpoutFrameSync::GetStatus(int64& OutFrames, int64& OutAccessMisses) const
 	OutAccessMisses = FailedAcquireCount.load();
 }
 
-bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
+bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture, int32 TimeoutMs)
 {
 	FScopeLock Lock(&Mutex);
 	++AcquireAttemptCount;
@@ -464,7 +470,7 @@ bool FSpoutFrameSync::AcquireTextureAccess(void* SharedTexture)
 	bool bGranted = false;
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AccessWait);
-		bGranted = Backend->CheckTextureAccess(SharedTexture, SpoutLimits::AccessWaitMs());
+		bGranted = Backend->CheckTextureAccess(SharedTexture, TimeoutMs < 0 ? SpoutLimits::AccessWaitMs() : static_cast<uint32>(TimeoutMs));
 	}
 	if (!bGranted)
 	{

@@ -58,6 +58,8 @@ namespace
 
 		virtual void FlushRenderingWork() override
 		{
+			// The synchronous receive's armed end-of-frame attempts (development switch) keep destinations: dropped first.
+			ENQUEUE_RENDER_COMMAND(SpoutDiscardEndOfFrameRetries)([](FRHICommandListImmediate&) { SpoutReceiverInternal::DiscardEndOfFrameRetries(); });
 			FlushRenderingCommands();
 		}
 

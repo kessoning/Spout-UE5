@@ -169,6 +169,13 @@ public:
 	bool bSharedTextureWriteUnproven = false;
 	/** Transfers this entry completed through the shared-slot path. Diagnostics and tests. */
 	std::atomic<int64> SlotTransfers{0};
+	/**
+	 * Receiver role, synchronous shared-slot path, development switch r.Spout.Dev.Recv.SyncRetry 2: the first attempts'
+	 * recent refusals (bit 0 the latest; cleared by a granted one) and the frames since the first attempt was last made.
+	 * Render thread only.
+	 */
+	uint32 SyncFirstRefusedHistory = 0;
+	uint32 SyncFramesSinceProbe = 0;
 
 	/**
 	 * Sender role, render-target source, the asynchronous send (r.Spout.Dev.AsyncSend, 1 by default; SpoutAsyncSend.h): whether this

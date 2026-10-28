@@ -382,8 +382,12 @@ public:
 private:
 	friend class FSpoutTextureAccessScope;
 
-	/** Only FSpoutTextureAccessScope may take and give back access, so the two cannot be separated. */
-	bool AcquireTextureAccess(void* SharedTexture);
+	/**
+	 * Only FSpoutTextureAccessScope may take and give back access, so the two cannot be separated. TimeoutMs below zero
+	 * uses r.Spout.AccessWaitMs; otherwise it is the attempt's own bound (development switches: the asynchronous receive
+	 * worker's wait, the synchronous receive's try-only first attempt and its retry).
+	 */
+	bool AcquireTextureAccess(void* SharedTexture, int32 TimeoutMs = -1);
 	void ReleaseTextureAccess(void* SharedTexture);
 
 	/** The clock of the predictor and the wait: QPC seconds unless a test set one. */
@@ -399,7 +403,8 @@ private:
 	/** Null-terminated copy of the name Open() succeeded with. Empty when nothing is open. */
 	TArray<ANSICHAR> OpenUtf8Name;
 
-	bool bOpen = false;
+	/** Written under Mutex only. An atomic so that IsOpen may read it without Mutex (r.Spout.Dev.Recv.LockFreeOpenCheck). */
+	std::atomic<bool> bOpen{false};
 	bool bAccessHeld = false;
 	/** Whether a frame is pending, and with the experimental settings on the read history. */
 	FSpoutNotificationState Notify;
@@ -475,10 +480,10 @@ namespace SpoutFrameWait
 class FSpoutTextureAccessScope
 {
 public:
-	FSpoutTextureAccessScope(FSpoutFrameSync& InFrameSync, void* InSharedTexture)
+	FSpoutTextureAccessScope(FSpoutFrameSync& InFrameSync, void* InSharedTexture, int32 TimeoutMs = -1)
 		: FrameSync(InFrameSync)
 		, SharedTexture(InSharedTexture)
-		, bAcquired(InFrameSync.AcquireTextureAccess(InSharedTexture))
+		, bAcquired(InFrameSync.AcquireTextureAccess(InSharedTexture, TimeoutMs))
 	{
 	}
 

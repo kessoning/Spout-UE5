@@ -35,6 +35,10 @@ private:
 	// queries it without a module reference.
 	static void* SpoutDllHandle;
 
+	// The synchronous receive's end-of-frame attempts (development switch r.Spout.Dev.Recv.SyncRetry), on
+	// FCoreDelegates::OnEndFrameRT.
+	FDelegateHandle EndFrameRetryHandle;
+
 #if WITH_EDITOR
 	// Closes streams when a PIE world tears down, so senders started in PIE stop publishing
 	// when the user hits Stop instead of lingering until the editor exits.
