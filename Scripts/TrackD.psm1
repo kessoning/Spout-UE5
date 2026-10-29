@@ -1007,6 +1007,17 @@ function New-TrackDHostStaging
         'README.md'
     )
 
+    # Release inputs a plugin tree may not have (the identity treats them the same way): copied when present. Shaders
+    # holds the global shaders of the SpoutPluginShaders module.
+    foreach ($item in @('Shaders'))
+    {
+        $sourcePath = Join-Path $PluginSourceRoot $item
+        if (Test-Path -LiteralPath $sourcePath -PathType Container)
+        {
+            [void] (Copy-TrackDTree -Source $sourcePath -Destination (Join-Path $pluginDest $item))
+        }
+    }
+
     $missing = New-Object System.Collections.ArrayList
     foreach ($item in $pluginItems)
     {

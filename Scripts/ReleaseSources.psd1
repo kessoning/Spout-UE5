@@ -28,7 +28,8 @@
     # RunUAT BuildPlugin either fails or produces an archive that fails validation.
     Required = @(
         @{ Path = 'SpoutPlugin.uplugin';         Category = 'descriptor'; Note = 'Release version is read from this file; nothing hard-codes it.' }
-        @{ Path = 'Source/...';                  Category = 'source';     Note = 'The runtime module, including the automation tests.' }
+        @{ Path = 'Source/...';                  Category = 'source';     Note = 'The runtime module, including the automation tests, and the shader module.' }
+        @{ Path = 'Shaders/...';                 Category = 'source';     Note = 'Global shader source of the SpoutPluginShaders module (the 10-bit sRGB decode); compiled by the editor and cooked into packaged games.' }
         @{ Path = 'ThirdParty/...';              Category = 'thirdparty'; Note = 'Spout headers, import library and runtime DLL.' }
         @{ Path = 'Config/FilterPlugin.ini';     Category = 'packaging';  Note = 'Tells BuildPlugin to ship ThirdParty and the licensing files.' }
         @{ Path = 'Content/...';                 Category = 'content';    Note = 'Example Blueprints and assets.' }
