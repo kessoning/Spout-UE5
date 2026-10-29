@@ -1,0 +1,24 @@
+// Copyright (c) 2026 Giovanni Muzio (Kesson)
+// SPDX-License-Identifier: MIT
+// Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
+
+// Decodes a received frame whose RGB values are sRGB-encoded (IEC 61966-2-1) into linear values, for a frame format
+// that has no sRGB view (R10G10B10A2_UNORM). One output pixel per source texel: the texel is read with Load, so there is
+// no filtering, scaling or flip. The transfer function is evaluated in 32-bit float. Alpha is copied unchanged.
+
+#include "/Engine/Public/Platform.ush"
+
+Texture2D<float4> SourceTexture;
+
+float3 SpoutSrgbToLinear(float3 Encoded)
+{
+	const float3 Low = Encoded / 12.92f;
+	const float3 High = pow((max(Encoded, 0.0f) + 0.055f) / 1.055f, 2.4f);
+	return lerp(High, Low, step(Encoded, 0.04045f));
+}
+
+void MainPS(float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+{
+	const float4 Texel = SourceTexture.Load(int3(int2(SvPosition.xy), 0));
+	OutColor = float4(SpoutSrgbToLinear(Texel.rgb), Texel.a);
+}

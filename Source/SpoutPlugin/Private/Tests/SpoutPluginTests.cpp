@@ -3329,22 +3329,41 @@ bool FSpoutColorSpaceOverrideTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("RGBA8 accepts sRGB"), ResolveReceiverColorSpace(Rgba8, ESpoutColorSpace::SRGB, bSRGB) == EColorSpaceResult::Ok);
 	TestTrue(TEXT("and decodes"), bSRGB);
 
-	// UE has no sRGB variant of these, so setting the flag would be silently ignored and the
-	// caller would never learn the request did nothing. Rejected instead.
+	// UE has no sRGB view of 10-bit: setting the flag would be silently ignored. An sRGB request is
+	// honoured instead by decoding into a linear 16-bit float texture, so a display-encoded 10-bit
+	// stream, such as an Unreal viewport, has a correct setting.
+	FReceiveInterpretation Interpretation;
+	TestTrue(TEXT("RGB10A2 honours an sRGB override"),
+		ResolveReceiverInterpretation(Rgb10a2, ESpoutColorSpace::SRGB, Interpretation) == EColorSpaceResult::Ok);
+	TestEqual(TEXT("by a shader decode"), static_cast<int32>(Interpretation.Decode), static_cast<int32>(EReceiveDecode::SrgbToLinear));
+	TestEqual(TEXT("into a 16-bit float texture"), static_cast<int32>(Interpretation.TexturePixelFormat), static_cast<int32>(PF_FloatRGBA));
+	TestFalse(TEXT("whose sampler decodes nothing more"), Interpretation.bSRGB);
 	bSRGB = true;
-	TestTrue(TEXT("RGB10A2 rejects an sRGB override"),
-		ResolveReceiverColorSpace(Rgb10a2, ESpoutColorSpace::SRGB, bSRGB) == EColorSpaceResult::UnsupportedOverride);
-	TestFalse(TEXT("and writes a defined value even on rejection"), bSRGB);
+	TestTrue(TEXT("the reduced form agrees"), ResolveReceiverColorSpace(Rgb10a2, ESpoutColorSpace::SRGB, bSRGB) == EColorSpaceResult::Ok);
+	TestFalse(TEXT("with the texture's sRGB flag clear"), bSRGB);
 
+	// Auto and Linear on 10-bit are unchanged: the frame's texels as they are, sampled linearly.
+	for (ESpoutColorSpace Mode : { ESpoutColorSpace::Auto, ESpoutColorSpace::Linear })
+	{
+		TestTrue(TEXT("RGB10A2 resolves Auto and Linear"), ResolveReceiverInterpretation(Rgb10a2, Mode, Interpretation) == EColorSpaceResult::Ok);
+		TestTrue(TEXT("to the 10-bit texels, undecoded"), Interpretation.TexturePixelFormat == PF_A2B10G10R10 && !Interpretation.bSRGB
+			&& Interpretation.Decode == EReceiveDecode::None);
+	}
+
+	// Float has neither an sRGB view nor a decode: rejected, and the caller learns it.
 	bSRGB = true;
 	TestTrue(TEXT("RGBA16F rejects an sRGB override"),
 		ResolveReceiverColorSpace(Rgba16f, ESpoutColorSpace::SRGB, bSRGB) == EColorSpaceResult::UnsupportedOverride);
 	TestFalse(TEXT("and writes a defined value even on rejection"), bSRGB);
 
-	// The capability flag the rejection is derived from.
+	// The capability flags the results are derived from.
 	TestTrue(TEXT("8-bit formats advertise an sRGB view"), Bgra8.bSupportsSRGBDecode);
 	TestFalse(TEXT("10-bit does not"), Rgb10a2.bSupportsSRGBDecode);
 	TestFalse(TEXT("float does not"), Rgba16f.bSupportsSRGBDecode);
+	TestTrue(TEXT("10-bit has the shader decode"), Rgb10a2.bSupportsShaderSRGBDecode);
+	TestTrue(TEXT("its typeless alias too"), ResolveReceiverFormat(static_cast<uint32>(DXGI_FORMAT_R10G10B10A2_TYPELESS)).bSupportsShaderSRGBDecode);
+	TestFalse(TEXT("8-bit needs none"), Bgra8.bSupportsShaderSRGBDecode);
+	TestFalse(TEXT("float has none"), Rgba16f.bSupportsShaderSRGBDecode);
 
 	return true;
 }

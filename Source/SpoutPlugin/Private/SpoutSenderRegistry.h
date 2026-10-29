@@ -140,6 +140,25 @@ public:
 	FSpoutLogThrottle ReceiveModeLogThrottle;
 
 	/**
+	 * Receiver role only: the colour space of this session, the one its first accepted receive asked for. A later
+	 * receive whose interpretation of the current sender format differs (SpoutFormatPolicy::ResolveReceiverInterpretation)
+	 * is refused, so one session never alternates between a decoded and an undecoded texture; requests that resolve to
+	 * the same interpretation (Auto and Linear on a 10-bit sender) are the same. A different colour space needs Close
+	 * and a new receive. Game thread only.
+	 */
+	bool bColorSpaceEstablished = false;
+	ESpoutColorSpace EstablishedColorSpace = ESpoutColorSpace::Auto;
+
+	/**
+	 * Receiver role only, a session that decodes (Color Space sRGB on a 10-bit sender), on the paths that do not decode
+	 * straight from a shared slot (the legacy wrap and the CPU readback): the frame's 10-bit texels are written here in
+	 * place of the received texture, and the decode pass reads them into the received texture in the same render
+	 * command. Created on first use, recreated on a size or format change, released with the entry. Render thread only.
+	 */
+	FTextureRHIRef DecodeSource;
+	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> DecodeSourceReservation;
+
+	/**
 	 * Receiver role only: what the most recent render-thread receive actually used, written there and read on the
 	 * game thread by GetSpoutStreamStatus. bAsyncReceiveActive is true only while this session's worker exists and
 	 * has not failed. AsyncReceiveNote says why a session that asked for Async Receive runs synchronously.

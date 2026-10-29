@@ -35,6 +35,8 @@
 #include "SpoutTextureUtils.h"
 #include "SpoutModule.h"
 #include "SpoutValidation.h"
+#include "SpoutColorDecode.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
@@ -83,6 +85,50 @@ namespace
 		Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
 		SPOUT_D3D_DIAG_TRANSITION("receive.restore.destination.to-srv", Destination, ERHIAccess::CopyDest, ERHIAccess::SRVMask);
 		Cmd.Transition(FRHITransitionInfo(Destination, ERHIAccess::CopyDest, ERHIAccess::SRVMask));
+	}
+
+	/**
+	 * A decoding session on the legacy wrap or the CPU readback: the 10-bit texture these paths write the frame into,
+	 * created or recreated at the frame's size and format, then decoded from into the received texture. Render thread.
+	 * Null when the size is out of limits or the retained-memory budget has no room (logged, throttled).
+	 */
+	FRHITexture* EnsureDecodeSource(FSpoutSharedSender& Receiver, uint32 Width, uint32 Height, EPixelFormat Format, FRHICommandListImmediate& RHICmdList)
+	{
+		check(IsInRenderingThread());
+		if (Receiver.DecodeSource)
+		{
+			const FRHITextureDesc& Desc = Receiver.DecodeSource->GetDesc();
+			if (Desc.Extent.X == static_cast<int32>(Width) && Desc.Extent.Y == static_cast<int32>(Height) && Desc.Format == Format)
+			{
+				return Receiver.DecodeSource.GetReference();
+			}
+			Receiver.DecodeSource.SafeRelease();
+			Receiver.DecodeSourceReservation.Reset();
+		}
+		int64 Bytes = 0;
+		if (!SpoutLimits::FrameBytes(Width, Height, Format, Bytes)) return nullptr;
+		TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> Reservation = FSpoutResourceReservation::TryReserve(Bytes);
+		if (!Reservation)
+		{
+			if (Receiver.OpenLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Warning,
+				TEXT("Spout receiver '%s': the retained-memory budget has no room for the %ux%u frame the sRGB decode reads from; nothing is received until it has."),
+				*Receiver.Name.ToString(), Width, Height);
+			return nullptr;
+		}
+		// Shaped like the received texture (SpoutReceivedTexture.cpp): render-targetable, so the RHI tracks its state for
+		// the wrap's bracket and the upload, and shader-readable for the decode pass.
+		const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create2D(TEXT("SpoutDecodeSource"), Width, Height, Format)
+			.SetFlags(ETextureCreateFlags::ShaderResource | ETextureCreateFlags::RenderTargetable).SetInitialState(ERHIAccess::RTV);
+#if ENGINE_MINOR_VERSION >= 8
+		FTextureRHIRef Texture = RHICmdList.CreateTexture(Desc);
+#else
+		FTextureRHIRef Texture = RHICreateTexture(Desc);
+#endif
+		if (!Texture) return nullptr;
+		RHICmdList.Transition(FRHITransitionInfo(Texture, ERHIAccess::RTV, ERHIAccess::SRVMask));
+		Receiver.DecodeSource = Texture;
+		Receiver.DecodeSourceReservation = Reservation;
+		return Receiver.DecodeSource.GetReference();
 	}
 
 	ID3D11Device* ReceiverDevice(FSpoutD3DContext& Context)
@@ -512,6 +558,14 @@ namespace
 			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': Async Receive started (worker generation %llu)."),
 				*Receiver.Name.ToString(), Receiver.Async->GetGeneration());
 		}
+		if (!Destination)
+		{
+			// A decoding session passes no destination: Async Receive handles 8-bit senders only, so it never starts for
+			// one (refused above); this keeps a destination of the wrong format from ever being written.
+			Receiver.Async.Reset();
+			Receiver.bAsyncReceiveActive.store(false);
+			return false;
+		}
 		Receiver.bAsyncReceiveActive.store(true);
 		if (Receiver.Async->ConsumeOnRenderThread(RHICmdList, Destination, Receiver.ReceivedFrameNumber))
 		{
@@ -540,7 +594,9 @@ namespace
 		TSharedPtr<FSpoutSharedSender> Receiver,
 		TRefCountPtr<FRHITexture> DestTextureRHI,
 		FRHICommandListImmediate& RHICmdList,
-		const FSpoutStreamToken& Token)
+		const FSpoutStreamToken& Token,
+		bool bDecodeSrgb,
+		EPixelFormat StreamPixelFormat)
 	{
 		if (!DestTextureRHI.IsValid())
 		{
@@ -560,7 +616,7 @@ namespace
 			Identity.Height = Receiver->Height;
 			Identity.Format = Receiver->SharedFormat;
 		}
-		if (Receiver->SlotReceive && Receiver->SlotReceive->GetIdentity() != Identity)
+		if (Receiver->SlotReceive && (Receiver->SlotReceive->GetIdentity() != Identity || Receiver->SlotReceive->IsShaderReadable() != bDecodeSrgb))
 		{
 			// Retired with its outstanding work, never dropped.
 			Receiver->SlotReceive.Reset();
@@ -572,7 +628,8 @@ namespace
 				return;
 			}
 			FString Why;
-			Receiver->SlotReceive = FSpoutSlotReceive::Create(Receiver->Name, Identity, DestTextureRHI->GetFormat(), Why);
+			// The slots hold the frame as the sender published it; a decoding session reads them in a shader.
+			Receiver->SlotReceive = FSpoutSlotReceive::Create(Receiver->Name, Identity, StreamPixelFormat, bDecodeSrgb, Why);
 			if (!Receiver->SlotReceive)
 			{
 				Receiver->SlotReceiveRefusedFor = Identity;
@@ -673,7 +730,7 @@ namespace
 				{
 					// The frame is complete in the slot and access is still held. Its copy into the destination is
 					// queued now; only when that was queued does the frame stop being pending.
-					if (Slots.PublishAndConsume(Slot, WrittenValue, RHICmdList, DestTextureRHI, TextureBracket.EntryBefore, TextureBracket.ExitAfter))
+					if (Slots.PublishAndConsume(Slot, WrittenValue, RHICmdList, DestTextureRHI, TextureBracket.EntryBefore, TextureBracket.ExitAfter, bDecodeSrgb))
 					{
 						const bool bDelivered = Receiver->FrameSync.CompleteTransfer();
 						SPOUT_INSTRUMENT(if (bInstrument) { Rec.Completed = 1; Rec.Delivered = bDelivered ? 1 : 0; Rec.ReadValue = static_cast<int64>(Slots.GetInstrumentReadValue()); Rec.WrittenValue = static_cast<int64>(WrittenValue); })
@@ -708,7 +765,9 @@ namespace
 		TRefCountPtr<FRHITexture> DestTextureRHI,
 		TRefCountPtr<FRHITexture> DestRenderTargetRHI,
 		FRHICommandListImmediate& RHICmdList,
-		const FSpoutStreamToken& Token)
+		const FSpoutStreamToken& Token,
+		bool bSlotDecodeSrgb,
+		EPixelFormat StreamPixelFormat)
 	{
 		if (!DestTextureRHI.IsValid() && !DestRenderTargetRHI.IsValid())
 		{
@@ -718,7 +777,7 @@ namespace
 		// Latched once per process (r.Spout.SharedSlotInterop): the shared-slot path wraps nothing of Unreal's.
 		if (SpoutInterop::IsSharedSlot())
 		{
-			ReceiveOnRenderThread_SharedSlot(Receiver, DestTextureRHI, RHICmdList, Token);
+			ReceiveOnRenderThread_SharedSlot(Receiver, DestTextureRHI, RHICmdList, Token, bSlotDecodeSrgb, StreamPixelFormat);
 			return;
 		}
 
@@ -1245,18 +1304,20 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	}
 
 	const SpoutFormatPolicy::FReceiverFormat ReceiverFormat = SpoutFormatPolicy::ResolveReceiverFormat(static_cast<uint32>(Format));
-	const EPixelFormat PixelFormat = ReceiverFormat.PixelFormat;
-	int64 FrameBytes = 0;
-	if (!SpoutLimits::FrameBytes(W, H, PixelFormat, FrameBytes)) return false;
+	// The frame as the sender published it. The received texture may differ (PixelFormat below).
+	const EPixelFormat StreamPixelFormat = ReceiverFormat.PixelFormat;
+	int64 StreamFrameBytes = 0;
+	if (!SpoutLimits::FrameBytes(W, H, StreamPixelFormat, StreamFrameBytes)) return false;
 
 	// One explicit colour-space contract, resolved here and nowhere else. Auto follows the
 	// documented per-format convention; an explicit request is honoured where it is representable
-	// and REFUSED where it is not, rather than being silently dropped. bSRGB is part of the
-	// destination texture's identity in EnsureTransientTexture, so changing the setting recreates
-	// the texture instead of reinterpreting the existing one.
-	bool bSRGB = false;
+	// and REFUSED where it is not, rather than being silently dropped. The interpretation's pixel
+	// format and sRGB flag are the destination texture's identity in EnsureTransientTexture, so a
+	// different setting gives a different texture instead of reinterpreting the existing one. sRGB
+	// on a 10-bit frame is decoded by a shader into a linear 16-bit float texture.
+	SpoutFormatPolicy::FReceiveInterpretation Interpretation;
 	const SpoutFormatPolicy::EColorSpaceResult ColorSpaceResult =
-		SpoutFormatPolicy::ResolveReceiverColorSpace(ReceiverFormat, ColorSpace, bSRGB);
+		SpoutFormatPolicy::ResolveReceiverInterpretation(ReceiverFormat, ColorSpace, Interpretation);
 	if (ColorSpaceResult != SpoutFormatPolicy::EColorSpaceResult::Ok)
 	{
 		static FSpoutLogThrottle ColorLogThrottle;
@@ -1264,7 +1325,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		{
 			UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("Spout receiver '%s': colour space %s cannot be applied to %s (%s). ")
-				TEXT("sRGB decoding only exists for the 8-bit formats; 10-bit and 16-bit float frames are linear. ")
+				TEXT("sRGB decoding exists for the 8-bit and 10-bit formats; 16-bit float frames are linear. ")
 				TEXT("Set Color Space to Auto or Linear."),
 				*SpoutName.ToString(),
 				SpoutFormatPolicy::ToString(ColorSpace),
@@ -1273,6 +1334,12 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		}
 		return false;
 	}
+	// The received texture's format (and an output render target's), its sRGB flag, and whether it is decoded.
+	const EPixelFormat PixelFormat = Interpretation.TexturePixelFormat;
+	const bool bSRGB = Interpretation.bSRGB;
+	const bool bDecodeSrgb = Interpretation.Decode == SpoutFormatPolicy::EReceiveDecode::SrgbToLinear;
+	int64 FrameBytes = 0;
+	if (!SpoutLimits::FrameBytes(W, H, PixelFormat, FrameBytes)) return false;
 
 	// Discovery failures above retain no stream/native records. Once metadata is valid,
 	// the explicit close/session lifecycle owns this connected name.
@@ -1304,6 +1371,36 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				Receiver->bAsyncReceiveRequested ? TEXT("Async Receive") : TEXT("the synchronous receive"));
 		}
 		return false;
+	}
+
+	// One session has one colour interpretation, the one its first accepted receive asked for, applied to the sender's
+	// current format. A request that interprets that format differently is refused here, before anything is touched, so
+	// the session never alternates between a decoded and an undecoded texture. Requests that resolve the same way (Auto
+	// and Linear on a 10-bit sender) are compatible. When the established request cannot be applied to the sender's new
+	// format, the session takes this request's.
+	bool bEstablishColorSpace = !Receiver->bColorSpaceEstablished;
+	if (Receiver->bColorSpaceEstablished && Receiver->EstablishedColorSpace != ColorSpace)
+	{
+		SpoutFormatPolicy::FReceiveInterpretation Established;
+		if (SpoutFormatPolicy::ResolveReceiverInterpretation(ReceiverFormat, Receiver->EstablishedColorSpace, Established) == SpoutFormatPolicy::EColorSpaceResult::Ok)
+		{
+			if (Established != Interpretation)
+			{
+				if (Receiver->FormatLogThrottle.ShouldLog())
+				{
+					UE_LOG(LogSpoutPlugin, Warning,
+						TEXT("Spout receiver '%s': refused a receive asking for Color Space %s, because the open receiver for this name uses %s, which reads %s differently. ")
+						TEXT("Every consumer of one Spout name shares one received texture. Use the same Color Space for every consumer of the name, or Close Receiver and receive again to change it."),
+						*SpoutName.ToString(), SpoutFormatPolicy::ToString(ColorSpace), SpoutFormatPolicy::ToString(Receiver->EstablishedColorSpace),
+						*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)));
+				}
+				return false;
+			}
+		}
+		else
+		{
+			bEstablishColorSpace = true;
+		}
 	}
 
 	// The destination is whatever this plugin owns for this receiver name, not whatever the caller
@@ -1404,7 +1501,8 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		}
 		else if (Receiver->OutputTargetLogThrottle.ShouldLog())
 		{
-			UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': incompatible output render target left untouched; format must match and Auto Generate Mips must be disabled."), *SpoutName.ToString());
+			UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': incompatible output render target left untouched; its format must be the received texture's (%s%s) and Auto Generate Mips must be disabled."),
+				*SpoutName.ToString(), GetPixelFormatString(PixelFormat), bDecodeSrgb ? TEXT(", the linear 16-bit float of a 10-bit frame decoded with Color Space sRGB") : TEXT(""));
 		}
 	}
 	const bool bUseGPUPath = CVarSpoutGPUReceiver.GetValueOnAnyThread() != 0;
@@ -1420,10 +1518,20 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': opened with Async Receive requested. It stays in this mode until Close Receiver."), *SpoutName.ToString());
 		}
 	}
+	if (bEstablishColorSpace)
+	{
+		Receiver->bColorSpaceEstablished = true;
+		Receiver->EstablishedColorSpace = ColorSpace;
+		if (bDecodeSrgb)
+		{
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': Color Space sRGB on a 10-bit sender (%s): each frame is decoded into a linear 16-bit float texture."),
+				*SpoutName.ToString(), *SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)));
+		}
+	}
 	const bool bAsyncRequested = Receiver->bAsyncReceiveRequested;
 	FSpoutSession::Get().MarkQueued(Token);
 	ENQUEUE_RENDER_COMMAND(SpoutRecvCmd)(
-		[Token, Receiver, TextureResource, OutputResource, OutputIdentity, W, H, SharedHandle, Format, PixelFormat, bUseGPUPath, bAsyncRequested, QueuedWork, PreviousOutputReservation](FRHICommandListImmediate& RHICmdList)
+		[Token, Receiver, TextureResource, OutputResource, OutputIdentity, W, H, SharedHandle, Format, PixelFormat, StreamPixelFormat, bDecodeSrgb, bUseGPUPath, bAsyncRequested, QueuedWork, PreviousOutputReservation](FRHICommandListImmediate& RHICmdList)
 		{
 			if (!FSpoutSession::Get().IsCurrent(Token))
 			{
@@ -1464,17 +1572,38 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			}
 			const uint64 PreviousFrame = Receiver->ReceivedFrameNumber;
 			bool bCpuUploaded = false;
-			if (ReceiveOnRenderThread_Async(*Receiver, bAsyncRequested, bUseGPUPath, TextureRHI, PixelFormat, RHICmdList))
+			// A decoding session (Color Space sRGB on a 10-bit sender): the shared-slot path decodes from its slot in place of
+			// its copy; the legacy wrap and the CPU readback write the frame into DecodeSource, decoded from below.
+			const bool bSlotPath = bUseGPUPath && SpoutInterop::IsSharedSlot();
+			FRHITexture* DecodeFrom = nullptr;
+			if (ReceiveOnRenderThread_Async(*Receiver, bAsyncRequested, bUseGPUPath, bDecodeSrgb ? nullptr : TextureRHI.GetReference(), StreamPixelFormat, RHICmdList))
 			{
 				// Async Receive, requested by this session: the worker made the transfer; nothing more here.
 			}
 			else if (bUseGPUPath)
 			{
-				ReceiveOnRenderThread_GPU(Receiver, TextureRHI, nullptr, RHICmdList, Token);
+				if (bDecodeSrgb && !bSlotPath) DecodeFrom = EnsureDecodeSource(*Receiver, W, H, StreamPixelFormat, RHICmdList);
+				if (!bDecodeSrgb || bSlotPath || DecodeFrom)
+				{
+					ReceiveOnRenderThread_GPU(Receiver, DecodeFrom ? DecodeFrom : TextureRHI.GetReference(), nullptr, RHICmdList, Token, bDecodeSrgb && bSlotPath, StreamPixelFormat);
+				}
 			}
 			else
 			{
-				ReceiveOnRenderThread_CPU(Receiver, TextureRHI, nullptr, RHICmdList, Token, bCpuUploaded);
+				if (bDecodeSrgb) DecodeFrom = EnsureDecodeSource(*Receiver, W, H, StreamPixelFormat, RHICmdList);
+				if (!bDecodeSrgb || DecodeFrom)
+				{
+					ReceiveOnRenderThread_CPU(Receiver, DecodeFrom ? DecodeFrom : TextureRHI.GetReference(), nullptr, RHICmdList, Token, bCpuUploaded);
+				}
+			}
+			if (DecodeFrom && PreviousFrame != Receiver->ReceivedFrameNumber)
+			{
+				const SpoutRHIState::FCopyBracket TextureBracket = SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::ReceiverTexture);
+				if (!SpoutColorDecode::DecodeSrgbToLinear(RHICmdList, DecodeFrom, ERHIAccess::Unknown, TextureRHI, TextureBracket.EntryBefore, TextureBracket.ExitAfter)
+					&& Receiver->OpenLogThrottle.ShouldLog())
+				{
+					UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': the sRGB decode pass could not be recorded for this frame."), *Receiver->Name.ToString());
+				}
 			}
 			if (PreviousFrame != Receiver->ReceivedFrameNumber) Receiver->ReceivedFrame = TextureRHI;
 			for (auto It = Receiver->DestinationDeliveries.CreateIterator(); It; ++It)
@@ -1486,7 +1615,8 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				auto& Delivery = Receiver->DestinationDeliveries.FindOrAdd(OutputIdentity);
 				if (Delivery.Frame != Receiver->ReceivedFrameNumber || Delivery.Resource != TargetRHI)
 				{
-					CopyReceivedFrame(RHICmdList, Receiver->ReceivedFrame, TargetRHI, bCpuUploaded);
+					// A decoded frame was written by the decode pass, not uploaded.
+					CopyReceivedFrame(RHICmdList, Receiver->ReceivedFrame, TargetRHI, bCpuUploaded && !DecodeFrom);
 					Delivery.Resource = TargetRHI;
 					Delivery.Frame = Receiver->ReceivedFrameNumber;
 				}

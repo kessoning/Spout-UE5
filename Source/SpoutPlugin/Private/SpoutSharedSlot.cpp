@@ -15,6 +15,7 @@
 
 #include "SpoutAsyncReceive.h"
 #include "SpoutDebugCapture.h"
+#include "SpoutColorDecode.h"
 #include "SpoutLimits.h"
 #include "SpoutModule.h"
 #include "SpoutNativeWork.h"
@@ -153,7 +154,7 @@ namespace
 	 * receive's slots.
 	 */
 	HRESULT CreateSlot(uint32 Width, uint32 Height, DXGI_FORMAT Format, EPixelFormat PixelFormat,
-		ComPtr<ID3D12Resource>& OutResource, ComPtr<ID3D11Texture2D>& OutNative, FTextureRHIRef& OutTexture)
+		ComPtr<ID3D12Resource>& OutResource, ComPtr<ID3D11Texture2D>& OutNative, FTextureRHIRef& OutTexture, bool bShaderReadable = false)
 	{
 		ID3D12Device* Device12 = UnrealDevice();
 		ID3D11Device5* Device11 = NativeDevice();
@@ -179,7 +180,10 @@ namespace
 		Result = Device11->OpenSharedResource1(Handle, IID_PPV_ARGS(OutNative.GetAddressOf()));
 		::CloseHandle(Handle);
 		if (FAILED(Result) || !OutNative) return FAILED(Result) ? Result : E_FAIL;
-		OutTexture = GetID3D12DynamicRHI()->RHICreateTexture2DFromResource(PixelFormat, ETextureCreateFlags::Shared | ETextureCreateFlags::DisableSRVCreation,
+		// A slot is only copied from, unless a decoding receive reads it in a shader (SpoutColorDecode.h).
+		const ETextureCreateFlags Flags = bShaderReadable ? (ETextureCreateFlags::Shared | ETextureCreateFlags::ShaderResource)
+			: (ETextureCreateFlags::Shared | ETextureCreateFlags::DisableSRVCreation);
+		OutTexture = GetID3D12DynamicRHI()->RHICreateTexture2DFromResource(PixelFormat, Flags,
 			FClearValueBinding::None, OutResource.Get());
 		return OutTexture.IsValid() ? S_OK : E_FAIL;
 	}
@@ -775,11 +779,12 @@ FSpoutSlotReceive::FSpoutSlotReceive(const FName& InName, const FIdentity& InIde
 {
 }
 
-TUniquePtr<FSpoutSlotReceive> FSpoutSlotReceive::Create(const FName& Name, const FIdentity& Identity, EPixelFormat PixelFormat, FString& OutWhy)
+TUniquePtr<FSpoutSlotReceive> FSpoutSlotReceive::Create(const FName& Name, const FIdentity& Identity, EPixelFormat PixelFormat, bool bShaderReadable, FString& OutWhy)
 {
 	check(IsInRenderingThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SlotReceiveCreate);
 	TUniquePtr<FSpoutSlotReceive> Set(new FSpoutSlotReceive(Name, Identity));
+	Set->bShaderReadable = bShaderReadable;
 	if (!Set->Initialize(PixelFormat, OutWhy))
 	{
 		// Nothing was submitted with any of its objects: its destructor retires them, and the first poll releases them.
@@ -836,7 +841,7 @@ bool FSpoutSlotReceive::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 	if (FAILED(Result) || !Proof) return Refuse(TEXT("the event query could not be created"), Result);
 	for (int32 I = 0; I < NumSlots; ++I)
 	{
-		Result = CreateSlot(Identity.Width, Identity.Height, Identity.Format, PixelFormat, SlotResources[I], NativeSlots[I], SlotTextures[I]);
+		Result = CreateSlot(Identity.Width, Identity.Height, Identity.Format, PixelFormat, SlotResources[I], NativeSlots[I], SlotTextures[I], bShaderReadable);
 		if (FAILED(Result)) return Refuse(TEXT("a slot could not be created, shared, opened or made an RHI texture"), Result);
 	}
 	Event = ::CreateEventW(nullptr, false, false, nullptr);
@@ -997,9 +1002,9 @@ void FSpoutSlotReceive::Abandon(int32 Slot, SpoutAsync::EAbandon Why)
 }
 
 bool FSpoutSlotReceive::PublishAndConsume(int32 Slot, uint64 Value, FRHICommandListImmediate& RHICmdList, FRHITexture* Destination,
-	ERHIAccess DestinationBefore, ERHIAccess DestinationAfter)
+	ERHIAccess DestinationBefore, ERHIAccess DestinationAfter, bool bDecodeSrgb)
 {
-	if (!Destination)
+	if (!Destination || (bDecodeSrgb && !bShaderReadable))
 	{
 		Pool.AbandonWrite(Slot, SpoutAsync::EAbandon::Cancelled);
 		return false;
@@ -1028,20 +1033,38 @@ bool FSpoutSlotReceive::PublishAndConsume(int32 Slot, uint64 Value, FRHICommandL
 	{
 		QueueWaitManualFence(Cmd, Written.Get(), WaitValue);
 	});
-	SPOUT_D3D_DIAG_TRANSITION("receive.slot.to-copysrc", SlotTexture, ERHIAccess::Unknown, ERHIAccess::CopySrc);
-	RHICmdList.Transition(FRHITransitionInfo(SlotTexture, ERHIAccess::Unknown, ERHIAccess::CopySrc));
-	SPOUT_D3D_DIAG_TRANSITION("receive.destination.to-copydest", Destination, DestinationBefore, ERHIAccess::CopyDest);
-	RHICmdList.Transition(FRHITransitionInfo(Destination, DestinationBefore, ERHIAccess::CopyDest));
-	RHICmdList.CopyTexture(SlotTexture, Destination, FRHICopyTextureInfo());
-	SPOUT_D3D_DIAG_TRANSITION("receive.slot.to-srv", SlotTexture, ERHIAccess::CopySrc, ERHIAccess::SRVMask);
-	RHICmdList.Transition(FRHITransitionInfo(SlotTexture, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
-	SPOUT_D3D_DIAG_TRANSITION("receive.destination.to-after", Destination, ERHIAccess::CopyDest, DestinationAfter);
-	RHICmdList.Transition(FRHITransitionInfo(Destination, ERHIAccess::CopyDest, DestinationAfter));
+	bool bWritten = true;
+	if (bDecodeSrgb)
+	{
+		// The decode pass reads the slot and writes Destination in place of the copy: the same queue position, ordered
+		// behind the written fence and ahead of the read signal. It leaves the slot in SRVMask, as the copy did.
+		SPOUT_D3D_DIAG_TRANSITION("receive.slot.to-decode", SlotTexture, ERHIAccess::Unknown, ERHIAccess::SRVGraphics);
+		SPOUT_D3D_DIAG_TRANSITION("receive.destination.to-decode", Destination, DestinationBefore, ERHIAccess::RTV);
+		if (!SpoutColorDecode::DecodeSrgbToLinear(RHICmdList, SlotTexture, ERHIAccess::Unknown, Destination, DestinationBefore, DestinationAfter))
+		{
+			// Unreachable while the slot and the destination have the session's size. The read signal below is still
+			// queued, so the slot returns to the pool; the frame is not delivered and stays pending.
+			bWritten = false;
+			UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': the sRGB decode pass could not be recorded for this frame."), *Name.ToString());
+		}
+	}
+	else
+	{
+		SPOUT_D3D_DIAG_TRANSITION("receive.slot.to-copysrc", SlotTexture, ERHIAccess::Unknown, ERHIAccess::CopySrc);
+		RHICmdList.Transition(FRHITransitionInfo(SlotTexture, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+		SPOUT_D3D_DIAG_TRANSITION("receive.destination.to-copydest", Destination, DestinationBefore, ERHIAccess::CopyDest);
+		RHICmdList.Transition(FRHITransitionInfo(Destination, DestinationBefore, ERHIAccess::CopyDest));
+		RHICmdList.CopyTexture(SlotTexture, Destination, FRHICopyTextureInfo());
+		SPOUT_D3D_DIAG_TRANSITION("receive.slot.to-srv", SlotTexture, ERHIAccess::CopySrc, ERHIAccess::SRVMask);
+		RHICmdList.Transition(FRHITransitionInfo(SlotTexture, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+		SPOUT_D3D_DIAG_TRANSITION("receive.destination.to-after", Destination, ERHIAccess::CopyDest, DestinationAfter);
+		RHICmdList.Transition(FRHITransitionInfo(Destination, ERHIAccess::CopyDest, DestinationAfter));
+	}
 	RHICmdList.EnqueueLambda([Read, SignalValue](FRHICommandListImmediate& Cmd)
 	{
 		GetID3D12DynamicRHI()->RHISignalManualFence(Cmd, Read.Get(), SignalValue);
 	});
-	return true;
+	return bWritten;
 }
 
 void FSpoutSlotReceive::FlushKeyedRelease()

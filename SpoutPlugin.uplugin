@@ -15,6 +15,12 @@
 	"SupportedTargetPlatforms": [ "Win64" ],
 	"Modules": [
 		{
+			"Name": "SpoutPluginShaders",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [ "Win64" ]
+		},
+		{
 			"Name": "SpoutPlugin",
 			"Type": "Runtime",
 			"LoadingPhase": "Default",

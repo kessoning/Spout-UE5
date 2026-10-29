@@ -7,6 +7,7 @@
  * receiver so the two directions cannot drift apart.
  */
 #include "SpoutFormatPolicy.h"
+#include "SpoutColorDecode.h"
 
 namespace SpoutFormatPolicy
 {
@@ -25,7 +26,11 @@ namespace SpoutFormatPolicy
 		 * bDeclaresSRGB - whether the DXGI format itself states sRGB (the _UNORM_SRGB variants),
 		 *                 as opposed to being assumed sRGB by ecosystem convention.
 		 * bSRGBCapable  - whether an sRGB destination view exists for PixelFormat at all, which
-		 *                 is what makes an explicit sRGB override representable or not.
+		 *                 is what lets the sampler honour an explicit sRGB request.
+		 * bShaderSRGB   - whether an explicit sRGB request is honoured instead by a shader decode
+		 *                 into linear 16-bit float (SpoutColorDecode.h): the 10-bit rows. Their
+		 *                 values may be display-encoded (an Unreal viewport stream) or linear (a
+		 *                 10-bit render target); the format cannot say which, so Auto stays linear.
 		 *
 		 * Adding a row here is the only way to widen support, and it widens both directions at
 		 * once. The set is deliberately narrow: a format is listed only where both directions are
@@ -51,30 +56,31 @@ namespace SpoutFormatPolicy
 			bool bPrefersSRGB;
 			bool bDeclaresSRGB;
 			bool bSRGBCapable;
+			bool bShaderSRGB;
 			bool bTypeless;
 		};
 
 		const FFormatEntry FormatTable[] =
 		{
 			// 8-bit color. Gamma-encoded bytes by convention, so Auto decodes as sRGB.
-			{ DXGI_FORMAT_B8G8R8A8_UNORM,       DXGI_FORMAT_B8G8R8A8_UNORM,       PF_B8G8R8A8,     true,  false, true,  false },
-			{ DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,  DXGI_FORMAT_B8G8R8A8_UNORM,       PF_B8G8R8A8,     true,  true,  true,  false },
-			{ DXGI_FORMAT_R8G8B8A8_UNORM,       DXGI_FORMAT_R8G8B8A8_UNORM,       PF_R8G8B8A8,     true,  false, true,  false },
-			{ DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,  DXGI_FORMAT_R8G8B8A8_UNORM,       PF_R8G8B8A8,     true,  true,  true,  false },
+			{ DXGI_FORMAT_B8G8R8A8_UNORM,       DXGI_FORMAT_B8G8R8A8_UNORM,       PF_B8G8R8A8,     true,  false, true,  false, false },
+			{ DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,  DXGI_FORMAT_B8G8R8A8_UNORM,       PF_B8G8R8A8,     true,  true,  true,  false, false },
+			{ DXGI_FORMAT_R8G8B8A8_UNORM,       DXGI_FORMAT_R8G8B8A8_UNORM,       PF_R8G8B8A8,     true,  false, true,  false, false },
+			{ DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,  DXGI_FORMAT_R8G8B8A8_UNORM,       PF_R8G8B8A8,     true,  true,  true,  false, false },
 
-			// 10-bit and float carry linear/HDR data and must be sampled linearly. UE has no sRGB
-			// view for either, which is why an explicit sRGB request against them is rejected.
-			{ DXGI_FORMAT_R10G10B10A2_UNORM,    DXGI_FORMAT_R10G10B10A2_UNORM,    PF_A2B10G10R10,  false, false, false, false },
-			{ DXGI_FORMAT_R16G16B16A16_FLOAT,   DXGI_FORMAT_R16G16B16A16_FLOAT,   PF_FloatRGBA,    false, false, false, false },
+			// 10-bit and float are sampled linearly by Auto. UE has no sRGB view for either: an explicit sRGB request is
+			// decoded by a shader for 10-bit (which may carry display values, as a viewport stream does) and refused for float.
+			{ DXGI_FORMAT_R10G10B10A2_UNORM,    DXGI_FORMAT_R10G10B10A2_UNORM,    PF_A2B10G10R10,  false, false, false, true,  false },
+			{ DXGI_FORMAT_R16G16B16A16_FLOAT,   DXGI_FORMAT_R16G16B16A16_FLOAT,   PF_FloatRGBA,    false, false, false, false, false },
 
 			// Typeless sources: mapped to the typed view of the same layout. This is the
 			// intentional reinterpretation ESupport::MappedTyped describes. A typeless resource
 			// states no colour space, so the 8-bit ones map to the _UNORM variant -- the same
 			// convention, and the same Linear override, as a peer that publishes _UNORM directly.
-			{ DXGI_FORMAT_B8G8R8A8_TYPELESS,       DXGI_FORMAT_B8G8R8A8_UNORM,     PF_B8G8R8A8,     true,  false, true,  true },
-			{ DXGI_FORMAT_R8G8B8A8_TYPELESS,       DXGI_FORMAT_R8G8B8A8_UNORM,     PF_R8G8B8A8,     true,  false, true,  true },
-			{ DXGI_FORMAT_R10G10B10A2_TYPELESS,    DXGI_FORMAT_R10G10B10A2_UNORM,  PF_A2B10G10R10,  false, false, false, true },
-			{ DXGI_FORMAT_R16G16B16A16_TYPELESS,   DXGI_FORMAT_R16G16B16A16_FLOAT, PF_FloatRGBA,    false, false, false, true },
+			{ DXGI_FORMAT_B8G8R8A8_TYPELESS,       DXGI_FORMAT_B8G8R8A8_UNORM,     PF_B8G8R8A8,     true,  false, true,  false, true },
+			{ DXGI_FORMAT_R8G8B8A8_TYPELESS,       DXGI_FORMAT_R8G8B8A8_UNORM,     PF_R8G8B8A8,     true,  false, true,  false, true },
+			{ DXGI_FORMAT_R10G10B10A2_TYPELESS,    DXGI_FORMAT_R10G10B10A2_UNORM,  PF_A2B10G10R10,  false, false, false, true,  true },
+			{ DXGI_FORMAT_R16G16B16A16_TYPELESS,   DXGI_FORMAT_R16G16B16A16_FLOAT, PF_FloatRGBA,    false, false, false, false, true },
 		};
 
 		const FFormatEntry* FindEntry(DXGI_FORMAT NativeFormat)
@@ -172,6 +178,7 @@ namespace SpoutFormatPolicy
 			Result.bPrefersSRGB = Entry->bPrefersSRGB;
 			Result.bFormatDeclaresSRGB = Entry->bDeclaresSRGB;
 			Result.bSupportsSRGBDecode = Entry->bSRGBCapable;
+			Result.bSupportsShaderSRGBDecode = Entry->bShaderSRGB;
 			return Result;
 		}
 
@@ -201,14 +208,14 @@ namespace SpoutFormatPolicy
 		}
 	}
 
-	EColorSpaceResult ResolveReceiverColorSpace(
+	EColorSpaceResult ResolveReceiverInterpretation(
 		const FReceiverFormat& Format,
 		ESpoutColorSpace Requested,
-		bool& bOutSRGB)
+		FReceiveInterpretation& OutInterpretation)
 	{
 		// Assigned on every path before returning, so a caller that ignores the result still gets a
 		// defined value rather than whatever it passed in.
-		bOutSRGB = false;
+		OutInterpretation = FReceiveInterpretation();
 
 		if (!Format.IsUsable())
 		{
@@ -218,27 +225,48 @@ namespace SpoutFormatPolicy
 		switch (Requested)
 		{
 		case ESpoutColorSpace::Auto:
-			bOutSRGB = Format.bPrefersSRGB;
+			OutInterpretation.TexturePixelFormat = Format.PixelFormat;
+			OutInterpretation.bSRGB = Format.bPrefersSRGB;
 			return EColorSpaceResult::Ok;
 
 		case ESpoutColorSpace::Linear:
 			// Always representable: leaving UTexture::SRGB clear is what every pixel format does by
 			// default, so a linear request is honoured for the 8-bit formats and is already the Auto
 			// answer for the 10-bit and float ones.
-			bOutSRGB = false;
+			OutInterpretation.TexturePixelFormat = Format.PixelFormat;
 			return EColorSpaceResult::Ok;
 
 		case ESpoutColorSpace::SRGB:
-			if (!Format.bSupportsSRGBDecode)
+			if (Format.bSupportsSRGBDecode)
 			{
-				return EColorSpaceResult::UnsupportedOverride;
+				OutInterpretation.TexturePixelFormat = Format.PixelFormat;
+				OutInterpretation.bSRGB = true;
+				return EColorSpaceResult::Ok;
 			}
-			bOutSRGB = true;
-			return EColorSpaceResult::Ok;
+			if (Format.bSupportsShaderSRGBDecode)
+			{
+				// No sRGB view exists, so the sampler cannot decode it: the frame is decoded once per received frame
+				// into a linear 16-bit float texture, which keeps the 10-bit code's precision.
+				OutInterpretation.TexturePixelFormat = SpoutColorDecode::DecodedFormat;
+				OutInterpretation.Decode = EReceiveDecode::SrgbToLinear;
+				return EColorSpaceResult::Ok;
+			}
+			return EColorSpaceResult::UnsupportedOverride;
 
 		default:
 			return EColorSpaceResult::UnsupportedOverride;
 		}
+	}
+
+	EColorSpaceResult ResolveReceiverColorSpace(
+		const FReceiverFormat& Format,
+		ESpoutColorSpace Requested,
+		bool& bOutSRGB)
+	{
+		FReceiveInterpretation Interpretation;
+		const EColorSpaceResult Result = ResolveReceiverInterpretation(Format, Requested, Interpretation);
+		bOutSRGB = Interpretation.bSRGB;
+		return Result;
 	}
 
 	bool IsSupportedSendPixelFormat(EPixelFormat PixelFormat)

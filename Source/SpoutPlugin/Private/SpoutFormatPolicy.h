@@ -96,9 +96,17 @@ namespace SpoutFormatPolicy
 		 *
 		 * True for the 8-bit formats and false for A2B10G10R10 and FloatRGBA: UE has no sRGB
 		 * variant of those, so setting UTexture::SRGB on them is silently ignored. An explicit
-		 * sRGB request against such a format is therefore rejected rather than quietly dropped.
+		 * sRGB request against such a format is honoured by a shader decode where one exists
+		 * (bSupportsShaderSRGBDecode) and rejected otherwise, never quietly dropped.
 		 */
 		bool bSupportsSRGBDecode = false;
+		/**
+		 * Whether an explicit sRGB request is honoured by decoding in a shader into a linear 16-bit float texture
+		 * (SpoutColorDecode.h). True for the 10-bit formats only: their values may be display-encoded (an Unreal viewport
+		 * stream is) or linear (a 10-bit render target is), and the format cannot say which, so Auto stays linear and the
+		 * receiver states sRGB. A 16-bit float frame has no such decode: sRGB on it is refused.
+		 */
+		bool bSupportsShaderSRGBDecode = false;
 
 		bool IsUsable() const
 		{
@@ -137,17 +145,42 @@ namespace SpoutFormatPolicy
 	/** Outcome of resolving a receiver's requested colour space against an advertised format. */
 	enum class EColorSpaceResult : uint8
 	{
-		/** The request is representable; bOutSRGB carries the destination's decode setting. */
+		/** The request is representable; the interpretation carries how. */
 		Ok,
 		/** The format is not one this plugin shares, so there is no colour space to resolve. */
 		UnusableFormat,
 		/**
 		 * The requested colour space cannot be represented for this format -- currently only
-		 * ESpoutColorSpace::SRGB against a 10-bit or float format. Rejected rather than
+		 * ESpoutColorSpace::SRGB against a 16-bit float format. Rejected rather than
 		 * approximated: setting an sRGB flag UE ignores would change nothing about the output
 		 * while reporting success, so the caller who asked for it would never find out.
 		 */
 		UnsupportedOverride
+	};
+
+	/** How a received frame is turned into the texture the caller gets. */
+	enum class EReceiveDecode : uint8
+	{
+		/** The frame's texels are copied unchanged; the texture's sRGB flag decides how they are sampled. */
+		None,
+		/** The frame's sRGB-encoded RGB is decoded by a shader into linear 16-bit float; alpha is copied. */
+		SrgbToLinear
+	};
+
+	/** The received texture a colour-space request gives for one frame format. */
+	struct FReceiveInterpretation
+	{
+		/** Pixel format of the received texture (and of a compatible output render target). */
+		EPixelFormat TexturePixelFormat = PF_Unknown;
+		/** UTexture::SRGB of the received texture: the sampler decodes sRGB. 8-bit formats only. */
+		bool bSRGB = false;
+		EReceiveDecode Decode = EReceiveDecode::None;
+
+		bool operator==(const FReceiveInterpretation& Other) const
+		{
+			return TexturePixelFormat == Other.TexturePixelFormat && bSRGB == Other.bSRGB && Decode == Other.Decode;
+		}
+		bool operator!=(const FReceiveInterpretation& Other) const { return !(*this == Other); }
 	};
 
 	const TCHAR* ToString(EColorSpaceResult Result);
@@ -158,14 +191,21 @@ namespace SpoutFormatPolicy
 	/**
 	 * The one colour-space contract, applied to a resolved receiver format.
 	 *
-	 * Auto follows the format's documented convention; Linear is always representable; SRGB is
-	 * representable only where an sRGB destination view exists. bOutSRGB is the value written to
-	 * UTexture::SRGB, which SpoutTextureUtils::EnsureTransientTexture treats as part of the
-	 * destination texture's identity -- so changing the colour space at runtime recreates the
-	 * destination rather than reinterpreting the existing one.
+	 * Auto follows the format's documented convention (8-bit: sRGB; 10-bit and float: linear);
+	 * Linear is always representable; SRGB is honoured by the sampler where an sRGB view exists
+	 * (8-bit), by a shader decode into linear 16-bit float where one exists (10-bit), and refused
+	 * otherwise (float). The interpretation's pixel format and sRGB flag are the received texture's,
+	 * which SpoutTextureUtils::EnsureTransientTexture treats as its identity -- so a different
+	 * colour space gives a different texture rather than reinterpreting the existing one.
 	 *
 	 * Pure comparison with no engine state.
 	 */
+	EColorSpaceResult ResolveReceiverInterpretation(
+		const FReceiverFormat& Format,
+		ESpoutColorSpace Requested,
+		FReceiveInterpretation& OutInterpretation);
+
+	/** ResolveReceiverInterpretation, reduced to the received texture's sRGB flag. */
 	EColorSpaceResult ResolveReceiverColorSpace(
 		const FReceiverFormat& Format,
 		ESpoutColorSpace Requested,

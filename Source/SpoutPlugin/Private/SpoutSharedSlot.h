@@ -197,12 +197,14 @@ public:
 	static constexpr uint32 CompletionTimeoutMs = 100;
 
 	/** Null when a precondition fails; OutWhy says which. Nothing is submitted before it returns. */
-	static TUniquePtr<FSpoutSlotReceive> Create(const FName& Name, const FIdentity& Identity, EPixelFormat PixelFormat, FString& OutWhy);
+	static TUniquePtr<FSpoutSlotReceive> Create(const FName& Name, const FIdentity& Identity, EPixelFormat PixelFormat, bool bShaderReadable, FString& OutWhy);
 
 	/** Hands every object to FSpoutGpuRetirement with its outstanding work. Never releases one directly. */
 	~FSpoutSlotReceive();
 
 	const FIdentity& GetIdentity() const { return Identity; }
+	/** Whether the slots' RHI textures can be read by a shader: only for a session that decodes from them. */
+	bool IsShaderReadable() const { return bShaderReadable; }
 	uint64 GetGeneration() const { return Generation; }
 #if SPOUT_WITH_INSTRUMENT
 	void ObserveDestination(int32 InstrumentStream);
@@ -229,9 +231,10 @@ public:
 
 	/**
 	 * After a Completed copy: publishes Slot and queues, on RHICmdList, a wait on its written value, the copy into
-	 * Destination and the read signal. False when nothing was queued.
+	 * Destination and the read signal. False when nothing was queued. With bDecodeSrgb (the slots must be shader-readable)
+	 * the copy is replaced by the sRGB-to-linear decode pass into Destination (SpoutColorDecode.h), so no copy is added.
 	 */
-	bool PublishAndConsume(int32 Slot, uint64 WrittenValue, FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, ERHIAccess DestinationBefore, ERHIAccess DestinationAfter);
+	bool PublishAndConsume(int32 Slot, uint64 WrittenValue, FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, ERHIAccess DestinationBefore, ERHIAccess DestinationAfter, bool bDecodeSrgb = false);
 
 	/** A keyed source's release is recorded on the native context: submit it once access was given back. */
 	void FlushKeyedRelease();
@@ -245,6 +248,7 @@ private:
 #endif
 	FSpoutSlotReceive(const FName& InName, const FIdentity& InIdentity);
 	bool Initialize(EPixelFormat PixelFormat, FString& OutWhy);
+	bool bShaderReadable = false;
 	void Fail(const TCHAR* Why, HRESULT Result);
 
 	const FName Name;

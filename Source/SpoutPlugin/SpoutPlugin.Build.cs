@@ -100,7 +100,8 @@ public class SpoutPlugin : ModuleRules
         PrivateDependencyModuleNames.AddRange(new string[]
         {
             // "Projects" provides IPluginManager, used for startup Spout.dll diagnostics.
-            "ApplicationCore", "Slate", "SlateCore", "Projects"
+            // "SpoutPluginShaders" decodes 10-bit frames received with Color Space = sRGB (SpoutColorDecode.h).
+            "ApplicationCore", "Slate", "SlateCore", "Projects", "SpoutPluginShaders"
         });
         if (Target.bBuildEditor)
         {
