@@ -205,6 +205,7 @@ namespace SpoutHostTest
 		Instance->ShutdownSenderName  = FName(*FString::Printf(TEXT("SpoutHostTest_Exit_%u"), ProcessId));
 		Instance->WarmupSenderName    = FName(*FString::Printf(TEXT("SpoutHostTest_Warm_%u"), ProcessId));
 		Instance->ViewportSenderName  = FName(*FString::Printf(TEXT("SpoutHostTest_View_%u"), ProcessId));
+		Instance->ColorDecodeSenderName = FName(*FString::Printf(TEXT("SpoutHostTest_Decode_%u"), ProcessId));
 
 		Instance->TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 			FTickerDelegate::CreateRaw(Instance, &FSmokeRunner::Tick), 0.0f);
@@ -310,6 +311,7 @@ namespace SpoutHostTest
 		case EStep::ReceiverCycles:       bStepComplete = StepReceiverCycles();       break;
 		case EStep::LevelTravel:          bStepComplete = StepLevelTravel();          break;
 		case EStep::StaleSessionCheck:    bStepComplete = StepStaleSessionCheck();    break;
+		case EStep::ColorDecode:          bStepComplete = StepColorDecode();          break;
 		case EStep::ViewportSenderStart:     bStepComplete = StepViewportSenderStart();     break;
 		case EStep::ViewportSenderAdvertise: bStepComplete = StepViewportSenderAdvertise(); break;
 		case EStep::ViewportSenderFrames:    bStepComplete = StepViewportSenderFrames();    break;
@@ -337,7 +339,8 @@ namespace SpoutHostTest
 			case EStep::SameNameRestart:      Advance(EStep::ReceiverCycles);       break;
 			case EStep::ReceiverCycles:       Advance(EStep::LevelTravel);          break;
 			case EStep::LevelTravel:          Advance(EStep::StaleSessionCheck);    break;
-			case EStep::StaleSessionCheck:    Advance(EStep::ViewportSenderStart);  break;
+			case EStep::StaleSessionCheck:    Advance(EStep::ColorDecode);          break;
+			case EStep::ColorDecode:          Advance(EStep::ViewportSenderStart);  break;
 			case EStep::ViewportSenderStart:     Advance(EStep::ViewportSenderAdvertise); break;
 			case EStep::ViewportSenderAdvertise: Advance(EStep::ViewportSenderFrames);    break;
 			case EStep::ViewportSenderFrames:    Advance(EStep::ViewportSenderResize);    break;
@@ -877,6 +880,138 @@ namespace SpoutHostTest
 		}
 
 		FReport::Get()->Mark(Markers::NoStaleSessionPass);
+		return true;
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Color Space sRGB on a 10-bit sender
+	// ---------------------------------------------------------------------------------------------
+
+	namespace ColorDecodeCheck
+	{
+		constexpr int32 Width = 64;
+		constexpr int32 Height = 16;
+
+		/** R takes every code 0..1023 once, G its complement, B a permutation; alpha cycles through its four codes. */
+		void Codes(int32 X, int32 Y, uint32& R, uint32& G, uint32& B, uint32& A)
+		{
+			R = uint32(Y * Width + X);
+			G = 1023u - R;
+			B = (R * 7u) & 1023u;
+			A = uint32((X + Y) & 3);
+		}
+
+		/** The exact IEC 61966-2-1 decode of a 10-bit code, in double precision. */
+		double Decode(uint32 Code)
+		{
+			const double V = double(Code) / 1023.0;
+			return V <= 0.04045 ? V / 12.92 : FMath::Pow((V + 0.055) / 1.055, 2.4);
+		}
+
+		/** The match tolerance: 2e-4 absolute or 1e-3 relative, whichever is larger. */
+		bool Near(double Got, double Want) { return FMath::Abs(Got - Want) <= FMath::Max(2e-4, 1e-3 * FMath::Abs(Want)); }
+	}
+
+	bool FSmokeRunner::StepColorDecode()
+	{
+		using namespace ColorDecodeCheck;
+		if (StepFrames == 1)
+		{
+			ColorDecodeSource.Reset(NewObject<UTextureRenderTarget2D>(GetTransientPackage()));
+			ColorDecodeSource->InitCustomFormat(Width, Height, PF_A2B10G10R10, true);
+			ColorDecodeSource->UpdateResourceImmediate(true);
+			TArray<uint8> Bytes;
+			Bytes.SetNumZeroed(Width * Height * 4);
+			for (int32 Y = 0; Y < Height; ++Y)
+			for (int32 X = 0; X < Width; ++X)
+			{
+				uint32 R, G, B, A;
+				Codes(X, Y, R, G, B, A);
+				const uint32 Packed = (A << 30) | (B << 20) | (G << 10) | R;
+				FMemory::Memcpy(&Bytes[(Y * Width + X) * 4], &Packed, 4);
+			}
+			FTextureRenderTargetResource* Resource = ColorDecodeSource->GameThread_GetRenderTargetResource();
+			ENQUEUE_RENDER_COMMAND(SpoutHostTestColorDecodeUpload)([Resource, Bytes = MoveTemp(Bytes)](FRHICommandListImmediate& Cmd)
+			{
+				Cmd.UpdateTexture2D(Resource->GetRenderTargetTexture(), 0, FUpdateTextureRegion2D(0, 0, 0, 0, Width, Height), Width * 4, Bytes.GetData());
+			});
+			return false;
+		}
+
+		// Sent and received every frame, as a per-tick Blueprint does. The receive keeps the default settings (Async
+		// Receive requested, which a 10-bit sender serves through the synchronous path) and asks for Color Space sRGB.
+		if (!USpoutBPFunctionLibrary::SpoutSender(ColorDecodeSenderName, ESpoutSendTextureFrom::TextureRenderTarget2D, ColorDecodeSource.Get()))
+		{
+			if (StepFrames > SettleFrames * 4)
+			{
+				FailAndFinish(TEXT("colour decode: the 10-bit sender was refused"));
+			}
+			return false;
+		}
+		UTexture2D* Texture = ColorDecodeTexture.Get();
+		UMaterialInstanceDynamic* Material = ColorDecodeMaterial.Get();
+		const bool bReceived = USpoutBPFunctionLibrary::SpoutReceiver(ColorDecodeSenderName, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::SRGB);
+		ColorDecodeTexture.Reset(Texture);
+		ColorDecodeMaterial.Reset(Material);
+		const FSpoutStreamStatus Status = USpoutBPFunctionLibrary::GetSpoutStreamStatus(ColorDecodeSenderName, ESpoutType::Receiver);
+		if (!bReceived || !Texture || !Status.bHasFrame || Status.FramesSubmitted < 2)
+		{
+			if (StepFrames > 120)
+			{
+				FailAndFinish(FString::Printf(TEXT("colour decode: no decoded frame after %d frames (accepted %d, frames %lld)"),
+					StepFrames, bReceived ? 1 : 0, Status.FramesSubmitted));
+			}
+			return false;
+		}
+		if (Texture->GetPixelFormat() != PF_FloatRGBA || Texture->GetSizeX() != Width || Texture->GetSizeY() != Height)
+		{
+			FailAndFinish(FString::Printf(TEXT("colour decode: the received texture is %dx%d %s, not %dx%d PF_FloatRGBA"),
+				Texture->GetSizeX(), Texture->GetSizeY(), GetPixelFormatString(Texture->GetPixelFormat()), Width, Height));
+			return false;
+		}
+
+		FlushRenderingCommands();
+		TArray<FFloat16Color> Texels;
+		FTextureResource* Resource = Texture->GetResource();
+		ENQUEUE_RENDER_COMMAND(SpoutHostTestColorDecodeRead)([Resource, &Texels](FRHICommandListImmediate& Cmd)
+		{
+			FRHITexture* RHI = Resource ? Resource->GetTextureRHI() : nullptr;
+			if (!RHI) return;
+			Cmd.Transition(FRHITransitionInfo(RHI, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+			Cmd.ReadSurfaceFloatData(RHI, FIntRect(0, 0, Width, Height), Texels, CubeFace_PosX, 0, 0);
+			Cmd.Transition(FRHITransitionInfo(RHI, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+		});
+		FlushRenderingCommands();
+		int32 Misses = Texels.Num() == Width * Height ? 0 : Width * Height;
+		double Worst = 0.0;
+		FString First;
+		for (int32 I = 0; I < Texels.Num(); ++I)
+		{
+			const int32 X = I % Width, Y = I / Width;
+			uint32 R, G, B, A;
+			Codes(X, Y, R, G, B, A);
+			const FFloat16Color& T = Texels[I];
+			Worst = FMath::Max3(Worst, FMath::Abs(T.R.GetFloat() - Decode(R)), FMath::Max(FMath::Abs(T.G.GetFloat() - Decode(G)), FMath::Abs(T.B.GetFloat() - Decode(B))));
+			const bool bOk = Near(T.R.GetFloat(), Decode(R)) && Near(T.G.GetFloat(), Decode(G)) && Near(T.B.GetFloat(), Decode(B))
+				&& FMath::Abs(T.A.GetFloat() - double(A) / 3.0) <= 1e-3;
+			if (!bOk && Misses++ == 0)
+			{
+				First = FString::Printf(TEXT("(%d,%d) codes %u,%u,%u,%u decoded to %.6f,%.6f,%.6f,%.4f"), X, Y, R, G, B, A,
+					T.R.GetFloat(), T.G.GetFloat(), T.B.GetFloat(), T.A.GetFloat());
+			}
+		}
+		USpoutBPFunctionLibrary::CloseReceiver(ColorDecodeSenderName, Texture, Material);
+		USpoutBPFunctionLibrary::CloseSender(ColorDecodeSenderName);
+		ColorDecodeTexture.Reset();
+		ColorDecodeMaterial.Reset();
+		ColorDecodeSource.Reset();
+		if (Misses)
+		{
+			FailAndFinish(FString::Printf(TEXT("colour decode: %d of %d texels differ from the exact sRGB decode; first %s"), Misses, Width * Height, *First));
+			return false;
+		}
+		UE_LOG(LogTemp, Display, TEXT("SpoutHostTest colour decode: %d texels within the criterion, largest RGB error %.3g"), Width * Height, Worst);
+		FReport::Get()->Mark(Markers::ColorDecodePass);
 		return true;
 	}
 

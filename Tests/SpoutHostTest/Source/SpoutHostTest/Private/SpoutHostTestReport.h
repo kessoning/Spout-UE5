@@ -49,6 +49,7 @@ namespace SpoutHostTest
 		inline const TCHAR* ApiInitPass          = TEXT("SPOUT_PLUGIN_API_INIT_PASS");
 		inline const TCHAR* SameNameRestartPass  = TEXT("SPOUT_SAME_NAME_RESTART_PASS");
 		inline const TCHAR* NoStaleSessionPass   = TEXT("SPOUT_NO_STALE_SESSION_PASS");
+		inline const TCHAR* ColorDecodePass      = TEXT("SPOUT_COLOR_DECODE_PASS");
 		inline const TCHAR* ShutdownComplete     = TEXT("SPOUT_SHUTDOWN_COMPLETE");
 		inline const TCHAR* PerfBegin            = TEXT("SPOUT_PERF_BEGIN");
 		inline const TCHAR* PerfPass             = TEXT("SPOUT_PERF_PASS");

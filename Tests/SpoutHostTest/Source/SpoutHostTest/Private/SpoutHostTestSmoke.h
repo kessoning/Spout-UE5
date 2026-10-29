@@ -78,6 +78,7 @@ namespace SpoutHostTest
 			ReceiverCycles,
 			LevelTravel,
 			StaleSessionCheck,
+			ColorDecode,
 			ViewportSenderStart,
 			ViewportSenderAdvertise,
 			ViewportSenderFrames,
@@ -117,6 +118,14 @@ namespace SpoutHostTest
 		bool StepReceiverCycles();
 		bool StepLevelTravel();
 		bool StepStaleSessionCheck();
+
+		/**
+		 * Color Space sRGB on a 10-bit sender: a 10-bit render target holding every code in each channel and
+		 * all four alpha codes is sent and received with the default receive settings and Color Space sRGB; the received
+		 * texture must be 16-bit float and hold the exact sRGB decode of every texel, alpha unchanged. In a packaged build
+		 * this also proves the decode shader was cooked into the global shader map.
+		 */
+		bool StepColorDecode();
 
 		/**
 		 * GameViewportSenderSmoke.
@@ -217,6 +226,10 @@ namespace SpoutHostTest
 		TStrongObjectPtr<UMaterialInstanceDynamic> ReceivedMaterial;
 
 		FName LifecycleSenderName;
+		FName ColorDecodeSenderName;
+		TStrongObjectPtr<UTextureRenderTarget2D> ColorDecodeSource;
+		TStrongObjectPtr<UTexture2D> ColorDecodeTexture;
+		TStrongObjectPtr<UMaterialInstanceDynamic> ColorDecodeMaterial;
 		FName ShutdownSenderName;
 		FName WarmupSenderName;
 

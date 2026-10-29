@@ -100,6 +100,8 @@ namespace
 	struct FViewportCheck
 	{
 		FName Name;
+		/** Linear (raw texels, compared exactly) or SRGB (a 10-bit back buffer decoded to linear 16-bit float). */
+		ESpoutColorSpace Mode = ESpoutColorSpace::Linear;
 		TUniquePtr<SpoutT1::FViewportSequence> Sequence;
 		uint64 ReceivedAtSend = 0;
 		double Deadline = 0.0;
@@ -175,7 +177,7 @@ namespace
 					}
 					break;
 				case SpoutT1::EAction::Receive:
-					USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: these checks cover the synchronous receive*/ false);
+					USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, Mode, /*bAsyncReceive: these checks cover the synchronous receive*/ false);
 					FlushRenderingCommands();
 					break;
 				case SpoutT1::EAction::Verify:
@@ -197,6 +199,11 @@ namespace
 
 		void VerifyOne(const FIntPoint& Want)
 		{
+			if (Mode == ESpoutColorSpace::SRGB && Texture && Texture->GetPixelFormat() == PF_FloatRGBA)
+			{
+				VerifyDecoded(Want);
+				return;
+			}
 			const TArray<FLinearColor> Got = ReadLinear(RHIOf(Texture));
 			const int32 Distinct = CountDistinct(Captured, 4);
 			const FString Step = FString::Printf(TEXT("%dx%d %s"), CapturedSize.X, CapturedSize.Y, GetPixelFormatString(CapturedFormat));
@@ -226,6 +233,76 @@ namespace
 			bCaptureTaken = false;
 		}
 
+		/** The exact IEC 61966-2-1 decode, in double precision. */
+		static double SrgbDecode(double Encoded)
+		{
+			return Encoded <= 0.04045 ? Encoded / 12.92 : FMath::Pow((Encoded + 0.055) / 1.055, 2.4);
+		}
+
+		/**
+		 * Color Space sRGB on a 10-bit back buffer: every texel of the 16-bit float texture against the exact decode of the
+		 * texel sent (tolerance: 2e-4 absolute or 1e-3 relative; alpha unchanged within 1e-3).
+		 */
+		void VerifyDecoded(const FIntPoint& Want)
+		{
+			TArray<FFloat16Color> Got;
+			FRHITexture* RHI = RHIOf(Texture);
+			const FIntPoint Size(Texture->GetSizeX(), Texture->GetSizeY());
+			ENQUEUE_RENDER_COMMAND(SpoutT1ReadHalf)([RHI, Size, &Got](FRHICommandListImmediate& Cmd)
+			{
+				if (!RHI) return;
+				Cmd.Transition(FRHITransitionInfo(RHI, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+				Cmd.ReadSurfaceFloatData(RHI, FIntRect(0, 0, Size.X, Size.Y), Got, CubeFace_PosX, 0, 0);
+				Cmd.Transition(FRHITransitionInfo(RHI, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+			});
+			FlushRenderingCommands();
+			const FString Step = FString::Printf(TEXT("%dx%d %s decoded"), CapturedSize.X, CapturedSize.Y, GetPixelFormatString(CapturedFormat));
+			bool bOk = true;
+			if (CapturedSize != Want || CapturedFormat != PF_A2B10G10R10)
+			{
+				bOk = false;
+				Failures.Add(FString::Printf(TEXT("%s: the sent back buffer is not a %dx%d 10-bit one"), *Step, Want.X, Want.Y));
+			}
+			if (CountDistinct(Captured, 4) < 2)
+			{
+				bOk = false;
+				Failures.Add(FString::Printf(TEXT("%s: the sent image is uniform, so it cannot show a decode"), *Step));
+			}
+			int32 Misses = Got.Num() == Captured.Num() ? 0 : FMath::Max(1, Captured.Num());
+			double Worst = 0.0;
+			FString First;
+			for (int32 I = 0; Got.Num() == Captured.Num() && I < Captured.Num(); ++I)
+			{
+				const FLinearColor& S = Captured[I];
+				const FFloat16Color& D = Got[I];
+				const double Want3[3] = { SrgbDecode(S.R), SrgbDecode(S.G), SrgbDecode(S.B) };
+				const double Got3[3] = { D.R.GetFloat(), D.G.GetFloat(), D.B.GetFloat() };
+				bool bTexel = FMath::Abs(D.A.GetFloat() - S.A) <= 1e-3;
+				for (int32 C = 0; C < 3; ++C)
+				{
+					const double Err = FMath::Abs(Got3[C] - Want3[C]);
+					Worst = FMath::Max(Worst, Err);
+					bTexel &= Err <= FMath::Max(2e-4, 1e-3 * FMath::Abs(Want3[C]));
+				}
+				if (!bTexel && Misses++ == 0)
+				{
+					First = FString::Printf(TEXT("texel %d sent %.5f,%.5f,%.5f,%.3f decoded %.6f,%.6f,%.6f,%.3f, exact %.6f,%.6f,%.6f"), I, S.R, S.G, S.B, S.A,
+						Got3[0], Got3[1], Got3[2], D.A.GetFloat(), Want3[0], Want3[1], Want3[2]);
+				}
+			}
+			if (Misses)
+			{
+				bOk = false;
+				Failures.Add(FString::Printf(TEXT("%s: %d of %d texels differ from the exact sRGB decode of the back buffer sent (%d read); first %s"),
+					*Step, Misses, Captured.Num(), Got.Num(), *First));
+			}
+			if (bOk)
+			{
+				Verified.Add(FString::Printf(TEXT("%s, largest RGB error %.3g, alpha %.3f"), *Step, Worst, Captured.Num() ? Captured[0].A : -1.0f));
+			}
+			bCaptureTaken = false;
+		}
+
 		void Finish()
 		{
 			USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material);
@@ -244,14 +321,14 @@ namespace
 					Failures.Add(FString::Printf(TEXT("size %d was requested %d times"), I, Sequence->GetResizeRequests(I)));
 				}
 			}
-			LogResult(TEXT("Viewport"), Failures, FString::Printf(TEXT("path=%s verified=[%s] wraps=%lld requests=[%s]"),
-				SpoutInterop::ToString(SpoutInterop::GetMode()), *FString::Join(Verified, TEXT("; ")), Wraps, *FString::Join(Requests, TEXT("; "))));
+			LogResult(TEXT("Viewport"), Failures, FString::Printf(TEXT("path=%s colorspace=%s verified=[%s] wraps=%lld requests=[%s]"),
+				SpoutInterop::ToString(SpoutInterop::GetMode()), *UEnum::GetValueAsString(Mode), *FString::Join(Verified, TEXT("; ")), Wraps, *FString::Join(Requests, TEXT("; "))));
 			RequestEngineExit(TEXT("Spout.T1.Viewport finished"));
 		}
 	};
 	TSharedPtr<FViewportCheck> GViewportCheck;
 
-	void StartViewportCheck()
+	void StartViewportCheck(const TArray<FString>& Args)
 	{
 		if (GViewportCheck.IsValid())
 		{
@@ -276,6 +353,7 @@ namespace
 		GViewportCheck = MakeShared<FViewportCheck>();
 		FViewportCheck& Check = *GViewportCheck;
 		Check.Name = FName(*(TEXT("SpoutT1Viewport_") + FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+		Check.Mode = (Args.Num() > 0 && Args[0].Equals(TEXT("sRGB"), ESearchCase::IgnoreCase)) ? ESpoutColorSpace::SRGB : ESpoutColorSpace::Linear;
 		Check.Sequence = MakeUnique<SpoutT1::FViewportSequence>(std::vector<SpoutT1::FSize>{ SpoutT1::FSize{1280, 720}, SpoutT1::FSize{640, 360} });
 		Check.Deadline = FPlatformTime::Seconds() + 90.0;
 		Check.WrapsAtStart = SpoutInterop::GetWrapCallCount();
@@ -289,8 +367,8 @@ namespace
 
 	FAutoConsoleCommand GSpoutT1Viewport(
 		TEXT("Spout.T1.Viewport"),
-		TEXT("T1 correctness run only: sends the game viewport through the shared-slot path, compares the received texture with the exact back buffer sent, resizes and repeats, then exits. -game processes only."),
-		FConsoleCommandDelegate::CreateStatic(&StartViewportCheck));
+		TEXT("T1 correctness run only: sends the game viewport through the shared-slot path, compares the received texture with the exact back buffer sent, resizes and repeats, then exits. -game processes only. Argument sRGB: receives with Color Space sRGB and compares a decoded 10-bit back buffer with the exact sRGB decode of every texel sent."),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&StartViewportCheck));
 
 	// ---------------------------------------------------------------------------------------------
 	// Spout.T1.LegacyControl

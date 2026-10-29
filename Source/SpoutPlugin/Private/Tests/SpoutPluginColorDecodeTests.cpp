@@ -19,6 +19,7 @@
 #include "Misc/AutomationTest.h"
 #if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
 #include "SpoutBPFunctionLibrary.h"
+#include "SpoutColorDecode.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutTestExpectations.h"
 #include "Engine/Engine.h"
@@ -41,6 +42,7 @@
 #include "TextureResource.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 #define SPOUT_DECODE_FLAGS (EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::EngineFilter)
 
@@ -574,6 +576,86 @@ bool FSpoutDecodeControls::RunTest(const FString&)
 	}
 	FlushRenderingCommands();
 	return true;
+}
+
+namespace SpoutColorDecodeCost
+{
+	/**
+	 * Spout.Dev.MeasureColorDecode [Width] [Height] [Passes] (development command). On the GPU, with
+	 * timestamp queries around back-to-back work in one command list: Passes copies of a 10-bit texture into a 10-bit
+	 * texture, bracketed as the shared-slot path brackets the copy that the decode replaces, then Passes decode passes of
+	 * the same texture into a 16-bit float texture. Seven rounds; logs the per-pass median and range of both, and the
+	 * render thread's recording time per pass. Measures the machine it runs on; no display latency is implied.
+	 */
+	void Measure(const TArray<FString>& Args)
+	{
+		const int32 W = Args.Num() > 0 ? FMath::Max(1, FCString::Atoi(*Args[0])) : 1920;
+		const int32 H = Args.Num() > 1 ? FMath::Max(1, FCString::Atoi(*Args[1])) : 1080;
+		const int32 Passes = Args.Num() > 2 ? FMath::Clamp(FCString::Atoi(*Args[2]), 1, 2000) : 200;
+		constexpr int32 Rounds = 7;
+		TArray<double> CopyUs, DecodeUs, CopyCpuUs, DecodeCpuUs;
+		bool bOk = true;
+		ENQUEUE_RENDER_COMMAND(SpoutMeasureColorDecode)([W, H, Passes, &CopyUs, &DecodeUs, &CopyCpuUs, &DecodeCpuUs, &bOk](FRHICommandListImmediate& Cmd)
+		{
+			auto Make = [&Cmd, W, H](const TCHAR* Name, EPixelFormat Format)
+			{
+				const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create2D(Name, W, H, Format)
+					.SetFlags(ETextureCreateFlags::ShaderResource | ETextureCreateFlags::RenderTargetable).SetInitialState(ERHIAccess::SRVMask);
+#if ENGINE_MINOR_VERSION >= 8
+				return Cmd.CreateTexture(Desc);
+#else
+				return RHICreateTexture(Desc);
+#endif
+			};
+			FTextureRHIRef Source = Make(TEXT("SpoutCostSource"), PF_A2B10G10R10);
+			FTextureRHIRef Copy = Make(TEXT("SpoutCostCopy"), PF_A2B10G10R10);
+			FTextureRHIRef Decoded = Make(TEXT("SpoutCostDecoded"), PF_FloatRGBA);
+			if (!Source || !Copy || !Decoded) { bOk = false; return; }
+			for (int32 Round = 0; Round < Rounds && bOk; ++Round)
+			{
+				FRenderQueryRHIRef Q0 = RHICreateRenderQuery(RQT_AbsoluteTime);
+				FRenderQueryRHIRef Q1 = RHICreateRenderQuery(RQT_AbsoluteTime);
+				FRenderQueryRHIRef Q2 = RHICreateRenderQuery(RQT_AbsoluteTime);
+				Cmd.EndRenderQuery(Q0);
+				const uint64 C0 = FPlatformTime::Cycles64();
+				for (int32 I = 0; I < Passes; ++I)
+				{
+					Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+					Cmd.Transition(FRHITransitionInfo(Copy, ERHIAccess::Unknown, ERHIAccess::CopyDest));
+					Cmd.CopyTexture(Source, Copy, FRHICopyTextureInfo());
+					Cmd.Transition(FRHITransitionInfo(Source, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+					Cmd.Transition(FRHITransitionInfo(Copy, ERHIAccess::CopyDest, ERHIAccess::SRVMask));
+				}
+				const uint64 C1 = FPlatformTime::Cycles64();
+				Cmd.EndRenderQuery(Q1);
+				for (int32 I = 0; I < Passes; ++I)
+				{
+					bOk &= SpoutColorDecode::DecodeSrgbToLinear(Cmd, Source, ERHIAccess::Unknown, Decoded, ERHIAccess::Unknown, ERHIAccess::SRVMask);
+				}
+				const uint64 C2 = FPlatformTime::Cycles64();
+				Cmd.EndRenderQuery(Q2);
+				Cmd.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+				uint64 T0 = 0, T1 = 0, T2 = 0;
+				bOk &= RHIGetRenderQueryResult(Q0, T0, true) && RHIGetRenderQueryResult(Q1, T1, true) && RHIGetRenderQueryResult(Q2, T2, true);
+				CopyUs.Add(double(T1 - T0) / Passes);
+				DecodeUs.Add(double(T2 - T1) / Passes);
+				CopyCpuUs.Add(FPlatformTime::ToMilliseconds64(C1 - C0) * 1000.0 / Passes);
+				DecodeCpuUs.Add(FPlatformTime::ToMilliseconds64(C2 - C1) * 1000.0 / Passes);
+			}
+		});
+		FlushRenderingCommands();
+		auto Median = [](TArray<double> V) { V.Sort(); return V.Num() ? V[V.Num() / 2] : -1.0; };
+		auto Low = [](const TArray<double>& V) { double M = V.Num() ? V[0] : -1.0; for (double X : V) M = FMath::Min(M, X); return M; };
+		auto High = [](const TArray<double>& V) { double M = V.Num() ? V[0] : -1.0; for (double X : V) M = FMath::Max(M, X); return M; };
+		UE_LOG(LogTemp, Display, TEXT("Spout colour decode cost: ok=%d size=%dx%d passes=%d rounds=%d gpu_us_per_pass copy10 median=%.2f [%.2f..%.2f] decode median=%.2f [%.2f..%.2f] added median=%.2f; render_thread_us_per_pass copy10 median=%.2f decode median=%.2f"),
+			bOk ? 1 : 0, W, H, Passes, CopyUs.Num(), Median(CopyUs), Low(CopyUs), High(CopyUs), Median(DecodeUs), Low(DecodeUs), High(DecodeUs),
+			Median(DecodeUs) - Median(CopyUs), Median(CopyCpuUs), Median(DecodeCpuUs));
+	}
+
+	FAutoConsoleCommand GSpoutMeasureColorDecode(
+		TEXT("Spout.Dev.MeasureColorDecode"),
+		TEXT("Development: GPU and render-thread time of the 10-bit sRGB decode pass against the copy it replaces. Arguments: [Width] [Height] [Passes]."),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&Measure));
 }
 
 #undef SPOUT_DECODE_FLAGS

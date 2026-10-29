@@ -217,6 +217,7 @@ foreach ($row in $rows)
             SameNameRestart  = ($launch.ObservedMarkers -contains 'SPOUT_SAME_NAME_RESTART_PASS')
             LevelTravel      = ($launch.ObservedMarkers -contains 'SPOUT_LEVEL_TRAVEL_PASS')
             NoStaleSession   = ($launch.ObservedMarkers -contains 'SPOUT_NO_STALE_SESSION_PASS')
+            ColorDecode      = ($launch.ObservedMarkers -contains 'SPOUT_COLOR_DECODE_PASS')
             ViewportSender   = ($launch.ObservedMarkers -contains 'SPOUT_VIEWPORT_SENDER_PASS')
             ShutdownComplete = ($launch.ObservedMarkers -contains 'SPOUT_SHUTDOWN_COMPLETE')
             ExitCode         = $launch.ExitCode
