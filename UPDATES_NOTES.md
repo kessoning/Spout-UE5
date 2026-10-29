@@ -161,6 +161,32 @@ all make the picture arrive later, and I'd rather keep it fresh, so I'm releasin
 written up plainly in the limitations document. I've only measured this with my own test app on my
 laptop, so I can't tell you yet how it behaves with other programs.
 
+And one fix that came out of testing with the Spout demo receiver. If you sent your game viewport
+from one Unreal and received it in another Unreal, the picture came out too bright and washed out,
+and no colour setting on the receiving side could fix it. Here's why. Unreal keeps the picture it
+shows on screen already prepared for the screen, with the brightness curve baked in, and by default
+it keeps it in a slightly finer format than usual. Pictures in that format normally hold plain,
+unprepared colours, and Spout has no way to say which kind it's sending. So the receiving Unreal
+assumed plain colours and the curve got applied twice. The demo receiver shows the picture exactly
+as it arrives, which is why it always looked right there.
+
+Now the sRGB colour setting on the receiving side works for those pictures too. Pick sRGB and the
+picture looks the way it did on the sending screen. I checked every shade that format can hold
+against the exact maths, and a real game window as well, on both Unreal versions I test, and they
+all came out where they should. Transparency comes through untouched. The default setting stays as
+it was, because the same format is also used for render targets that really do hold plain colours,
+and those already looked right. The plugin can't tell the two apart, so it doesn't guess: you choose.
+Nothing changes on the sending side.
+
+A few things to know. A picture received this way takes twice the memory, because it's stored in a
+finer format so no shading detail gets lost. If you also copy it into your own render target, that
+one needs the RGBA16f format. It works with the normal way of receiving, not the background one, so
+a stream like this quietly uses the normal way, and the log tells you so. On my laptop the colour
+step took about as long as the plain copy it replaces in the standard setup, and it doesn't hold the
+picture back by a frame. HDR is a different story: with HDR output turned on, Unreal's picture uses
+a different curve that this setting doesn't handle. Because this changes the plugin itself, I'm
+running my release tests again on the new version instead of reusing the old results.
+
 ---
 
 ## SEPTEMBER 2026 UPDATES

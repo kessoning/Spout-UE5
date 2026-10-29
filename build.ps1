@@ -584,6 +584,7 @@ function Test-ReleaseArchive
         # Descriptor present, and its VersionName matches the release being built.
         $descriptorEntryName = "$PluginName/SpoutPlugin.uplugin"
         $descriptorEntry = $archive.Entries | Where-Object { ($_.FullName -replace '\\', '/') -eq $descriptorEntryName } | Select-Object -First 1
+        $descriptor = $null
         if (-not $descriptorEntry)
         {
             [void] $problems.Add("missing $descriptorEntryName")
@@ -622,6 +623,24 @@ function Test-ReleaseArchive
         if (-not (Test-EntryPrefix $entries 'Source/SpoutPlugin/Public/'))
         {
             [void] $problems.Add('missing Source/SpoutPlugin/Public/')
+        }
+
+        # The shader module (the 10-bit sRGB decode): its source, its binary and the shader file it
+        # maps. Without the .usf the module logs an error at startup and Color Space sRGB on a 10-bit
+        # sender cannot be compiled or cooked.
+        if ($descriptor -and @($descriptor.Modules | Where-Object { $_.Name -eq 'SpoutPluginShaders' }).Count -gt 0)
+        {
+            foreach ($shaderEntry in @('Source/SpoutPluginShaders/SpoutPluginShaders.Build.cs', 'Shaders/Private/SpoutColorDecode.usf'))
+            {
+                if (-not (Test-Entry $entries $shaderEntry))
+                {
+                    [void] $problems.Add("missing $shaderEntry")
+                }
+            }
+            if (@($entries | Where-Object { $_ -like "$PluginName/Binaries/Win64/*-SpoutPluginShaders.dll" }).Count -eq 0)
+            {
+                [void] $problems.Add('missing the SpoutPluginShaders module binary in Binaries/Win64')
+            }
         }
 
         # Shipped example content and the plugin icon. BuildPlugin stages Content/ (the descriptor
@@ -1160,6 +1179,11 @@ try
                 (Join-Path $buildOut 'Content'),
                 (Join-Path $buildOut 'Resources\Icon128.png')
             )
+            # The shader module maps the plugin's Shaders folder; BuildPlugin stages it by default.
+            if (Test-Path -LiteralPath (Join-Path $PluginRoot 'Source\SpoutPluginShaders'))
+            {
+                $requiredInOutput += (Join-Path $buildOut 'Shaders\Private\SpoutColorDecode.usf')
+            }
 
             $outputMissing = $false
             foreach ($path in $requiredInOutput)

@@ -21,14 +21,14 @@
  ],
  "basis": "generated",
  "inputs": {
-  "Docs/USER_MANUAL_SOURCE.md": "f42dd52fdf23f5b50e6aa82dd5234258ea7f4b323b6139571e37da112a6d0620",
-  "Docs/build_user_manual.py": "c134d44375fc7ca074678d7bc6be254919c36a5d878d53650075d8c53bf07202",
-  "SpoutPlugin.uplugin": "2423d19cbdb4c9c43cca0876b5c574846ce773f2caf0db9f2a79667adfcca018",
-  "build.ps1": "ff82c13ea6ee42da78f52188831bdf4923fddef82cb06d57333cd804dd4f4b7c"
+  "Docs/USER_MANUAL_SOURCE.md": "081709359f07f40b46d7887830abf1f45414d8f69b871511b92f1fbd22755f73",
+  "Docs/build_user_manual.py": "d1ed2f27b41090a108982dad97359dfaa728bde22e4de4918873ebb83359d42b",
+  "SpoutPlugin.uplugin": "d2528aa99b4a81cb6865e2516d19d89bbe0a2552caa042f860763639d1b43f04",
+  "build.ps1": "6f4eff974a468d7ad735b7a8bdfc3c240da13a3363409531fd3b2c33d3aebf65"
  },
  "pdf": {
   "path": "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf",
-  "sha256": "ef9c546f075830fec4c66762831e2e3b682c1bb8efe325bab07bcc742b05c046"
+  "sha256": "b9d0291f27341d4fe715021e42ccc4019bb3b601aabe9adfa183f52a57d01619"
  },
  "what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them"
 }

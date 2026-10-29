@@ -214,15 +214,18 @@ Call Spout Receiver continuously with a matching name.
 Outputs: Out Texture (transient texture, resized to the stream), Out Mat (dynamic material
 instance created from Input Material on first call, with Out Texture bound to the parameter), and
 Optional Output Render Target (the frame is also copied into it if provided; its pixel format
-must match the incoming frame and it must be single-sampled, otherwise it is left untouched with
-a logged warning while Out Texture keeps updating).
+must match the incoming frame, or be RGBA16f for a 10-bit sender received with Color Space sRGB,
+and it must be single-sampled, otherwise it is left untouched with a logged warning while Out
+Texture keeps updating).
 
 Color Space (advanced pin): how the received bytes are interpreted. Auto follows the format
-convention and is right for almost every sender; Linear turns decoding off for senders that
-publish linear 8-bit data; sRGB forces decoding and is valid for 8-bit frames only. An 8-bit
-`_UNORM` format does not say which case applies (this plugin's sender publishes `_UNORM` for sRGB
-and Force Linear Gamma render targets alike), so pick Linear yourself for a linear sender. See the
-Blueprint API Reference for the full contract.
+convention: right for 8-bit video and for 10-bit and float render targets. Linear turns decoding
+off for senders that publish linear 8-bit data. sRGB decodes sRGB-encoded values: 8-bit frames
+through the sampler, 10-bit frames into a linear 16-bit float texture; it is refused for float
+frames. An 8-bit `_UNORM` format does not say which case applies (this plugin's sender publishes
+`_UNORM` for sRGB and Force Linear Gamma render targets alike), so pick Linear yourself for a
+linear sender. A 10-bit format does not say it either: an Unreal viewport stream carries display
+values in 10 bits, so pick sRGB for it. See the Blueprint API Reference for the full contract.
 
 Access: each copy takes Spout's cross-process access lock. If a peer (the sender or another
 receiver) holds the texture, the copy waits at most r.Spout.AccessWaitMs (default 2 ms) for it. If
@@ -332,19 +335,28 @@ Texture Parameter Name defaults to `SpoutTexture` when empty. Validate outputs b
 
 Color Space decides how the received bytes are interpreted. Auto (the default) follows the format
 convention: 8-bit frames (`_UNORM` or `_UNORM_SRGB`) decode as sRGB, 10-bit and 16-bit float
-frames stay linear, which matches what other Spout applications publish. Linear applies no
-decoding; use it when the sender publishes linear or data values in an 8-bit format, such as a
-render target created with Force Linear Gamma, which publishes the same `_UNORM` format as an sRGB
-one. sRGB forces decoding and is only valid for 8-bit frames; requesting it for a 10-bit
-or float frame fails the call with a logged diagnostic rather than being silently ignored.
+frames are read as linear. That is right for 8-bit video and for 10-bit and float render targets.
+Linear applies no decoding; use it when the sender publishes linear or data values in an 8-bit
+format, such as a render target created with Force Linear Gamma, which publishes the same `_UNORM`
+format as an sRGB one. sRGB decodes sRGB-encoded values: 8-bit frames through the texture sampler,
+and 10-bit frames by decoding each frame into a linear 16-bit float texture (`PF_FloatRGBA`) with
+the exact sRGB function, alpha copied unchanged, on the synchronous receive. Requesting it for a
+16-bit float frame fails the call with a logged diagnostic rather than being silently ignored.
+
+An Unreal viewport stream (the GameViewport sender) carries the back buffer's display values,
+sRGB-encoded, in 10 bits by default. Spout carries no colour information, so Auto cannot tell such
+a stream from a linear 10-bit render target and reads it as linear, which looks too bright. Set
+Color Space to sRGB on a receiver of an Unreal viewport stream. HDR back buffers (PQ or scRGB) are
+not decoded by any setting.
 
 All consumers of a sender name share one color interpretation. A conflicting request is refused;
 close the shared receiver before changing it. A source pixel-format change can establish a new
 interpretation. Optional targets catch up separately from the completed image, even if attached
 or recreated while the sender is paused.
 
-The Optional Output Render Target must match the incoming frame's pixel format exactly and be
-single-sampled. A mismatched target is left untouched and the mismatch is logged; the call still
+The Optional Output Render Target must match the received texture's pixel format exactly and be
+single-sampled: the incoming frame's format, or RGBA16f for a 10-bit sender received with Color
+Space sRGB. A mismatched target is left untouched and the mismatch is logged; the call still
 succeeds and Out Texture still updates. Size differences are resolved by resizing the target.
 
 Async Receive (`bAsyncReceive`, on by default; also a checkbox under Spout on the receiver
@@ -422,7 +434,8 @@ the Spout convention, which a receiver on Auto reads correctly.
 
 ESpoutType: Sender, Receiver. ESpoutSendTextureFrom: GameViewport, TextureRenderTarget2D.
 ESpoutColorSpace: Auto (follow the format convention - 8-bit decodes as sRGB, 10-bit and float
-stay linear), SRGB (force sRGB decoding; 8-bit formats only), Linear (no decoding).
+are read as linear), SRGB (decode sRGB-encoded values; 8-bit by the sampler, 10-bit into a linear
+16-bit float texture; refused for float), Linear (no decoding).
 
 ### FSenderStruct
 
@@ -571,6 +584,10 @@ senders, Linear when the sender publishes linear 8-bit data (for example a Force
 render target sent from another Unreal instance). The format cannot tell a receiver this, because
 8-bit sources are published as `_UNORM` whatever their gamma; set Linear in external applications
 too when the Unreal source uses Force Linear Gamma.
+
+Viewport stream too bright in Unreal: the GameViewport sender publishes display (sRGB-encoded)
+values in 10 bits, which Auto reads as linear. Set Color Space = sRGB on the receiving Unreal; an
+Optional Output Render Target must then be RGBA16f.
 
 Spout Demo Receiver shows "No sender detected" for an sRGB render target: fixed in 1.0.0. Earlier
 pre-release builds published 8-bit sRGB render targets as `_UNORM_SRGB`, which Spout 2.007's

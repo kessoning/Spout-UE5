@@ -17,8 +17,9 @@ For 1.0.0 the release pipeline:
 - installs the exact UE 5.3 and UE 5.8 archives into fresh host projects and repeats automation and
   Development/Shipping packaged checks from them. Those checks load `Spout.dll` from the packaged
   game, run the shipped Blueprint examples and their EndPlay cleanup, restart same-name streams,
-  travel between levels and compare pixels in both directions with an independent native Spout
-  process;
+  travel between levels, compare pixels in both directions with an independent native Spout
+  process, and receive a 10-bit stream with Color Space sRGB, checking every decoded value against
+  the exact sRGB function;
 - measures a packaged UE 5.8 Development host built from the exact UE 5.8 archive at a 60 Hz work
   rate on one development laptop (NVIDIA GeForce RTX 2060 laptop GPU, Intel Core i7-10750H,
   Windows 11): 1080p and 4K send and receive, four simultaneous 1080p streams, CPU receive
@@ -38,12 +39,12 @@ For 1.0.0 the release pipeline:
   Async Receive by default: for a receive shown by its log to have run on the worker from start to
   end, the receive-contention ratio of failed access attempts to publications is reported, not
   gated, because the worker counts every failed poll; delivery, freeze, recovery and every other
-  criterion apply unchanged, and a synchronous receive is judged by the original criteria. For 1.0.0
-  the release test, run once with Async Receive, did not meet its continuity limits (no 10-second
-  window below 90 %, at most 3 frames missed in a row, no freeze, a new frame within 3 frames after
-  a missed one), while whole-run delivery and frame pacing passed. 1.0.0 ships with that result as a
-  known limitation: the run is not counted as a pass, and the result is not established for other
-  workloads or hardware. Its measured result and what it looks like on screen are in
+  criterion apply unchanged, and a synchronous receive is judged by the original criteria. The
+  continuity limits are: no 10-second window below 90 %, at most 3 frames missed in a row, no
+  freeze, and a new frame within 3 frames after a missed one. The release test's result belongs to
+  one archive. An earlier 1.0.0 build's run met whole-run delivery and frame pacing but not the
+  continuity limits. Its result belongs to that build only; it does not carry over to changed
+  binaries. The earlier run's measured result and what it looks like on screen are in
   [limitations](LIMITATIONS.md#async-receive-the-default);
 - measures the same scene at its default quality with no Spout activity, with one stream sent,
   with one received, and with both. This shows the plugin's cost in a scene that keeps the GPU busy

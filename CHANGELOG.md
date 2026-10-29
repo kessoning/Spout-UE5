@@ -14,6 +14,57 @@ from the August preparation.
 
 ### Production-readiness fixes and release testing (September 2026)
 
+#### Viewport colour: Color Space sRGB decodes 10-bit streams (end of October 2026)
+- **Fixed: an Unreal viewport stream received by this plugin looked too bright, whatever the Color
+  Space setting.** The viewport sender publishes the back buffer as it is: in Unreal Engine 5's default
+  configuration `R10G10B10A2_UNORM` holding display (sRGB-encoded) values, with the alpha Unreal wrote.
+  The receiver read every 10-bit frame as linear and refused `sRGB` on 10-bit, because Direct3D has no
+  sRGB view of a 10-bit format. Found by the Spout Demo Receiver check; applications that show the
+  values as they are, as that one does, were already correct.
+- **`ESpoutColorSpace::SRGB` is now honoured on 10-bit frames.** Each frame is decoded by one
+  pixel-shader pass into a linear 16-bit float received texture (`PF_FloatRGBA`, sRGB flag off): the
+  exact IEC 61966-2-1 function per colour channel, computed in 32-bit float; alpha copied unchanged
+  (the 2-bit alpha, 0 included, is never forced opaque); one texel per pixel (`Load`: no filtering,
+  scaling or flip). 16-bit float keeps the 10-bit code's precision.
+- **Unchanged:** Auto and Linear (10-bit and float frames are read as linear, which is right for
+  10-bit and float render targets), the 8-bit behaviour, `sRGB` refused on 16-bit float frames, and
+  everything the sender publishes. Spout 2.007 carries no colour information, so Auto cannot tell a
+  10-bit viewport stream from a 10-bit render target and does not guess from values or names. The
+  documentation no longer says that 10-bit frames are linear by nature, and states the colour
+  contract (`Docs/LIMITATIONS.md`, Formats and color). HDR back buffers (PQ, scRGB) have no decode.
+- **Receive paths.** Shared-slot (the default synchronous path): the decode pass replaces the
+  slot-to-texture copy; the slot is created shader-readable for decode sessions only. Legacy wrap and
+  CPU readback: the frame is written into a per-receiver 10-bit intermediate texture and decoded in
+  the same render command. Async Receive handles 8-bit senders only, so a decode session runs
+  synchronously, as 10-bit sessions already did, and the status says why.
+- **Outputs.** The texture and the material carry the decoded values. An optional output render
+  target must have the received texture's format, so RGBA16f for a decoded session; a target of
+  another format is left untouched and logged, as before.
+- **One interpretation per session.** Auto and Linear on a 10-bit sender are the same
+  interpretation; `sRGB` is a different one, and a conflicting call is refused (false, outputs
+  untouched, logged) until Close Receiver.
+- **New runtime module `SpoutPluginShaders`** (Win64, loaded at `PostConfigInit`): maps
+  `/Plugin/SpoutPlugin` to the plugin's new `Shaders` folder and holds the decode. The release
+  archives ship `Shaders/`; `build.ps1` requires it.
+- **Tests.** `SpoutPlugin.ColorSpace.ExplicitOverridesAreHonouredOrRejected` asserted the defect
+  ("RGB10A2 rejects an sRGB override") and now asserts the decode. Six new tests
+  (`SpoutPlugin.ColorDecode.*`) cover every 10-bit code and all four alpha codes against the exact
+  decode, the texture, material and output render target of both receive functions, an unlit
+  material drawn into an 8-bit sRGB render target (the source's display values within 1), sessions
+  and mode changes, resize, sender restart and receiver reopen, the GPU, CPU readback and legacy wrap
+  paths, Async fallback, and the 8-bit and float controls. The packaged host test adds the
+  `SPOUT_COLOR_DECODE_PASS` step; the development command `Spout.T1.Viewport sRGB` checks a real
+  10-bit back buffer; `Spout.Dev.MeasureColorDecode` measures the pass.
+- **Measured cost** (RTX 2060 laptop, D3D12, GPU timestamp queries, medians of 7 rounds): the decode
+  pass took 40.5/50.5/201.9 µs (UE 5.8) and 40.8/50.4/203.6 µs (UE 5.3) at 1248x702/1920x1080/3840x2160,
+  against 40.3/55.7/212.7 µs and 42.2/61.4/219.0 µs for the 10-bit copy it replaces on the shared-slot
+  path. On the legacy wrap and CPU paths it follows the copy, so it adds its own time. No frame of
+  delay is added. Memory: the decoded texture is 8 bytes per pixel (4 for the 10-bit texture), plus a
+  4-byte-per-pixel intermediate on the legacy wrap and CPU paths. No display latency was measured.
+- **Release testing:** an earlier 1.0.0 build's 30-minute release test result belongs to that
+  build only; it does not carry over to changed binaries (`Docs/RELEASE_READINESS.md`). The
+  packaged host tests include the decode.
+
 #### Release testing on an RTX 2060 laptop (October 2026)
 - `Docs/RELEASE_READINESS.md` names an RTX 2060 laptop as the performance machine. The 60 Hz
   scenario matrix runs there with its 90 % delivery and zero-corruption gates.

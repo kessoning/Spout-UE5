@@ -208,6 +208,8 @@ unchanged, with no colour conversion, and publishes:
 | 8-bit, linear (`Force Linear Gamma` **on**) | `B8G8R8A8_UNORM` / `R8G8B8A8_UNORM` | linear | decodes as sRGB — **set the receiver to Linear** |
 | `A2B10G10R10` | `R10G10B10A2_UNORM` | linear | linear — correct |
 | `FloatRGBA` (HDR) | `R16G16B16A16_FLOAT` | linear | linear — correct |
+| `GameViewport`, Unreal's default back buffer | `R10G10B10A2_UNORM` | display values (sRGB-encoded), alpha as Unreal wrote it (0 in a standard scene) | linear, which is too bright — **set the receiver to sRGB** |
+| `GameViewport`, 8-bit back buffer | `B8G8R8A8_UNORM` | display values (sRGB-encoded) | decodes as sRGB — correct |
 
 The sender never publishes `_UNORM_SRGB`. Spout 2.007's OpenGL receivers (the Spout Demo Receiver
 2.007.015 and other SpoutGL applications) check the shared texture's real format and refuse
@@ -228,6 +230,15 @@ application.
 Either turn `Force Linear Gamma` off so the render target stores sRGB-encoded bytes, which is what
 receivers expect, or set **Color Space = Linear** on the receiving side. Unreal-to-Unreal results
 are the same as before: this plugin's receiver decodes 8-bit `_UNORM` as sRGB on Auto.
+
+**The viewport stream carries display values.** The viewport sender publishes the back buffer as it is: the
+values Unreal shows on screen, encoded for an sRGB display, in the back buffer's format (10-bit by default in
+Unreal Engine 5). A 10-bit frame does not say whether its values are display-encoded (a viewport) or linear (a 10-bit
+render target), so a receiver on **Auto** reads every 10-bit frame as linear: right for a 10-bit render target,
+too bright for a viewport stream. Set **Color Space = sRGB** on a receiver of an Unreal viewport stream; the
+receiver then decodes it exactly (below). Applications that show the values as they are, such as the Spout Demo
+Receiver, show a viewport stream correctly. A back buffer with HDR output enabled holds a different encoding that
+no setting decodes.
 
 The sender never converts or reinterprets: a format it cannot share is refused with a log line
 naming it, rather than being published as something it is not.
@@ -296,9 +307,14 @@ There is **one receiver session per Spout sender name**.
 
 | Setting | What it does |
 |---|---|
-| **Auto** (default) | 8-bit frames decode as sRGB, whether the sender publishes `_UNORM` or `_UNORM_SRGB`; 10-bit and 16-bit float frames stay linear. This is what other Spout applications publish, so it is right for almost every sender. |
+| **Auto** (default) | 8-bit frames decode as sRGB, whether the sender publishes `_UNORM` or `_UNORM_SRGB`; 10-bit and 16-bit float frames are read as linear. This is right for 8-bit video and for 10-bit and float render targets. A 10-bit frame of display values, such as an Unreal viewport stream, needs **sRGB** instead: its format cannot say what it holds. |
 | **Linear** | No decoding. Use it when the sender publishes linear or data values in an 8-bit format — including this plugin's own sender when the source render target was created with `Force Linear Gamma`. The format cannot tell the receiver this, because such a sender publishes the same `_UNORM` format as an sRGB one. |
-| **sRGB** | Force decoding. Only valid for 8-bit frames; asking for it on a 10-bit or HDR float frame fails the call and logs, rather than being quietly ignored. |
+| **sRGB** | Decode the values as sRGB-encoded. On an 8-bit frame the texture's sampler decodes them. On a 10-bit frame, such as an Unreal viewport stream, each frame is decoded once into a linear 16-bit float texture: the exact sRGB function in 32-bit float, alpha copied unchanged, no extra frame of delay. On a 16-bit float frame it fails the call and logs, rather than being quietly ignored. |
+
+With **sRGB** on a 10-bit sender, the received texture is `PF_FloatRGBA` (16-bit float, linear), so an optional
+output render target must be RGBA16f; one of another format is left untouched and logged. Auto and Linear keep the
+frame's own format, as before. The decode runs on the synchronous receive (Async Receive handles 8-bit senders
+only and falls back, logged, for 10-bit ones).
 
 Consumers sharing a sender name must agree on the resolved color interpretation. A conflicting
 request fails without changing the existing output. Close the shared receiver before changing

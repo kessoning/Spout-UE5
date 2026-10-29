@@ -127,8 +127,8 @@ SPOUT.api = [
       ["SpoutName", "FName — must match the sender exactly, including case."],
       ["InputMaterial", "UMaterialInterface* — optional base material; leave empty for raw texture only."],
       ["TextureParameterName", "FName — texture parameter to bind. Defaults to SpoutTexture when empty."],
-      ["OptionalOutputRenderTarget", "UTextureRenderTarget2D* — advanced pin; the frame is also copied into it if provided."],
-      ["ColorSpace", "ESpoutColorSpace — advanced pin. Auto (default) decodes 8-bit frames as sRGB, the Spout convention; Linear skips decoding (use it for a sender whose 8-bit bytes are linear, such as a Force Linear Gamma render target); sRGB forces decoding and is only valid for 8-bit frames. The format cannot tell you which applies: senders publish 8-bit video as plain _UNORM."]
+      ["OptionalOutputRenderTarget", "UTextureRenderTarget2D* — advanced pin; the frame is also copied into it if provided. It must have the received texture's pixel format: the incoming one, or RGBA16f for a 10-bit sender received with sRGB."],
+      ["ColorSpace", "ESpoutColorSpace — advanced pin. Auto (default) decodes 8-bit frames as sRGB, the Spout convention, and reads 10-bit and float frames as linear; Linear skips decoding (use it for a sender whose 8-bit bytes are linear, such as a Force Linear Gamma render target); sRGB decodes sRGB-encoded values, 8-bit through the sampler and 10-bit into a linear 16-bit float texture, and is refused for float frames. The format cannot tell you which applies: senders publish 8-bit video as plain _UNORM, and an Unreal viewport stream carries display values in 10 bits, so receive a viewport stream with sRGB."]
     ],
     returns: "true when the sender exists and a receive was enqueued. Branch on this.",
     when: "Every frame on Event Tick, or on a timer. Validate Out Mat / Out Texture before using them - the sender may not be running yet.",
@@ -211,6 +211,7 @@ SPOUT.troubleshooting = [
   { symptom: "Receiver returns invalid output", fix: "Exact name match; check the return value; validate outputs; the texture parameter name must match the material." },
   { symptom: "Black texture from SceneCapture2D", fix: "Set Capture Source to Final Color (HDR) in Linear Working Color Space. Capture Source, exposure and output format must be qualified together." },
   { symptom: "Wrong colors or gamma", fix: "Adjust render target format and Capture Source; try RGBA8 sRGB first, then RGB10A2. 8-bit sources are published as _UNORM whatever their gamma, so set Color Space = Linear on the receiver (Unreal or external) for a Force Linear Gamma source." },
+  { symptom: "Viewport stream too bright in Unreal", fix: "The GameViewport sender publishes display (sRGB-encoded) values in 10 bits, which Auto reads as linear. Set Color Space = sRGB on the receiving Unreal; an output render target must then be RGBA16f." },
   { symptom: "Spout Demo Receiver: \"No sender detected\" for an sRGB render target", fix: "Fixed in 1.0.0. Earlier release candidates published 8-bit sRGB render targets as _UNORM_SRGB, which Spout 2.007's OpenGL receivers refuse; the sender now publishes plain _UNORM with unchanged bytes." },
   { symptom: "Log: \"shared-texture access was unavailable\"", fix: "Another application still held the shared texture after the access wait (r.Spout.AccessWaitMs, default 2 ms). The sender skips that frame and publishes the next; the receiver copies the sender's newest frame on a later call. Throttled to one line per stream every 5 seconds; Get Spout Stream Status counts every miss. The wait applies to each attempt on the render thread, not to a frame, so several locked streams add up; r.Spout.AccessWaitMs 0 never waits (zero-wait acquisition only; other fixes stay active)." },
   { symptom: "Frames skip or repeat, no access misses", fix: "Sampling, not contention: the receiver reads once per Unreal frame and a sender at the same frame rate drifts in and out of alignment with it. r.Spout.AccessWaitMs does not change this; a higher Unreal frame rate reduces it but does not guarantee every frame. See Limitations." },
@@ -236,6 +237,7 @@ SPOUT.limitations = [
   "Supported formats are BGRA8, RGBA8, RGB10A2 and RGBA16F; color interpretation must match the source.",
   "No colour conversion on send. Every 8-bit source is published as plain _UNORM with its bytes unchanged; _UNORM_SRGB is never published, because Spout's OpenGL receivers refuse it.",
   "The sRGB format tag is not carried: an sRGB render target and a Force Linear Gamma render target both publish _UNORM, so receivers cannot tell the source's colour intent from the format. _UNORM does not mean linear; by the Spout convention the bytes are sRGB-encoded, and a Force Linear Gamma source needs Color Space = Linear on the receiver.",
+  "A 10-bit format does not mean linear either: an Unreal viewport stream carries display (sRGB-encoded) values in 10 bits. Receive it with Color Space = sRGB, which decodes each frame into a linear 16-bit float texture. HDR back buffers are not decoded.",
   "Final Color (HDR) in Linear Working Color Space is a starting point; qualify Capture Source, exposure and output format together.",
   "One sender per name.",
   "Senders and receivers must be called continuously.",

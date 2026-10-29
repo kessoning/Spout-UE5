@@ -180,6 +180,10 @@ the current setting.
   Linear Gamma off on the source.
 - When Unreal receives from another application, Auto is right for ordinary senders; use Linear
   when that sender publishes linear 8-bit data.
+- When Unreal receives another Unreal's viewport stream (GameViewport sender) and it looks too
+  bright: the viewport is sent as display (sRGB-encoded) values in 10 bits, which Auto reads as
+  linear. Set the Spout Receiver node's Color Space to sRGB. An Optional Output Render Target must
+  then be RGBA16f.
 
 ## Stream name mismatch
 

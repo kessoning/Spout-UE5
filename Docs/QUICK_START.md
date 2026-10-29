@@ -47,8 +47,11 @@ If the output is black, the most common cause is the Capture Source setting in s
    - Out Texture - a transient `UTexture2D` updated from the stream.
    - Out Mat - a dynamic material instance with the received texture bound to the parameter.
    - Optional Output Render Target - if provided, the received frame is copied into it. Its
-     pixel format must match the incoming frame and it must be single-sampled; a mismatched
-     target is left untouched with a logged warning (size is adjusted automatically).
+     pixel format must match the incoming frame (RGBA16f for a 10-bit sender received with Color
+     Space sRGB) and it must be single-sampled; a mismatched target is left untouched with a
+     logged warning (size is adjusted automatically).
+   - Receiving another Unreal's viewport stream: set Color Space (advanced pin) to sRGB. The
+     viewport is sent as 10-bit display values, which Auto reads as linear (too bright).
 5. Validate Out Mat and Out Texture before using them. The sender may not be running yet.
 6. Apply Out Mat to a mesh, or sample Out Texture directly.
 

@@ -52,7 +52,14 @@ runtime default.
   pixel bytes and alpha are copied unchanged. Every 8-bit source (BGRA8 or RGBA8, sRGB or linear,
   typed or typeless) is published as the plain `_UNORM` format, never `_UNORM_SRGB`, because
   Spout 2.007's OpenGL receivers, such as the Spout Demo Receiver 2.007.015, refuse
-  `B8G8R8A8_UNORM_SRGB`. RGB10A2 and RGBA16F are published as they are, and are linear.
+  `B8G8R8A8_UNORM_SRGB`. RGB10A2 and RGBA16F render targets store linear values and are
+  published as they are.
+- The viewport sender publishes the back buffer as it is: display (sRGB-encoded) values, in
+  `R10G10B10A2_UNORM` by default. The format cannot tell a receiver that these 10-bit values are
+  display values rather than linear ones, so a receiver on Auto reads them as linear and the image
+  looks too bright. Set the receiving Unreal's Color Space to sRGB: it decodes each 10-bit frame
+  into a linear 16-bit float texture. Applications that show the values as they are, such as the
+  Spout Demo Receiver, show the viewport stream as Unreal showed it.
 - Keeping the bytes unchanged does not keep the sRGB format tag: an sRGB render target (Force
   Linear Gamma off) and a Force Linear Gamma render target both publish `_UNORM`, so a receiving
   application cannot tell the source's colour intent from the format. `_UNORM` does not mean the

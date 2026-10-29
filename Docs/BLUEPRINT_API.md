@@ -71,8 +71,9 @@ accepted; native opening and copying still happen later on the render thread.
 
 One texture is shared per sender name. Optional targets catch up independently from the last
 completed image, including late attachment and resource recreation while the sender is paused.
-Unchanged targets skip repeat copies. Same-name consumers must agree on resolved color space;
-conflicting calls return false without changing the existing output. Close the receiver before
+Unchanged targets skip repeat copies. Same-name consumers must agree on resolved color space
+(`Auto` and `Linear` resolve alike on 10-bit and float senders; `SRGB` on a 10-bit sender differs
+from both); conflicting calls return false without changing the existing output. Close the receiver before
 changing interpretation, or let a source pixel-format change establish a new interpretation.
 The advanced `Async Receive` input (`bAsyncReceive`, default true) follows the same per-name rule;
 see [Async Receive](#async-receive).
@@ -103,8 +104,10 @@ Receives a stream and updates the outputs. `OptionalOutputRenderTarget`, `ColorS
   `SpoutTexture` when empty); `OptionalOutputRenderTarget` (optional render target to also copy
   the frame into); `ColorSpace` (how the received bytes are interpreted — see
   [ESpoutColorSpace](#espoutcolorspace) below).
-- `OptionalOutputRenderTarget` must match the incoming frame's pixel format exactly and be
-  single-sampled. A mismatched target is excluded from the copy and left completely untouched,
+- `OptionalOutputRenderTarget` must match the received texture's pixel format exactly and be
+  single-sampled. That is the incoming frame's format, except with `ColorSpace` = `SRGB` on a
+  10-bit sender, where the received texture is the decoded 16-bit float one and the target must
+  be RGBA16f (`PF_FloatRGBA`). A mismatched target is excluded from the copy and left completely untouched,
   and the mismatch is logged; the call still succeeds and `OutTexture` still updates. A size
   mismatch is recoverable: the target is resized to the incoming frame automatically. Resizing
   clears the target to its Clear Color; if the transfer in that call is skipped because the
@@ -159,7 +162,8 @@ limits, are in [limitations](LIMITATIONS.md#async-receive-the-default). Until th
   the checkbox before Play. A change made while playing is refused (and logged) until the receiver
   closes, which the example does at the end of Play; the next Play uses the new value.
 - **Fallback:** a session that asked for it but cannot use it runs synchronously and keeps
-  delivering frames. That happens for senders whose format is not BGRA8 or RGBA8, when the worker's
+  delivering frames. That happens for senders whose format is not BGRA8 or RGBA8 (so a 10-bit
+  sender received with Color Space `SRGB` is decoded on the synchronous path), when the worker's
   device or resources cannot be created, and after a worker failure. The reason is logged once and
   reported in the status (below). A later sender size, format or handle is tried again.
 - **CPU readback:** while `r.Spout.GPUReceiver` is 0, a session that asked for it uses the CPU
@@ -279,7 +283,10 @@ Blueprint instead of an asset.
 - Keeping the bytes unchanged does not keep the sRGB format tag: both settings publish plain
   `_UNORM`, so a receiving application cannot tell the source's colour intent from the format.
   `_UNORM` does not mean the bytes are linear; the bytes plus the configuration on both ends decide
-  it. 10-bit and float formats are linear in both directions and are unaffected.
+  it. `bForceLinearGamma` concerns 8-bit targets only: 10-bit and float render targets have no
+  sRGB form, store linear values and are sent unchanged. A 10-bit format alone does not mean
+  linear, though: the viewport sender publishes Unreal's 10-bit back buffer, which holds display
+  (sRGB-encoded) values; see [ESpoutColorSpace](#espoutcolorspace).
 
 ---
 
@@ -305,8 +312,8 @@ How the Spout Receiver node interprets the received bytes.
 
 | Value | Meaning |
 |---|---|
-| `Auto` | Follows the format convention: 8-bit frames (`_UNORM` or `_UNORM_SRGB`) decode as sRGB, 10-bit and 16-bit float frames stay linear. Matches what other Spout applications publish; the right answer for almost every sender. |
-| `SRGB` | Forces sRGB decoding. Only valid for 8-bit formats; requesting it for a 10-bit or float frame fails the call with a logged diagnostic rather than being silently ignored. |
+| `Auto` | Follows the format convention: 8-bit frames (`_UNORM` or `_UNORM_SRGB`) decode as sRGB, 10-bit and 16-bit float frames are read as linear. Right for 8-bit video and for 10-bit and float render targets. Spout carries no colour information, so Auto cannot recognise a 10-bit stream of display values, such as an Unreal viewport stream with the default back buffer: on Auto it looks too bright. Use `SRGB` for it. |
+| `SRGB` | Decodes sRGB-encoded values. On an 8-bit frame the texture sampler decodes them. On a 10-bit frame each frame is decoded once into a linear 16-bit float texture (`PF_FloatRGBA`): the exact sRGB transfer function (IEC 61966-2-1) per colour channel, computed in 32-bit float, alpha copied unchanged, one texel per pixel (no filtering, scaling or flip), in the same render command as the receive. Use it for an Unreal viewport stream. Requesting it for a 16-bit float frame fails the call with a logged diagnostic rather than being silently ignored. It is not an HDR decode: PQ and scRGB back buffers are not supported. |
 | `Linear` | No decoding. Use when the sender publishes linear or data values in an 8-bit format, such as a render target created with Force Linear Gamma. The format cannot say so: such a sender publishes the same `_UNORM` format as an sRGB one. |
 
 ### ESpoutReceiveMode

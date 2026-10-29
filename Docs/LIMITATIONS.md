@@ -42,12 +42,37 @@ pixels between them, chosen once per process:
 
 - GPU and CPU receiver paths accept BGRA8, RGBA8, RGB10A2 and RGBA16F, including supported
   typeless aliases. Sources must be single-mip, single-sample 2D textures. Other layouts are refused.
-- No tone mapping, exposure correction, gamut conversion or pixel gamma conversion is performed.
-  The sender publishes every 8-bit source as plain `_UNORM` (`B8G8R8A8_UNORM` or `R8G8B8A8_UNORM`)
-  with its bytes and alpha unchanged, and never publishes `_UNORM_SRGB`, which Spout 2.007's
-  OpenGL receivers (the Spout Demo Receiver 2.007.015 among them) refuse. RGB10A2 and RGBA16F are
-  linear. Receiver Auto follows the format policy, `_UNORM_SRGB` from other peers is still
-  accepted on receive, and explicit sRGB is refused for 10-bit/float formats.
+- No tone mapping, exposure correction or gamut conversion is performed, and the sender converts
+  no pixel values. The sender publishes every 8-bit source as plain `_UNORM` (`B8G8R8A8_UNORM` or
+  `R8G8B8A8_UNORM`) with its bytes and alpha unchanged, and never publishes `_UNORM_SRGB`, which
+  Spout 2.007's OpenGL receivers (the Spout Demo Receiver 2.007.015 among them) refuse. RGB10A2 and
+  RGBA16F render targets store linear values and are published unchanged. The viewport sender
+  publishes the back buffer unchanged: by default in Unreal Engine 5 that is `R10G10B10A2_UNORM`
+  holding display (sRGB-encoded) values, with the alpha Unreal wrote (0 in a standard scene; it is
+  sent as it is, not made opaque).
+- Spout 2.007 carries a frame's format, size, handle and a free-text description, and no colour
+  information. A 10-bit frame of display values (a viewport) and one of linear values (a render
+  target) look the same to a receiver, and Auto does not guess from pixel values or names.
+- The receiver's Color Space contract. **Auto:** 8-bit frames (`_UNORM`, and `_UNORM_SRGB` from
+  other peers) decode as sRGB; RGB10A2 and RGBA16F frames are read as linear. **Linear:** no decode.
+  **sRGB:** 8-bit frames are decoded by the texture sampler; RGB10A2 frames are decoded into a
+  linear RGBA16F texture with the exact IEC 61966-2-1 function, computed in 32-bit float, one texel
+  per pixel, alpha copied unchanged (all four 2-bit alpha codes kept); RGBA16F frames are refused
+  with a logged diagnostic. A receiver of an Unreal viewport stream with the default back buffer
+  needs sRGB; on Auto or Linear the image looks too bright.
+- The 10-bit sRGB decode. The received texture is RGBA16F, 8 bytes per pixel instead of 4, so an
+  optional output render target must be RGBA16f; a target of another format is left untouched and
+  the mismatch is logged. On the default shared-slot path the decode pass replaces the copy that
+  path would otherwise run. On the legacy wrap path and the CPU readback path the frame is first
+  written into a per-receiver 10-bit intermediate texture (4 more bytes per pixel) and the decode
+  pass follows in the same render command. No frame of delay is added. The decode runs on the
+  synchronous receive only: Async Receive handles 8-bit senders, so a decoded session falls back to
+  the synchronous receive and logs why. Measured on one RTX 2060 laptop (D3D12, timestamp queries,
+  medians), the decode pass took 40 to 51 µs of GPU time from 1248x702 to 1920x1080 and about
+  202 µs at 3840x2160, against 40 to 61 µs and 213 to 219 µs for the 10-bit copy at the same sizes;
+  qualify it in your own workload.
+- HDR output is not decoded. A back buffer with HDR output enabled (PQ in 10-bit, scRGB in float)
+  and any other transfer function have no Color Space option; sRGB means IEC 61966-2-1 only.
 - The sRGB format tag is not published. Keeping the bytes unchanged does not keep the tag: an sRGB
   render target (Force Linear Gamma off) and a Force Linear Gamma render target both publish
   `_UNORM`, so external consumers cannot infer the source's colour intent from the format.
@@ -56,8 +81,13 @@ pixels between them, chosen once per process:
   render target produces and what receivers on Auto expect; a Force Linear Gamma target stores
   linear values, and its receiver must be set to Color Space = Linear (or the receiving
   application's equivalent).
-- Consumers of one open receiver name share one color interpretation. Close that receiver before
-  changing it. Consumers requiring different interpretation must convert downstream themselves.
+- Consumers of one open receiver name share one color interpretation (Auto and Linear are the same
+  interpretation on RGB10A2 and RGBA16F frames). Close that receiver before changing it. Consumers
+  requiring different interpretation must convert downstream themselves.
+- The shipped `M_SpoutMaterial` is a lit material that feeds the received texture to Base Color, so
+  what a surface using it shows depends on the scene's lighting, exposure and tone mapping. To
+  compare what is shown with the stream's values, use an unlit material (texture to Emissive Color)
+  or UI.
 - SceneCapture output depends on Capture Source, exposure, post-processing, alpha and render-target
   format. A blanket assertion that SceneColor HDR always produces black is not a code guarantee.
   Qualify the chosen capture pipeline with known pixels and the receiving application.
@@ -224,14 +254,15 @@ the end of October 2026 it was an opt-in beta, off by default.
     and the receiver does not do that.
   - With Unreal at 30 fps receiving a 60 fps sender, every second frame is skipped, as with the
     synchronous receive; no wait occurred.
-- **A 30-minute run with the defaults.** The 30-minute release test ran once, for 1,830 seconds,
-  on the RTX 2060 laptop, UE 5.8 packaged Development, in the GPU-bound test scene above, at the
-  same scalability level. Unreal received the plugin's native test sender at 1080p 60 fps with
-  Async Receive, while sending its own 1080p 60 fps stream to external Spout processes. That sender
-  holds Spout's access lock until its GPU work completes. The run did not meet the test's
-  continuity limits (no 10-second window below 90 %, at most 3 frames missed in a row, no freeze, a
-  new frame within 3 Unreal frames after a missed one); 1.0.0 ships with this result as a known
-  limitation (see [release readiness](RELEASE_READINESS.md)).
+- **A 30-minute run with the defaults.** The 30-minute release test of an earlier 1.0.0 build ran
+  once, for 1,830 seconds, on the RTX 2060 laptop, UE 5.8 packaged Development, in the GPU-bound
+  test scene above, at the same scalability level. Unreal received the plugin's native test sender
+  at 1080p 60 fps with Async Receive, while sending its own 1080p 60 fps stream to external Spout
+  processes. That sender holds Spout's access lock until its GPU work completes. The run did not
+  meet the test's continuity limits (no 10-second window below 90 %, at most 3 frames missed in a
+  row, no freeze, a new frame within 3 Unreal frames after a missed one). Its result belongs to
+  that build only; it does not carry over to changed binaries (see
+  [release readiness](RELEASE_READINESS.md)).
   - Over the whole run, 97.1 % of the sender's frames were shown. Frame-time 99th percentile:
     16.68 ms.
   - Three 10-second windows showed 89.5 to 89.8 %. In each, Unreal's frame timing stayed about 1 ms

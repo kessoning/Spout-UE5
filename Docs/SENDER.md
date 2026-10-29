@@ -74,6 +74,12 @@ disk or network transfer are involved on the send path.
   target stores linear values, so set its receiver's Color Space to Linear. Manage colour on the
   source side (Capture Source, render target format and gamma) and pair it with the receiver's
   Color Space pin.
+- The GameViewport source sends the back buffer as it is: the values Unreal shows on screen,
+  encoded for an sRGB display, in `R10G10B10A2_UNORM` by default, with the alpha Unreal wrote (0
+  in a standard scene). Applications that show the values as they are (the Spout Demo Receiver,
+  for example) show it as Unreal did. A receiving Unreal must set Color Space to sRGB: on Auto it
+  reads 10-bit values as linear and the image looks too bright. A back buffer with HDR output
+  enabled holds an encoding that no receiver setting decodes.
 - Each publish takes Spout's cross-process access lock for the shared texture. If a receiver holds
   the texture, the publish waits at most `r.Spout.AccessWaitMs` (default 2 ms, clamped to 0 to 10)
   on the render thread for it to finish. If it is still busy after that, the frame is skipped

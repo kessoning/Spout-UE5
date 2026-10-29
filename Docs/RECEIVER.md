@@ -12,7 +12,7 @@ sender.
 |---|---|---|
 | Out Texture | `UTexture2D*` (by ref) | Transient texture owned by the plugin, created and resized to match the stream, updated each call. |
 | Out Mat | `UMaterialInstanceDynamic*` (by ref) | Created from Input Material on first call if Input Material is set, with Out Texture bound to the texture parameter. |
-| Optional Output Render Target | `UTextureRenderTarget2D*` (input) | If provided, the received frame is also copied into it. It is resized to match the stream automatically, but its pixel format must match the incoming frame exactly and it must be single-sampled; a mismatched target is left untouched (see below). |
+| Optional Output Render Target | `UTextureRenderTarget2D*` (input) | If provided, the received frame is also copied into it. It is resized to match the stream automatically, but its pixel format must match the incoming frame exactly (RGBA16f for a 10-bit sender received with Color Space sRGB) and it must be single-sampled; a mismatched target is left untouched (see below). |
 
 Always validate Out Mat and Out Texture before using them. The function returns false when the
 named sender is not currently available, in which case the outputs are not updated.
@@ -71,8 +71,17 @@ uses the CPU readback path instead. Details: [Async Receive](BLUEPRINT_API.md#as
 
 The Color Space pin (advanced) decides how the received bytes are read. **Auto** decodes 8-bit
 frames as sRGB, whether the sender publishes `_UNORM` or `_UNORM_SRGB`, and keeps 10-bit and
-16-bit float frames linear. **Linear** applies no decoding. **sRGB** forces decoding and is only
-valid for 8-bit frames. See [ESpoutColorSpace](BLUEPRINT_API.md#espoutcolorspace).
+16-bit float frames linear. **Linear** applies no decoding. **sRGB** decodes sRGB-encoded values:
+8-bit frames through the texture sampler, 10-bit frames by decoding each frame into a linear 16-bit
+float texture (exact sRGB function, alpha unchanged, on the synchronous receive); it is refused for
+16-bit float frames. See [ESpoutColorSpace](BLUEPRINT_API.md#espoutcolorspace).
+
+**Receiving an Unreal viewport stream: use sRGB.** The GameViewport sender publishes the back
+buffer's display (sRGB-encoded) values, in 10 bits by default. Spout carries no colour information,
+so a 10-bit frame does not say whether it holds display values (a viewport) or linear values (a
+10-bit render target), and Auto reads it as linear: right for the render target, too bright for the
+viewport. With sRGB, the received texture is 16-bit float (`PF_FloatRGBA`), so an Optional Output
+Render Target must be RGBA16f. HDR back buffers (PQ or scRGB) are not decoded by any setting.
 
 An 8-bit `_UNORM` format does not say whether the bytes are sRGB-encoded or linear. This plugin's
 own sender publishes `_UNORM` for both sRGB and Force Linear Gamma render targets, so the format

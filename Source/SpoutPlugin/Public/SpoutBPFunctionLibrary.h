@@ -28,7 +28,8 @@ enum class ESpoutType : uint8
 UENUM(BlueprintType)
 enum class ESpoutSendTextureFrom : uint8
 {
-	// Uses the active game viewport's backbuffer texture (render thread only).
+	// Uses the active game viewport's backbuffer texture (render thread only), sent as it is: display
+	// (sRGB-encoded) values, 10-bit by default. A receiving Unreal should use Color Space sRGB.
 	GameViewport,
 	// Uses a user-provided UTextureRenderTarget2D.
 	TextureRenderTarget2D
@@ -40,20 +41,28 @@ enum class ESpoutSendTextureFrom : uint8
  * Spout carries a DXGI format and nothing else, so the format field is the only colour-space
  * channel the protocol has. DXGI distinguishes _UNORM_SRGB from _UNORM, but the wider Spout
  * ecosystem, this plugin's sender included, publishes plain 8-bit _UNORM for gamma-encoded
- * display output, so an 8-bit _UNORM format does not mean the bytes are linear. The format alone
- * is not always enough; this enum is the override for the case where it is not.
+ * display output, so an 8-bit _UNORM format does not mean the bytes are linear. Nor does a 10-bit
+ * format: an Unreal viewport stream publishes the 10-bit back buffer, which holds display
+ * (sRGB-encoded) values. The format alone is not always enough; this enum is the override for the
+ * cases where it is not.
  */
 UENUM(BlueprintType)
 enum class ESpoutColorSpace : uint8
 {
 	/**
 	 * Use the documented convention for the advertised format: 8-bit formats decode as sRGB,
-	 * 10-bit and 16-bit float formats are treated as linear. Matches what other Spout applications
-	 * expect and is the right answer for almost every sender.
+	 * 10-bit and 16-bit float formats are read as linear. Right for 8-bit video and for 10-bit and
+	 * float render targets. A 10-bit stream of display values, such as an Unreal viewport stream,
+	 * needs sRGB: the format cannot say what it holds.
 	 */
 	Auto        UMETA(DisplayName = "Auto (format convention)"),
 
-	/** Force sRGB decoding. Only valid for 8-bit formats; any other format is rejected. */
+	/**
+	 * Decode sRGB-encoded values. 8-bit frames are decoded by the texture sampler. 10-bit frames,
+	 * such as an Unreal viewport stream, are decoded each frame into a linear 16-bit float texture
+	 * (the exact sRGB curve, alpha unchanged) on the synchronous receive. 16-bit float frames are
+	 * rejected. Not an HDR decode.
+	 */
 	SRGB        UMETA(DisplayName = "sRGB"),
 
 	/**
@@ -268,7 +277,8 @@ public:
 	 * Close Receiver on that name closes the shared session for every graph using it, and restores
 	 * material parameters that still reference this session's texture. Later user edits are preserved.
 	 *
-	 * OptionalOutputRenderTarget must match the incoming pixel format, be single-sampled,
+	 * OptionalOutputRenderTarget must match the received texture's pixel format (the incoming one,
+	 * except RGBA16f for a 10-bit sender received with sRGB), be single-sampled,
 	 * and have Auto Generate Mips disabled.
 	 * A mismatched target is left completely untouched and the mismatch is logged; the call still
 	 * succeeds and OutTexture still updates. Size mismatches are resolved by resizing the target.
@@ -279,12 +289,14 @@ public:
 	 * or a source pixel-format change creates a new interpretation.
 	 *
 	 * ColorSpace decides how the received bytes are interpreted:
-	 *   - Auto (default): 8-bit frames decode as sRGB, 10-bit and 16-bit float frames stay linear.
-	 *     This matches what other Spout applications publish.
+	 *   - Auto (default): 8-bit frames decode as sRGB, 10-bit and 16-bit float frames are read as
+	 *     linear. Right for 8-bit video and for 10-bit and float render targets.
 	 *   - Linear: no decoding. Use when the sender publishes linear or data values in an 8-bit
 	 *     format — a render target created with Force Linear Gamma, for example.
-	 *   - sRGB: force decoding. Only valid for 8-bit frames; asking for it on a 10-bit or float
-	 *     frame fails the call and logs, rather than being silently ignored.
+	 *   - sRGB: decode sRGB-encoded values. 8-bit frames are decoded by the sampler. 10-bit frames,
+	 *     such as an Unreal viewport stream, are decoded each frame into a linear 16-bit float
+	 *     texture (exact sRGB curve, alpha unchanged) on the synchronous receive. Asking for it on a
+	 *     16-bit float frame fails the call and logs, rather than being silently ignored.
 	 *
 	 * bAsyncReceive (Async Receive, default true) chooses the asynchronous receive: a worker thread takes the
 	 * sender's texture and waits for the copy, and the render thread only queues a copy of the newest completed
@@ -298,7 +310,7 @@ public:
 	 * reports the requested and the effective mode and why.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Spout", meta = (AdvancedDisplay = "5",
-		ToolTip = "Queues a receive; true means accepted, not completed. For repeated Blueprint material use, prefer Spout Receiver With Material and a stored MID. Keep the outputs for Close Receiver. Async Receive (on by default) is per sender name, fixed when the receiver opens; turn it off for the synchronous receive. A call asking for the other mode is refused until Close Receiver."))
+		ToolTip = "Queues a receive; true means accepted, not completed. For repeated Blueprint material use, prefer Spout Receiver With Material and a stored MID. Keep the outputs for Close Receiver. Async Receive (on by default) is per sender name, fixed when the receiver opens; turn it off for the synchronous receive. A call asking for the other mode is refused until Close Receiver. For an Unreal viewport stream (10-bit display values), set Color Space to sRGB."))
 	static bool SpoutReceiver(const FName SpoutName,
 							  UMaterialInterface* InputMaterial,
 							  FName TextureParameterName,
@@ -401,7 +413,9 @@ public:
 	 *     values you sent.
 	 *   - false: the render target stores sRGB-encoded bytes, the Spout convention for 8-bit
 	 *     video, so a receiver on Auto (or any application following the convention) is correct.
-	 * 10-bit and float formats are linear in both directions and are unaffected.
+	 * bForceLinearGamma concerns 8-bit targets only: 10-bit and float render targets store linear
+	 * values and are sent unchanged. (A 10-bit viewport stream is different: it holds display values;
+	 * see ESpoutColorSpace.)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Spout",
 		meta = (ToolTip = "Creates a Spout-compatible render target. Returns null for invalid sizes or unsupported pixel formats. Keep a reference: the result is not rooted. 8-bit targets are published as _UNORM either way. With Force Linear Gamma on, the bytes are linear: set Color Space = Linear on the receiver. With it off, the bytes are sRGB-encoded, which receivers on Auto expect."))
