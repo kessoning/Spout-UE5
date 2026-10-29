@@ -99,6 +99,25 @@ from the August preparation.
 - Measured against the synchronous receive, and the limits of those measurements: Docs/LIMITATIONS.md
   (Async Receive). Every time there is a software observation, not a display measurement.
 
+#### The 30-minute release test with Async Receive (end of October 2026)
+- The 30-minute release test ran once with the defaults (Async Receive and the asynchronous
+  render-target send) on the RTX 2060 laptop, against the plugin's native test sender,
+  which holds Spout's access lock through its own GPU work. Whole-run delivery (97.1 %, limit 97 %)
+  and frame pacing passed. Five continuity checks failed:
+  - three 10-second windows at 89.5 to 89.8 % (limit 90 % unless exempt);
+  - 5 frames missed in a row in the first second (limit 3);
+  - the picture froze once for 5 Unreal frames, about 83 ms (limit: never);
+  - up to 4 Unreal frames without a copy after an access miss, and 4 to recover (limit 3 each).
+- From the run's own records: a timing and contention limitation (the sender's back-to-back holds,
+  and Unreal's frame timing staying aligned with the sender's); no plugin defect was established.
+  That build was accepted with this result as a known limitation, to keep the low-latency receive.
+  Its result belongs to that build only; it does not carry over to changed binaries. The test
+  stays recorded as failed, no threshold changed, and it is separate from the known limitation on
+  the send's GPU cost.
+- `Docs/LIMITATIONS.md` (Async Receive) gives the measured result and what it looks like on screen,
+  `Docs/RELEASE_READINESS.md` records it, and `README.md` points to both. No code, asset or binary
+  changed.
+
 #### Async Receive (Beta) (October 2026, off by default, not qualified)
 - Added an opt-in **Async Receive (Beta)** setting per receiver: a `bAsyncReceive` input (default
   false, advanced pin, display name "Async Receive (Beta)") on `SpoutReceiver` and

@@ -384,6 +384,14 @@ This plugin ships with sample content under `Content/` when `CanContainContent` 
   GPU idle at the Unreal-to-interop boundary and UE 5.4+ uses a submission-order barrier. Measure
   frame time in your target workload.
 
+- Receiving samples a stream and does not queue frames, so some frames can be skipped. In the
+  release's 30-minute test with Async Receive (the default), on one laptop with the plugin's native
+  test sender at 60 fps, Unreal showed 97.1 % of the sender's frames. Motion stuttered in a few
+  10-second stretches where about one frame in ten was skipped, 5 frames in a row were missed once
+  in the first second, and the picture froze once for about 83 ms. Other senders, scenes and
+  machines were not measured this way. See
+  [Limitations](Docs/LIMITATIONS.md#async-receive-the-default).
+
 - Disable **Auto Generate Mips** on send sources and optional receive render targets.
   Transfers require one mip, one array slice and one sample. An optional target with an
   incompatible format or mip policy is rejected before resizing it.

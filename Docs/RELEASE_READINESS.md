@@ -38,7 +38,13 @@ For 1.0.0 the release pipeline:
   Async Receive by default: for a receive shown by its log to have run on the worker from start to
   end, the receive-contention ratio of failed access attempts to publications is reported, not
   gated, because the worker counts every failed poll; delivery, freeze, recovery and every other
-  criterion apply unchanged, and a synchronous receive is judged by the original criteria;
+  criterion apply unchanged, and a synchronous receive is judged by the original criteria. For 1.0.0
+  the release test, run once with Async Receive, did not meet its continuity limits (no 10-second
+  window below 90 %, at most 3 frames missed in a row, no freeze, a new frame within 3 frames after
+  a missed one), while whole-run delivery and frame pacing passed. 1.0.0 ships with that result as a
+  known limitation: the run is not counted as a pass, and the result is not established for other
+  workloads or hardware. Its measured result and what it looks like on screen are in
+  [limitations](LIMITATIONS.md#async-receive-the-default);
 - measures the same scene at its default quality with no Spout activity, with one stream sent,
   with one received, and with both. This shows the plugin's cost in a scene that keeps the GPU busy
   (see [limitations](LIMITATIONS.md)). It is a measurement, not a gate. The asynchronous

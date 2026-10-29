@@ -213,7 +213,8 @@ the end of October 2026 it was an opt-in beta, off by default.
   - Measured on the RTX 2060 laptop, UE 5.8 packaged, in 300-second runs, receiving the plugin's
     native test sender at 1080p. That sender holds Spout's access lock until its GPU work completes.
   - With the sender at 59.94, 60 and 60.06 fps, 97.3 to 99.8 % of its frames were shown, and 98.6 %
-    with three more senders running. At most 3 frames in a row were missed, with no freeze.
+    with three more senders running. In those runs at most 3 frames in a row were missed, with no
+    freeze. The 30-minute run below did worse.
   - The waits took 8 to 289 ms of render-thread time per 300 seconds.
   - Before the wait was added, the same configuration at 59.94 fps showed 96.6 %. A per-frame
     diagnostic found that 94 % of the missing frames had been copied by the worker and then replaced by
@@ -223,6 +224,35 @@ the end of October 2026 it was an opt-in beta, off by default.
     and the receiver does not do that.
   - With Unreal at 30 fps receiving a 60 fps sender, every second frame is skipped, as with the
     synchronous receive; no wait occurred.
+- **A 30-minute run with the defaults.** The 30-minute release test ran once, for 1,830 seconds,
+  on the RTX 2060 laptop, UE 5.8 packaged Development, in the GPU-bound test scene above, at the
+  same scalability level. Unreal received the plugin's native test sender at 1080p 60 fps with
+  Async Receive, while sending its own 1080p 60 fps stream to external Spout processes. That sender
+  holds Spout's access lock until its GPU work completes. The run did not meet the test's
+  continuity limits (no 10-second window below 90 %, at most 3 frames missed in a row, no freeze, a
+  new frame within 3 Unreal frames after a missed one); 1.0.0 ships with this result as a known
+  limitation (see [release readiness](RELEASE_READINESS.md)).
+  - Over the whole run, 97.1 % of the sender's frames were shown. Frame-time 99th percentile:
+    16.68 ms.
+  - Three 10-second windows showed 89.5 to 89.8 %. In each, Unreal's frame timing stayed about 1 ms
+    after the sender's for the whole window, and frames were skipped one or two at a time, about one
+    frame in ten, with the previous frame shown again in their place. Moving content visibly
+    stutters there; the picture does not stop.
+  - In the first second of the measurement, while an external receiver of Unreal's stream was
+    starting, the sender held its texture for several frames back to back, and 5 of its frames in a
+    row were missed.
+  - About 16 minutes in, the sender held its texture for three frames back to back (15 to 18 ms
+    each). The picture did not change for 5 Unreal frames, about 83 ms: a visible freeze. The
+    receive found the texture locked for up to 4 Unreal frames in a row before it copied a new frame
+    (every such stretch recovered).
+  - What the run's records show is timing and contention: a sender holding its texture through its
+    own GPU work, frame after frame, and Unreal's frame timing staying aligned with the sender's. No
+    defect in the plugin was found. The receiver shows the newest frame; it does not hold frames
+    back to show each one later, which would add latency, so a frame replaced before Unreal used it
+    is not shown.
+  - How often this happens depends on the sender, the GPU load and both frame rates. It was measured
+    once, with this sender, scene and laptop only; it is not established for other applications,
+    scenes or machines.
 - Same safety rules as the synchronous receive: the sender's texture is only read under its access
   lock, and the lock is given back only once the worker's copy is proven finished on the GPU (or
   the worker's device was removed), however long that takes. A copy that finished later than

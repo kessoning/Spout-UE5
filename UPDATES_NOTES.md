@@ -126,8 +126,9 @@ the start of this month with it. The viewport sender works exactly as before.
 And the last big one of the month: receiving in the background is now the normal way to receive. The
 checkbox lost its Beta label. It's called Async Receive, it sits right under Spout on the example
 receiver actor, and it's ticked unless you untick it. Why the switch? In my long test the old way
-kept freezing for a moment, again and again, when the other app held on to its picture while finishing
-its own drawing. The background way got through the same half hour without those freezes. I also
+kept freezing for a moment, again and again, more than a thousand times in half an hour, when the other
+app held on to its picture while finishing its own drawing. The background way got through the same
+half hour with just one short freeze (more on that below). I also
 compared the two side by side many times. With the background way far fewer frames went missing, the
 picture on screen was rarely more than about 20 thousandths of a second old (the old way sometimes
 showed one more than 50 thousandths old), and Unreal itself spent far less time waiting. The one thing
@@ -147,6 +148,18 @@ I also tried a few ideas to squeeze out even more frames, like holding on to one
 letting the old way try a second time at the end of each frame. Some of them helped a little, but
 each one either made the picture arrive later or made things worse with several streams at once, so
 none of them made it in. I'd rather show you a fresh picture than a complete one that's late.
+
+One more honest note from the very end of the month. The final half-hour test of this version didn't
+pass all of my strict smoothness checks. Overall it showed about 97 of every 100 frames the other app
+sent, which is what I ask for. But there were three ten-second stretches where roughly one frame in
+ten got skipped, so movement looked a bit choppy, five frames in a row went missing right at the
+start, and once the picture stood still for about a twelfth of a second. I went through the recordings
+and didn't find a bug in the plugin. It comes down to timing: my test app holds on to its picture
+while it finishes its own drawing, sometimes several frames in a row, and now and then Unreal and the
+test app fall into step in a way that keeps causing skips for a while. The fixes I know of would
+all make the picture arrive later, and I'd rather keep it fresh, so I'm releasing it with this
+written up plainly in the limitations document. I've only measured this with my own test app on my
+laptop, so I can't tell you yet how it behaves with other programs.
 
 ---
 
