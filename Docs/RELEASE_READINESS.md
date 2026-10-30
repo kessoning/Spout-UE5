@@ -42,10 +42,14 @@ For 1.0.0 the release pipeline:
   criterion apply unchanged, and a synchronous receive is judged by the original criteria. The
   continuity limits are: no 10-second window below 90 %, at most 3 frames missed in a row, no
   freeze, and a new frame within 3 frames after a missed one. The release test's result belongs to
-  one archive. An earlier 1.0.0 build's run met whole-run delivery and frame pacing but not the
-  continuity limits. Its result belongs to that build only; it does not carry over to changed
-  binaries. The earlier run's measured result and what it looks like on screen are in
-  [limitations](LIMITATIONS.md#async-receive-the-default);
+  one set of binaries. For 1.0.0 the release test ran once on this release's binaries and met every
+  criterion but one: one 10-second window of 183 showed 89.8 % of the sender's frames. Whole-run
+  delivery was 98.4 %, at most 2 frames were missed in a row, there was no freeze, and a new frame
+  followed every missed one within 3 frames. 1.0.0 ships with that result as a known limitation: the
+  run is not counted as a pass, and the result is not established for other workloads or hardware.
+  An earlier 1.0.0 build also ran the release test once. Its result belongs to that build only; it
+  does not carry over to changed binaries. Both runs' measured results and what they look like on
+  screen are in [limitations](LIMITATIONS.md#async-receive-the-default);
 - measures the same scene at its default quality with no Spout activity, with one stream sent,
   with one received, and with both. This shows the plugin's cost in a scene that keeps the GPU busy
   (see [limitations](LIMITATIONS.md)). It is a measurement, not a gate. The asynchronous

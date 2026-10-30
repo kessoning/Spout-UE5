@@ -244,7 +244,7 @@ the end of October 2026 it was an opt-in beta, off by default.
     native test sender at 1080p. That sender holds Spout's access lock until its GPU work completes.
   - With the sender at 59.94, 60 and 60.06 fps, 97.3 to 99.8 % of its frames were shown, and 98.6 %
     with three more senders running. In those runs at most 3 frames in a row were missed, with no
-    freeze. The 30-minute run below did worse.
+    freeze. The 30-minute runs below did worse in places.
   - The waits took 8 to 289 ms of render-thread time per 300 seconds.
   - Before the wait was added, the same configuration at 59.94 fps showed 96.6 %. A per-frame
     diagnostic found that 94 % of the missing frames had been copied by the worker and then replaced by
@@ -254,14 +254,29 @@ the end of October 2026 it was an opt-in beta, off by default.
     and the receiver does not do that.
   - With Unreal at 30 fps receiving a 60 fps sender, every second frame is skipped, as with the
     synchronous receive; no wait occurred.
-- **A 30-minute run with the defaults.** The 30-minute release test of an earlier 1.0.0 build ran
-  once, for 1,830 seconds, on the RTX 2060 laptop, UE 5.8 packaged Development, in the GPU-bound
-  test scene above, at the same scalability level. Unreal received the plugin's native test sender
-  at 1080p 60 fps with Async Receive, while sending its own 1080p 60 fps stream to external Spout
-  processes. That sender holds Spout's access lock until its GPU work completes. The run did not
-  meet the test's continuity limits (no 10-second window below 90 %, at most 3 frames missed in a
-  row, no freeze, a new frame within 3 Unreal frames after a missed one). Its result belongs to
-  that build only; it does not carry over to changed binaries (see
+- **A 30-minute run with the defaults, on this release's binaries.** The 30-minute release test
+  ran once, for 1,830 seconds, on the RTX 2060 laptop, UE 5.8 packaged Development, in the
+  GPU-bound test scene above, at the same scalability level. Unreal received the plugin's native
+  test sender at 1080p 60 fps with Async Receive, while sending its own 1080p 60 fps stream to
+  external Spout processes. The run met every criterion of the test but one, and 1.0.0 ships with
+  that result as a known limitation (see [release readiness](RELEASE_READINESS.md)).
+  - Over the whole run, 98.4 % of the sender's frames were shown. Frame-time 99th percentile:
+    16.67 ms. At most 2 frames were missed in a row, there was no freeze, and a new frame followed
+    every missed one within 3 Unreal frames.
+  - One 10-second window showed 89.8 %, below the 90 % limit. Its 61 missed frames were skipped one
+    at a time, about one frame in ten, with the previous frame shown again in their place. None of
+    them coincided with the sender's lock: the run's records attribute them to Unreal's frame timing
+    lining up with the sender's. Moving content visibly stutters there; the picture does not stop.
+  - It was measured once, with this sender, scene and laptop only; it is not established for other
+    applications, scenes or machines.
+- **An earlier 1.0.0 build's 30-minute run.** The 30-minute release test of an earlier 1.0.0 build
+  ran once, for 1,830 seconds, on the RTX 2060 laptop, UE 5.8 packaged Development, in the
+  GPU-bound test scene above, at the same scalability level. Unreal received the plugin's native
+  test sender at 1080p 60 fps with Async Receive, while sending its own 1080p 60 fps stream to
+  external Spout processes. That sender holds Spout's access lock until its GPU work completes. The
+  run did not meet the test's continuity limits (no 10-second window below 90 %, at most 3 frames
+  missed in a row, no freeze, a new frame within 3 Unreal frames after a missed one). Its result
+  belongs to that build only; it does not carry over to changed binaries (see
   [release readiness](RELEASE_READINESS.md)).
   - Over the whole run, 97.1 % of the sender's frames were shown. Frame-time 99th percentile:
     16.68 ms.

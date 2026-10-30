@@ -63,7 +63,25 @@ from the August preparation.
   4-byte-per-pixel intermediate on the legacy wrap and CPU paths. No display latency was measured.
 - **Release testing:** an earlier 1.0.0 build's 30-minute release test result belongs to that
   build only; it does not carry over to changed binaries (`Docs/RELEASE_READINESS.md`). The
-  packaged host tests include the decode.
+  packaged host tests include the decode. These binaries were tested again from their exact
+  archives:
+  - the whole automation suite passed, 167 of 167 on each engine;
+  - the packaged hosts passed in Development and Shipping on both engines;
+  - receive modes, negative delivery, the 60 Hz matrix and the close/reopen workload all passed;
+  - in a cross-process viewport check between two instances of the packaged UE 5.8 host, the 10-bit
+    viewport received with `sRGB` was within 0.5 of an 8-bit step of the sending window's on-screen
+    values. That result is from the second attempt, with a sample-alignment correction made before
+    that attempt ran; the first attempt failed one 8-bit control by 2 steps.
+
+  The 30-minute release test ran once on these binaries and met every criterion but one: one
+  10-second window of 183 showed 89.8 %. Whole-run delivery was 98.4 %, at most 2 frames were
+  missed in a row, the picture never froze, and every missed frame recovered within 3 frames. The
+  61 missed frames in that window were single skips attributed to frame-timing alignment, none to
+  the sender's lock. 1.0.0 ships with that result as a known limitation of these binaries and the
+  tested configuration; the test stays recorded as failed, and no threshold changed
+  (`Docs/RELEASE_READINESS.md`; `Docs/LIMITATIONS.md`, Async Receive).
+- The shipped `Docs/LIMITATIONS.md` and `Docs/RELEASE_READINESS.md` were then updated to state that
+  result; no binary, source or build input changed.
 
 #### Release testing on an RTX 2060 laptop (October 2026)
 - `Docs/RELEASE_READINESS.md` names an RTX 2060 laptop as the performance machine. The 60 Hz

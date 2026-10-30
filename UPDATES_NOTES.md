@@ -149,8 +149,8 @@ letting the old way try a second time at the end of each frame. Some of them hel
 each one either made the picture arrive later or made things worse with several streams at once, so
 none of them made it in. I'd rather show you a fresh picture than a complete one that's late.
 
-One more honest note from the very end of the month. The final half-hour test of this version didn't
-pass all of my strict smoothness checks. Overall it showed about 97 of every 100 frames the other app
+One more honest note from the very end of the month. The half-hour test of the version before the
+colour fix below didn't pass all of my strict smoothness checks. Overall it showed about 97 of every 100 frames the other app
 sent, which is what I ask for. But there were three ten-second stretches where roughly one frame in
 ten got skipped, so movement looked a bit choppy, five frames in a row went missing right at the
 start, and once the picture stood still for about a twelfth of a second. I went through the recordings
@@ -184,8 +184,17 @@ one needs the RGBA16f format. It works with the normal way of receiving, not the
 a stream like this quietly uses the normal way, and the log tells you so. On my laptop the colour
 step took about as long as the plain copy it replaces in the standard setup, and it doesn't hold the
 picture back by a frame. HDR is a different story: with HDR output turned on, Unreal's picture uses
-a different curve that this setting doesn't handle. Because this changes the plugin itself, I'm
-running my release tests again on the new version instead of reusing the old results.
+a different curve that this setting doesn't handle.
+
+Because this changed the plugin itself, I ran all my release tests again on the new version instead of
+reusing the old results, and almost everything passed. That includes sending a real game window from
+one packaged game to another and checking the colours against the screen. The half-hour test came out
+better than last time, but still not perfect. Overall it showed about 98 of every 100 frames, it never
+missed more than two in a row, and the picture never stood still. But there was one ten-second stretch
+where roughly one frame in ten got skipped, just under my 90 percent mark, so movement looked a bit
+choppy there for those few seconds. It's the same timing effect as before, Unreal and the test app
+falling into step, and not the other app holding on to its picture. I decided to release with it and
+wrote it up plainly in the limitations document. I didn't loosen any pass mark to get there.
 
 ---
 
