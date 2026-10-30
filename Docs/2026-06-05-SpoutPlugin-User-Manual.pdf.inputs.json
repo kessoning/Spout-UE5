@@ -22,13 +22,13 @@
  "basis": "generated",
  "inputs": {
   "Docs/USER_MANUAL_SOURCE.md": "081709359f07f40b46d7887830abf1f45414d8f69b871511b92f1fbd22755f73",
-  "Docs/build_user_manual.py": "d1ed2f27b41090a108982dad97359dfaa728bde22e4de4918873ebb83359d42b",
+  "Docs/build_user_manual.py": "32ca1742f998414556d41875f8010b5bb9b87e5a7973cef1a2e9bd71679c8d54",
   "SpoutPlugin.uplugin": "d2528aa99b4a81cb6865e2516d19d89bbe0a2552caa042f860763639d1b43f04",
   "build.ps1": "6f4eff974a468d7ad735b7a8bdfc3c240da13a3363409531fd3b2c33d3aebf65"
  },
  "pdf": {
   "path": "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf",
-  "sha256": "b9d0291f27341d4fe715021e42ccc4019bb3b601aabe9adfa183f52a57d01619"
+  "sha256": "7003b79b771e4d8530ee80c75086c541395c8bf006d2870b0cbcf40a26db9bc3"
  },
  "what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them"
 }
