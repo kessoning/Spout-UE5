@@ -21,6 +21,7 @@
 #include <atomic>
 #include "RHI.h"
 #include "UObject/WeakObjectPtr.h"
+#include "UObject/ObjectKey.h"
 
 class FSpoutAsyncSendStream;
 
@@ -263,6 +264,24 @@ public:
 	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> NativeReservation;
 	// Game-thread admission records; render delivery records are separately owned above.
 	TMap<TWeakObjectPtr<UObject>, TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe>> OutputReservations;
+	// Receiver role, game thread: who uses this session, for the placeable Spout Receiver actor's release rule.
+	// ManagedConsumers are actors (leases). bUnmanagedConsumer records that a Blueprint or C++ caller had a receive
+	// ACCEPTED on this entry; such a session is then never closed by an actor, only by Close Receiver or session
+	// cleanup. Both live and die with this entry, so a Close Receiver clears them.
+	TSet<FObjectKey> ManagedConsumers;
+	bool bUnmanagedConsumer = false;
+	// Receiver role, game thread: identity of this session, unique for the process (assigned on first query). A
+	// session closed and reopened under the same name is a new entry and so has a new identity, which lets a consumer
+	// tell that the per-session frame count restarted.
+	uint64 ConsumerSessionId = 0;
+	// Receiver role, game thread: who uses each compatible output target, so one consumer's release never drops a
+	// reservation another consumer of the same target still needs.
+	struct FOutputTargetUse
+	{
+		TSet<FObjectKey> Managed;
+		bool bUnmanaged = false;
+	};
+	TMap<TWeakObjectPtr<UObject>, FOutputTargetUse> OutputTargetUsers;
 	std::atomic<int64> NativeFailures{0};
 	std::atomic<int64> LastNativeError{0};
 	// Render-thread retry state. A new native identity resets the backoff.

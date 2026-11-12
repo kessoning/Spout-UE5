@@ -64,7 +64,7 @@ namespace
 
 	void* const FakeTexture = reinterpret_cast<void*>(static_cast<UPTRINT>(0xB000));
 
-	FString UniqueName(const TCHAR* Suffix)
+	FString AccessWaitUniqueName(const TCHAR* Suffix)
 	{
 		return FString::Printf(TEXT("SpoutWait_%s_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits), Suffix);
 	}
@@ -215,7 +215,7 @@ bool FSpoutAccessWaitNamedMutex::RunTest(const FString&)
 	}
 	FAccessWaitScope Scope;
 	if (!Scope.Variable) { AddError(TEXT("r.Spout.AccessWaitMs is not registered.")); return false; }
-	const FString Name = UniqueName(TEXT("Named"));
+	const FString Name = AccessWaitUniqueName(TEXT("Named"));
 	const auto Utf8 = StringCast<ANSICHAR>(*Name);
 	const ANSICHAR* const NameUtf8 = Utf8.Get();
 

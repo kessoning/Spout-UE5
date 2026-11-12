@@ -8,12 +8,21 @@ The plugin ships example Blueprints under its `Content/` folder that you can ope
 building these by hand: `BP_SpoutSenderExample_`, `BP_SpoutReceiverExample`, `M_SpoutMaterial`,
 `RT_SpoutSenderTest_`, and `RT_SpoutReceiverTest`.
 
+## 0. No Blueprint: drag-and-drop actors
+
+1. Open Place Actors and choose the **Spout** category (under More when the panel is short, or search "Spout").
+2. Drag **Spout Sender** into the level to send the game (Game Viewport Only).
+3. Drag **Spout Receiver** into the level to show a sender of another application on a screen in the level (or
+   type a Sender Name in its Details panel).
+4. Press Play.
+
 ## 1. Send the game viewport
 
 1. Create a Blueprint Actor, or use the Level Blueprint.
 2. On Event Tick (or a timer), add a Spout Sender node.
 3. Set Spout Name to a unique stream name, for example `UnrealViewport`.
-4. Set Send Texture From to `GameViewport`.
+4. Leave Send Texture From at `GameViewportOnly` (Game Viewport Only, the game without the editor's panels), or
+   choose `GameViewport` (Game Viewport (Whole Window)) for the whole window.
 5. Leave Texture Render Target 2D empty for this mode.
 6. Play. In your external Spout receiver, select the `UnrealViewport` sender.
 

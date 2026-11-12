@@ -982,6 +982,16 @@ function New-TrackDHostStaging
 
     [void] (Copy-TrackDTree -Source $hostSource -Destination $StagingProjectDir)
 
+    # Fab adaptation test harness (2026-11-10, test-only; never shipped): with SPOUT_ENGINE_LEVEL_PLUGIN=1 the host gets no
+    # project copy of the plugin, so it resolves SpoutPlugin from the engine (Engine/Plugins/Fab/SpoutPlugin, installed
+    # there beforehand). PluginDir names the source tree the engine plugin was built from, for the identity checks only.
+    if ($env:SPOUT_ENGINE_LEVEL_PLUGIN -eq '1')
+    {
+        if (Test-Path -LiteralPath (Join-Path $StagingProjectDir 'Plugins')) { throw 'engine-level mode: the host has a Plugins folder' }
+        return [ordered] @{ ProjectDir = $StagingProjectDir; ProjectFile = Join-Path $StagingProjectDir ('{0}.uproject' -f $script:HostProjectName)
+            PluginDir = $PluginSourceRoot; PluginSourceRoot = $PluginSourceRoot; MissingItems = @(); EngineLevel = $true }
+    }
+
     $pluginDest = Join-Path $StagingProjectDir ('Plugins\{0}' -f $script:PluginName)
     New-Item -ItemType Directory -Path $pluginDest -Force | Out-Null
 	if ($PreservePluginBuildOutput) {
@@ -998,7 +1008,6 @@ function New-TrackDHostStaging
     $pluginItems = @(
         'SpoutPlugin.uplugin',
         'Source',
-        'ThirdParty',
         'Config',
         'Resources',
         'Content',

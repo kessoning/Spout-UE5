@@ -8,10 +8,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 get_filename_component(SPOUT_REPO "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 foreach(name SpoutSdkSafetyTests SpoutPixelPeer SpoutNotificationTests)
     add_executable(${name} "${name}.cpp")
-    target_include_directories(${name} PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private" "${SPOUT_REPO}/ThirdParty/Spout/include")
-    target_link_libraries(${name} PRIVATE "${SPOUT_REPO}/ThirdParty/Spout/lib/amd64/Spout.lib" d3d11)
+    target_include_directories(${name} PRIVATE "${SPOUT_REPO}/Source/SpoutPlugin/Private" "${SPOUT_REPO}/Source/ThirdParty/Spout/include")
+    target_link_libraries(${name} PRIVATE "${SPOUT_REPO}/Source/ThirdParty/Spout/lib/amd64/Spout.lib" d3d11)
     add_custom_command(TARGET ${name} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${SPOUT_REPO}/ThirdParty/Spout/lib/amd64/Spout.dll" "$<TARGET_FILE_DIR:${name}>/Spout.dll")
+        "${SPOUT_REPO}/Source/ThirdParty/Spout/lib/amd64/Spout.dll" "$<TARGET_FILE_DIR:${name}>/Spout.dll")
 endforeach()
 add_executable(D3D11On12WrapProbe D3D11On12WrapProbe.cpp)
 # Engine-free bookkeeping of the asynchronous receive stream (SpoutSlotPool.h). No GPU and no Spout library.

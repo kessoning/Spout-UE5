@@ -21,7 +21,7 @@ Three tasks have different requirements:
   device and logs `SpoutPlugin requires DX12 RHI.` and stops if the active RHI is not D3D12.
 - For source builds and for packaging: Visual Studio 2022 with the C++ workload and toolchain and
   a Windows SDK supported by your engine version.
-- `Spout.dll` (bundled under `ThirdParty/Spout/lib/amd64/` and staged to the plugin's
+- `Spout.dll` (bundled under `Source/ThirdParty/Spout/lib/amd64/` and staged to the plugin's
   `Binaries/Win64/` at build time).
 
 ## Option A - Precompiled binary release

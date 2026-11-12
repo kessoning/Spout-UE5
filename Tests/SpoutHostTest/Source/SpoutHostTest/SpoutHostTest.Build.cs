@@ -76,7 +76,14 @@ public class SpoutHostTest : ModuleRules
 			// plugin at Plugins/SpoutPlugin; if the headers are ever absent the probe compiles to
 			// a stub that fails the scenario loudly instead of skipping it.
 			string StagedSpoutSdkInclude = Path.GetFullPath(Path.Combine(
-				ModuleDirectory, "..", "..", "Plugins", "SpoutPlugin", "ThirdParty", "Spout", "include"));
+				ModuleDirectory, "..", "..", "Plugins", "SpoutPlugin", "Source", "ThirdParty", "Spout", "include"));
+			// Fab adaptation test harness (2026-11-10, test-only): the SDK is under the plugin's Source/ThirdParty, and an
+			// engine-level plugin (as Fab installs it) lives in the engine's Plugins/Marketplace folder.
+			if (!Directory.Exists(StagedSpoutSdkInclude))
+			{
+				StagedSpoutSdkInclude = Path.GetFullPath(Path.Combine(
+					EngineDirectory, "Plugins", "Marketplace", "SpoutPlugin", "Source", "ThirdParty", "Spout", "include"));
+			}
 			if (Directory.Exists(StagedSpoutSdkInclude))
 			{
 				PrivateIncludePaths.Add(StagedSpoutSdkInclude);

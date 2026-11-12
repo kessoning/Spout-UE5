@@ -103,7 +103,7 @@ namespace SpoutTrackDTests
 		{
 			const FString BaseDir = FPaths::ConvertRelativePathToFull(Plugin->GetBaseDir());
 			Directories.Add(FPaths::Combine(BaseDir, TEXT("Binaries"), TEXT("Win64")));
-			Directories.Add(FPaths::Combine(BaseDir, TEXT("ThirdParty"), TEXT("Spout"), TEXT("lib"), TEXT("amd64")));
+			Directories.Add(FPaths::Combine(BaseDir, TEXT("Source"), TEXT("ThirdParty"), TEXT("Spout"), TEXT("lib"), TEXT("amd64")));
 		}
 
 		Directories.Add(FPaths::ConvertRelativePathToFull(

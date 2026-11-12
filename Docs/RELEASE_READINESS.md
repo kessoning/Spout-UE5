@@ -4,9 +4,46 @@ This page ships inside the 1.0.0 release archives. It describes what qualificati
 consists of and what it does not cover. Do not treat historical releases or successful compilation
 as approval of changed source.
 
-## Automated qualification
+## Final release additions
 
-For 1.0.0 the release pipeline:
+The final 1.0.0 release adds, to the qualified release-candidate code described under "Automated qualification of
+the release candidate" below: Game Viewport Only (now the default of the Spout Sender node), the drag-and-drop
+Spout Sender and Spout Receiver actors with an editor-only module for the Place Actors panel, and internal
+receiver-session bookkeeping the actors use. These additions were checked in proportion to the change, not with
+the full qualification below:
+
+- on UE 5.8, in Play In Editor embedded in the level editor: Game Viewport Only (exact rectangle, colours, HUD and
+  UMG, resize, Play stop and restart); the actors (placement registration, default settings, discovery and
+  reconnection, aspect ratio, output render target, shared ownership with other actors and Blueprint callers,
+  shared settings, Play stop and restart); the receiver's session membership and reopen after a Blueprint Close
+  Receiver; and a manual review including placement from the Place Actors panel;
+- on every declared engine (UE 5.3 through 5.8): BuildPlugin and archive checks; the actors' automation tests
+  (placement registration, default settings including Async Receive on, session membership and identity, and the
+  ownership rules); and a packaged Development game that loads `Spout.dll` from the package, sends Game Viewport
+  Only through a Spout Sender actor and receives an external Spout sender with a Spout Receiver actor (exact
+  pixels, disable and enable, a Blueprint Close Receiver and reopen, a refused consumer beside a shared session,
+  and a clean exit and restart).
+
+Those runtime checks ran on binaries built from the same code before the release's version and documentation
+were finalised. The published archives were then rebuilt from the final source, whose code is the same apart from
+comments; they were not run again.
+
+**Engines used for the final archives** (one desktop, NVIDIA GeForce RTX 4090, Windows 11): UE 5.6, 5.7 and 5.8 are
+standard installs. UE 5.4 and 5.5 are installs with local changes (two edited engine header lines each and a locally
+rebuilt UnrealBuildTool), as for the candidate. UE 5.3 is UE 5.3.2 with one engine header line changed locally (the
+AddressSanitizer `__has_feature` guard in `ConcurrentLinearAllocator.h`) and a locally rebuilt UnrealBuildTool,
+compiling with MSVC 14.44. The final UE 5.3 archive was not run on an unmodified UE 5.3.2. Its prebuilt binaries
+carry Epic's UE 5.3.2 module build ID (27405482), the one an unmodified UE 5.3.2 editor expects. The candidate's UE
+5.3 archive, an earlier build, was also checked on an unmodified UE 5.3.2 with MSVC 14.36; that result is not
+carried over to the final archive. An unmodified UE 5.3.2 does not compile its own headers with MSVC 14.44
+(warning C4668 on `__has_feature`), with or without this plugin.
+
+The candidate results below stand for the code the final release did not change. They are not a qualification of
+the additions.
+
+## Automated qualification of the release candidate
+
+For the 1.0.0 release candidate the release pipeline:
 
 - builds the plugin with BuildPlugin for every declared engine (UE 5.3 through 5.8) from the
   release source (a commit, or a recorded base commit plus exact patch) and validates each

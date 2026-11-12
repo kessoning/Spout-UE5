@@ -231,7 +231,7 @@ Write-TrackDJson -InputObject ([ordered] @{
     Schema       = 'spoutplugin-trackd-dll-matrix/1'
     GeneratedUtc = (Get-Date).ToUniversalTime().ToString('o')
     ConsolidatedFrom = 'per-row manifests'
-    RepositorySpoutDll = Get-TrackDFileFacts (Join-Path $RepoRoot 'ThirdParty\Spout\lib\amd64\Spout.dll')
+    RepositorySpoutDll = Get-TrackDFileFacts (Join-Path $RepoRoot 'Source\ThirdParty\Spout\lib\amd64\Spout.dll')
     Rows         = $dllMatrix.ToArray()
 }) -Path (Join-Path $EvidenceRoot 'hashes\dll-staging-matrix.json')
 

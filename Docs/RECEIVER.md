@@ -6,6 +6,13 @@ Unreal as a texture, an optional dynamic material instance, and an optional rend
 Call Spout Receiver continuously (Tick or timer) with a Spout Name that exactly matches the
 sender.
 
+## Without a Blueprint: the Spout Receiver actor
+
+Drag **Spout Receiver** from the Place Actors panel (category Spout) into the level and press Play. Its built-in
+unlit screen shows a sender of another application, or the one named in Sender Name. Its Details panel has the
+settings of the receive nodes plus the screen's. See the README section "Drag-and-drop actors" and
+[BLUEPRINT_API.md](BLUEPRINT_API.md#placeable-actors-spout-sender-and-spout-receiver).
+
 ## Outputs
 
 | Output | Type | Notes |

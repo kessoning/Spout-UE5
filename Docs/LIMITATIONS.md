@@ -460,6 +460,32 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
   where the synchronous send had none, and no failed cycle.
 - A viewport send to a name that a render-target sender already publishes is refused, with a
   throttled warning: one name has one source.
+- Spout Sender and Spout Receiver actors (added in the final 1.0.0 release):
+  - Checked in Play In Editor on UE 5.8 and in a packaged Development game on UE 5.3 to 5.8, on one machine (see
+    [release readiness](RELEASE_READINESS.md#final-release-additions)). Multi-player Play In Editor, World Partition streaming and
+    Shipping builds were not checked for the actors.
+  - A sender actor checks once, when it starts, that no other producer publishes its name. A Blueprint or C++
+    sender that starts the same name afterwards is not detected, and the actor's close then ends that stream too.
+  - A receiver actor closes a stream only when no other actor uses it and no Blueprint or C++ caller received it
+    since it opened. Such a caller's stream stays open after the actors leave, until its Close Receiver or the end
+    of Play (in a packaged game, until the caller closes it).
+  - The empty-name rule picks Spout's active sender or the first listed sender of another application. Which one
+    that is depends on the order other applications started; type a name for a fixed choice.
+  - The receiver's screen is an unlit surface in the level: the level's exposure and tone mapping apply, so what it
+    shows is not a pixel-exact copy. The Output Render Target and external receivers get the exact values.
+  - On a dedicated server the actors do nothing.
+- Game Viewport Only (`GameViewportOnly`, added in the final 1.0.0 release):
+  - Checked in Play In Editor embedded in the level editor's viewport on UE 5.8, on one machine at 125 % display
+    scaling, and in a packaged Development game on UE 5.3 to 5.8, where the game viewport fills the window. New
+    Editor Window and multi-player Play In Editor were not checked for this mode.
+  - Editor overlays drawn over the viewport's own area in Play In Editor are included: measured, the 1-pixel
+    focus line on the top edge; from the engine source, the green Play-start border (about 1.5 s) and the
+    breakpoint border. Toolbars, panels and tabs are outside the rectangle and are not included.
+  - It follows the engine's current game viewport. With several Play In Editor clients it sends the one the engine
+    treats as the current game viewport, not a chosen one.
+  - The rectangle is taken from the viewport's layout of the last UI update and clipped to the back buffer.
+  - It adds one GPU copy per sent frame and one plugin-owned texture of the viewport's size, compared with
+    GameViewport. Its performance was not measured.
 - A sender that keeps its texture locked while it waits for its own GPU work makes receive attempts
   wait or skip whenever that GPU work is queued behind other work. On a busy GPU this can be on
   most frames. With Async Receive those attempts are the worker's; its measured delivery against

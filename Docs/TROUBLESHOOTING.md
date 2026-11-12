@@ -48,10 +48,10 @@ beside the module binary.
 ## Spout.dll missing
 
 - For precompiled releases, `Spout.dll` must ship in `Binaries/Win64`. If the startup log warns
-  that the DLL is present under `ThirdParty` but missing beside the module binary, rebuild from
-  source or copy `Spout.dll` from `ThirdParty/Spout/lib/amd64/` into `Binaries/Win64/`.
+  that the DLL is present under `Source/ThirdParty` but missing beside the module binary, rebuild from
+  source or copy `Spout.dll` from `Source/ThirdParty/Spout/lib/amd64/` into `Binaries/Win64/`.
 - For source builds, the DLL is staged automatically. If it is missing, confirm the build
-  completed and that `ThirdParty/Spout/lib/amd64/Spout.dll` exists.
+  completed and that `Source/ThirdParty/Spout/lib/amd64/Spout.dll` exists.
 
 ## Works in the editor but not in a packaged build
 

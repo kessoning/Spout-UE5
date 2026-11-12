@@ -1,13 +1,29 @@
 # Sender Workflow
 
 The sender publishes a UE texture to other Spout applications as a shared GPU texture. There
-are two sources, selected by the `Send Texture From` pin on the Spout Sender node.
+are three sources, selected by the `Send Texture From` pin on the Spout Sender node. The pin defaults to
+Game Viewport Only.
+
+**Upgrading from a version where Game Viewport was the default:** when an existing node is reconstructed (for
+example when its Blueprint is loaded in the editor), Unreal compares the pin's saved value with its default; it
+does not track whether you selected that value yourself. An unconnected pin set to Game Viewport therefore
+switches to Game Viewport Only, even if you selected Game Viewport explicitly. Texture Render Target 2D selections
+and connected inputs remain intact. To retain whole-window capture, select Game Viewport (Whole Window) after
+upgrading and save the Blueprint.
+
+## Without a Blueprint: the Spout Sender actor
+
+Drag **Spout Sender** from the Place Actors panel (category Spout) into the level and press Play. It sends Game
+Viewport Only by default; its Details panel has the same settings as the Spout Sender node. See the README section
+"Drag-and-drop actors" and [BLUEPRINT_API.md](BLUEPRINT_API.md#placeable-actors-spout-sender-and-spout-receiver).
 
 ## Sources
 
-### GameViewport
+### GameViewport (shown as "Game Viewport (Whole Window)")
 
-Sends the active game viewport backbuffer. Internally the plugin hooks the Slate renderer's
+Sends the active game viewport backbuffer: the whole window that shows the game viewport. In a
+packaged or standalone game that is the game; in Play In Editor it is the whole editor window, with its toolbars and
+panels. Use Game Viewport Only to send just the game while playing in the editor. Internally the plugin hooks the Slate renderer's
 "back buffer ready to present" event and queues the capture there, so the copy happens at the
 correct point in the frame. Because of this:
 
@@ -15,6 +31,29 @@ correct point in the frame. Because of this:
 - The backbuffer is captured in its Present state and transitioned for the copy, then restored.
 
 When using GameViewport, leave the Texture Render Target 2D pin empty.
+
+### GameViewportOnly (shown as "Game Viewport Only")
+
+Sends only the rendered game viewport. It uses the same back-buffer event as GameViewport, then copies the game
+viewport's rectangle out of the back buffer on the GPU into a texture the plugin owns and publishes that.
+
+- **Included:** everything drawn inside the game viewport: the 3D scene, the HUD (Canvas drawing) and UMG widgets
+  added to the viewport or to a player's screen.
+- **Editor overlays inside the viewport:** in Play In Editor, the editor draws a few things over the viewport's own
+  area, and those are part of the stream because they are inside the rectangle. Measured on UE 5.8: the 1-pixel
+  blue focus line along the top edge, shown while the level viewport is the active one. From the engine source,
+  not captured in validation: a green border that fades out about 1.5 s after Play starts, and a red-tinted border
+  while paused at a Blueprint breakpoint. A packaged or standalone game has none of these.
+- **Left out:** everything outside the game viewport's rectangle: in Play In Editor the editor's toolbars, panels,
+  tabs and borders; in a packaged game, any part of the window the viewport does not cover.
+- **Size:** the viewport's size on screen in physical pixels (display scaling included). Resizing the window or
+  the editor layout changes the stream's size, as a resize does for GameViewport.
+- **Colour:** the same format and values as GameViewport (display values; a receiving Unreal should use Color
+  Space sRGB on a 10-bit back buffer).
+- **Only while playing:** outside Play there is no game viewport, so nothing is sent and the Spout Sender node
+  returns false. Sending the editor's level viewport outside Play is not supported.
+
+Leave the Texture Render Target 2D pin empty, as for GameViewport.
 
 ### TextureRenderTarget2D
 

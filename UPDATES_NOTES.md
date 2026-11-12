@@ -4,6 +4,36 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ---
 
+## NOVEMBER 2026 UPDATES
+
+This is the big one: the plugin's first proper release, version 1.0.0, is out. It's on Patreon for Unreal 5.3 to 5.8,
+and on Fab for 5.6 to 5.8. Besides everything I tested over the last months, I added two things before letting it go.
+
+First, a sender option called **Game Viewport Only**. If you sent the game view while playing inside the Unreal editor,
+the other app used to get the whole editor window, toolbars, panels and all. Now it can get just the game, and
+whatever you draw on top of it (HUD, UMG widgets) comes along. It's the new default. One thing to watch if you used an
+earlier build: a Spout Sender node set to the old "Game Viewport" option switches to the new one when you open your
+Blueprint, even if you picked it on purpose, because Unreal can't tell a choice from a setting you never touched. If
+you want the whole editor window, pick "Game Viewport (Whole Window)" again and save. The editor's thin blue line along
+the top of the active viewport ends up in the picture too, a one-pixel strip, but I'd rather tell you.
+
+Second, you don't need a Blueprint at all anymore. There's a new Spout category in the Place Actors panel (if your
+panel is short, look under More, or search for "Spout"). Drag in a Spout Sender and press Play, and your game goes out
+to other apps. Drag in a Spout Receiver and it shows what another app sends, on its own little screen in the level,
+already the right shape. Leave its name empty and it picks a sender from another app and sticks with it, waiting if
+that app stops. Every setting is in the Details panel with a short explanation, plus a status line that says what's
+going on while you play.
+
+Several receivers, and your Blueprints, can share the same stream. Removing or switching off one receiver doesn't
+interrupt the others. The one exception: a Blueprint that closes the stream with Close Receiver closes it for everyone
+(that's how that node has always worked), and the receivers then pick it up again by themselves.
+
+Two honest notes. The receiver's screen sits in your level like any glowing surface, so your level's exposure and tone
+mapping still change how it looks a little; for exact colours, use its output render target or check in another app.
+And I tested the two new things most on Unreal 5.8, then on every version from 5.3 to 5.8 in a small test game. Getting
+them ready for the older versions turned up three real problems (the code didn't build there, the receiver's screen
+couldn't load its look, and sending only the game crashed Unreal 5.3). All three are fixed in the files you download.
+
 ## OCTOBER 2026 UPDATES
 
 This month is mostly groundwork. Two changes are on for everyone: the new way pictures travel between

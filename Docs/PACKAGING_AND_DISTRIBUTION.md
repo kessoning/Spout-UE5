@@ -14,10 +14,10 @@ is linked into, so it resolves to two different places depending on the build ty
   location explicitly when it assembles the precompiled release zips.
 - **Packaged (monolithic) games**: the plugin module is linked into the game executable, so
   the DLL is staged into the project's `Binaries/Win64` next to the game `.exe`. The plugin's
-  own `Binaries` and `ThirdParty` folders are not staged at all in a packaged game.
+  own `Binaries` and `Source/ThirdParty` folders are not staged at all in a packaged game.
 
 The startup loader (0.0.9+) checks, in order: the plugin's `Binaries/Win64`, the plugin's
-`ThirdParty/Spout/lib/amd64`, the project's `Binaries/Win64`, the executable directory, and
+`Source/ThirdParty/Spout/lib/amd64`, the project's `Binaries/Win64`, the executable directory, and
 finally the OS search order. The DLL is also delay-loaded (`PublicDelayLoadDLLs`) so the
 module itself loads even when the DLL resolves late. Do not commit or copy `Spout.dll` into
 any other location.
@@ -25,8 +25,8 @@ any other location.
 Source layout for the DLL and import library:
 
 ```
-ThirdParty/Spout/lib/amd64/Spout.dll
-ThirdParty/Spout/lib/amd64/Spout.lib
+Source/ThirdParty/Spout/lib/amd64/Spout.dll
+Source/ThirdParty/Spout/lib/amd64/Spout.lib
 ```
 
 ## What ships in a release
@@ -39,8 +39,7 @@ SpoutPlugin/
   Content/
   Intermediate/    (precompiled UnrealGame objects; see below - do not strip)
   Resources/
-  Source/
-  ThirdParty/
+  Source/          (includes ThirdParty/Spout, the Spout SDK)
   SpoutPlugin.uplugin
 ```
 

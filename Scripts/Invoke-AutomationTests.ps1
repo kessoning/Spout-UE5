@@ -85,7 +85,7 @@ if ($PluginArchive) {
     $archiveCandidate = Expand-TrackDArchiveCandidate -ArchivePath $PluginArchive -DestinationParent $WorkRoot -EvidenceRoot $invocation.Directory
     if ($archiveCandidate.BuildIdentity.Engine.Version -ne $versions[0]) { throw 'Candidate archive belongs to a different engine' }
     $pluginSourceRoot = $archiveCandidate.PluginRoot
-    if ((Get-TrackDSha256 (Join-Path $pluginSourceRoot 'ThirdParty/Spout/lib/amd64/Spout.dll')) -ne (Get-TrackDSha256 (Join-Path $RepoRoot 'ThirdParty/Spout/lib/amd64/Spout.dll'))) { throw 'Native peer SDK differs from the candidate SDK' }
+    if ((Get-TrackDSha256 (Join-Path $pluginSourceRoot 'Source/ThirdParty/Spout/lib/amd64/Spout.dll')) -ne (Get-TrackDSha256 (Join-Path $RepoRoot 'Source/ThirdParty/Spout/lib/amd64/Spout.dll'))) { throw 'Native peer SDK differs from the candidate SDK' }
 }
 $runInputs = Get-TrackDSourceIdentity -Root $pluginSourceRoot
 $nativeTools = Build-TrackDNativeTools -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory

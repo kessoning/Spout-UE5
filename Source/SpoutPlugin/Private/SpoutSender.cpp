@@ -35,6 +35,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Rendering/SlateRenderer.h"
 #include "Widgets/SWindow.h"
+#include "Widgets/SViewport.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/Texture.h"
 #include "TextureResource.h"
@@ -804,18 +805,76 @@ namespace
 		)
 	}
 
+	/**
+	 * The game viewport's rectangle inside its window's back buffer, in pixels, resolved on the game thread
+	 * (Game Viewport Only). Slate's tick-space geometry is in desktop pixels, DPI scale included, and so is the
+	 * window's geometry in screen; their difference is the viewport's offset in the window's back buffer. In Play
+	 * In Editor this is the PIE viewport inside the level editor; in a standalone or packaged game it is the
+	 * whole client area. Returns false when there is no game viewport widget (no game running).
+	 */
+	bool ResolveGameViewportRect(FIntRect& OutRect)
+	{
+		UGameViewportClient* GameViewportClient = GEngine ? GEngine->GameViewport : nullptr;
+		if (!GameViewportClient || !GameViewportClient->Viewport)
+		{
+			return false;
+		}
+		const TSharedPtr<SWindow> Window = GameViewportClient->GetWindow();
+		const TSharedPtr<SViewport> ViewportWidget = GameViewportClient->GetGameViewportWidget();
+		if (!Window.IsValid() || !ViewportWidget.IsValid())
+		{
+			return false;
+		}
+		const FGeometry WidgetGeometry = ViewportWidget->GetTickSpaceGeometry();
+		const FGeometry WindowGeometry = Window->GetWindowGeometryInScreen();
+		const FVector2D WidgetPosition(WidgetGeometry.GetAbsolutePosition());
+		const FVector2D WindowPosition(WindowGeometry.GetAbsolutePosition());
+		const FVector2D WidgetSize(WidgetGeometry.GetAbsoluteSize());
+		const FIntPoint Min(FMath::RoundToInt(WidgetPosition.X - WindowPosition.X), FMath::RoundToInt(WidgetPosition.Y - WindowPosition.Y));
+		const FIntPoint Size(FMath::RoundToInt(WidgetSize.X), FMath::RoundToInt(WidgetSize.Y));
+		if (Size.X <= 0 || Size.Y <= 0)
+		{
+			return false;
+		}
+		OutRect = FIntRect(Min, Min + Size);
+		return true;
+	}
+
 	class FSpoutViewportSender
 	{
 	public:
+		// ESpoutSendTextureFrom::GameViewport: the whole back buffer of the game viewport's window.
 		static FSpoutViewportSender& Get()
 		{
-			static FSpoutViewportSender Instance;
+			static FSpoutViewportSender Instance(false);
 			return Instance;
+		}
+
+		// ESpoutSendTextureFrom::GameViewportOnly: the game viewport's rectangle of that back buffer, copied on the
+		// GPU into a plugin-owned texture which is then published like a render target. A separate instance, so the
+		// two modes keep separate queues, slots and subscriptions.
+		static FSpoutViewportSender& GetGameViewportOnly()
+		{
+			static FSpoutViewportSender Instance(true);
+			return Instance;
+		}
+
+		explicit FSpoutViewportSender(bool bInCropToGameViewport)
+			: bCropToGameViewport(bInCropToGameViewport)
+		{
 		}
 
 		bool QueueSend(const FSpoutStreamToken& Token)
 		{
 			if (!Token.IsSet() || Token.Name.IsNone())
+			{
+				return false;
+			}
+
+			// Game Viewport Only: the rectangle is resolved before anything is subscribed or queued, so a send with no
+			// game viewport widget is refused outright and nothing outside Play can be captured.
+			FIntRect GameViewportRect;
+			if (bCropToGameViewport && !ResolveGameViewportRect(GameViewportRect))
 			{
 				return false;
 			}
@@ -843,6 +902,7 @@ namespace
 				// delegate passes in. It is never dereferenced, so a destroyed window cannot be touched
 				// through it.
 				TargetWindow = WindowPtr;
+				CropRect = GameViewportRect;
 			}
 
 			PendingSenders.Add(Token);
@@ -963,8 +1023,66 @@ namespace
 				FScopeLock SlotLock(&ViewportSlotMutex);
 				ViewportSlot.Reset();
 				ViewportSlotRefusedFor = FSpoutSlotSend::FIdentity();
+				// Game Viewport Only's copy texture. Runs after the render-command flush, so no command still uses it.
+				CropTexture.SafeRelease();
+				CropLoggedSize = FIntPoint::ZeroValue;
 			}
 			FSpoutGpuRetirement::Get().Poll();
+		}
+
+		/**
+		 * Game Viewport Only, render thread, under ViewportSlotMutex: copies RequestedRect of the back buffer into
+		 * CropTexture on the GPU (one CopyTexture) and returns it, or null when the rectangle is empty or invalid.
+		 * The rectangle is clipped to the back buffer. CropTexture is recreated whenever the size or the format
+		 * changes (viewport or window resize, a new PIE session), so a resize is followed on the next present. The
+		 * back buffer is bracketed exactly as the whole-window mode brackets it (SpoutRHIState: Unknown -> CopySrc ->
+		 * SRVGraphics), so the engine sees the same state either way.
+		 */
+		FTextureRHIRef CropBackBufferOnRenderThread(FRHICommandListImmediate& RHICmdList, const FTextureRHIRef& BackBuffer, const FIntRect& RequestedRect)
+		{
+			const FIntPoint Extent = BackBuffer->GetSizeXY();
+			FIntRect Rect = RequestedRect;
+			Rect.Clip(FIntRect(FIntPoint::ZeroValue, Extent));
+			if (Rect.Width() <= 0 || Rect.Height() <= 0
+				|| SpoutValidation::ValidateDimensions(Rect.Width(), Rect.Height()) != SpoutValidation::EResult::Ok)
+			{
+				return nullptr;
+			}
+			const EPixelFormat Format = BackBuffer->GetFormat();
+			if (!CropTexture.IsValid() || CropTexture->GetSizeXY() != Rect.Size() || CropTexture->GetFormat() != Format)
+			{
+				// Render-targetable like the render-target sources the send path transitions: a shader-resource-only
+				// texture is not state-tracked on UE 5.3's D3D12 RHI, and the send's copy transitions then assert.
+				const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create2D(TEXT("SpoutGameViewportOnly"), Rect.Width(), Rect.Height(), Format)
+					.SetFlags(ETextureCreateFlags::ShaderResource | ETextureCreateFlags::RenderTargetable)
+					.SetInitialState(ERHIAccess::SRVMask);
+#if UE_VERSION_OLDER_THAN(5, 4, 0)
+				CropTexture = RHICreateTexture(Desc); // UE 5.3 has no command-list CreateTexture
+#else
+				CropTexture = RHICmdList.CreateTexture(Desc);
+#endif
+				if (!CropTexture.IsValid())
+				{
+					return nullptr;
+				}
+			}
+			if (CropLoggedSize != Rect.Size())
+			{
+				// Once per size: the start of sending and every resize are visible in the log.
+				CropLoggedSize = Rect.Size();
+				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: Game Viewport Only sends %dx%d at (%d, %d) of a %dx%d back buffer (%s)."),
+					Rect.Width(), Rect.Height(), Rect.Min.X, Rect.Min.Y, Extent.X, Extent.Y, GetPixelFormatString(Format));
+			}
+			const SpoutRHIState::FCopyBracket Bracket = SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::ViewportBackBuffer);
+			TransitionSpoutInteropTexture(RHICmdList, BackBuffer, Bracket.EntryBefore, Bracket.CopyAccess);
+			TransitionSpoutInteropTexture(RHICmdList, CropTexture, ERHIAccess::Unknown, ERHIAccess::CopyDest);
+			FRHICopyTextureInfo CopyInfo;
+			CopyInfo.Size = FIntVector(Rect.Width(), Rect.Height(), 1);
+			CopyInfo.SourcePosition = FIntVector(Rect.Min.X, Rect.Min.Y, 0);
+			RHICmdList.CopyTexture(BackBuffer, CropTexture, CopyInfo);
+			TransitionSpoutInteropTexture(RHICmdList, CropTexture, ERHIAccess::CopyDest, ERHIAccess::SRVMask);
+			TransitionSpoutInteropTexture(RHICmdList, BackBuffer, Bracket.CopyAccess, Bracket.ExitAfter);
+			return CropTexture;
 		}
 
 		/**
@@ -1126,6 +1244,7 @@ namespace
 						return;
 					}
 
+					FIntRect RectToSend;
 					{
 						// The delegate fires for every window; only consume the queue for the one the
 						// game viewport last reported. Pure pointer identity, resolved on the game
@@ -1135,6 +1254,7 @@ namespace
 						{
 							return;
 						}
+						RectToSend = CropRect;
 					}
 
 					TArray<FSpoutStreamToken> TokensToSend;
@@ -1148,7 +1268,7 @@ namespace
 					const FTextureRHIRef BackBufferCopy = BackBuffer;
 
 					ENQUEUE_RENDER_COMMAND(SpoutViewportSend)(
-						[this, TokensToSend = MoveTemp(TokensToSend), BackBufferCopy](FRHICommandListImmediate& RHICmdList)
+						[this, TokensToSend = MoveTemp(TokensToSend), BackBufferCopy, RectToSend](FRHICommandListImmediate& RHICmdList)
 						{
 							// Every queued sender publishes the same back buffer, so they share one
 							// transition, one flush and one acquire scope. Tokens that went stale
@@ -1157,6 +1277,27 @@ namespace
 								const bool bInstrumentViewport = SpoutInstrument::IsEnabled();
 								const uint64 TViewport0 = bInstrumentViewport ? SpoutInstrument::Now() : 0;
 							)
+							if (bCropToGameViewport)
+							{
+								// Game Viewport Only: copy the game viewport's rectangle out of the back buffer on the
+								// GPU, then publish that copy like a render target (it is plugin-owned and holds no
+								// back buffer, so a window resize is never blocked by it).
+								FScopeLock SlotLock(&ViewportSlotMutex);
+								const FTextureRHIRef Cropped = CropBackBufferOnRenderThread(RHICmdList, BackBufferCopy, RectToSend);
+								if (Cropped.IsValid())
+								{
+									SendTextureOnRenderThread(
+										TokensToSend,
+										Cropped,
+										false,
+										RHICmdList,
+										nullptr,
+										&ViewportSlot,
+										&ViewportSlotRefusedFor
+									);
+								}
+							}
+							else
 							{
 								// The viewport's slot is used here and released by ReleaseNativeResources.
 								FScopeLock SlotLock(&ViewportSlotMutex);
@@ -1295,6 +1436,14 @@ namespace
 		FCriticalSection ViewportSlotMutex;
 		TUniquePtr<FSpoutSlotSend> ViewportSlot;
 		FSpoutSlotSend::FIdentity ViewportSlotRefusedFor;
+
+		// Game Viewport Only (ESpoutSendTextureFrom::GameViewportOnly). Fixed per instance.
+		const bool bCropToGameViewport;
+		// The game viewport's rectangle in the window's back buffer, resolved with TargetWindow. Guarded by WindowMutex.
+		FIntRect CropRect;
+		// The GPU copy of that rectangle, and the size last logged. Render thread, under ViewportSlotMutex.
+		FTextureRHIRef CropTexture;
+		FIntPoint CropLoggedSize = FIntPoint::ZeroValue;
 	};
 
 	/**
@@ -1537,16 +1686,20 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 		return false;
 	}
 
-	if (SendTextureFrom == ESpoutSendTextureFrom::GameViewport)
+	if (SendTextureFrom == ESpoutSendTextureFrom::GameViewport || SendTextureFrom == ESpoutSendTextureFrom::GameViewportOnly)
 	{
 		if (!GEngine || !GEngine->GameViewport || !GEngine->GameViewport->Viewport)
 		{
 			return false;
 		}
 
-		// Queue the request; capture happens when the backbuffer is ready to present.
+		// Queue the request; capture happens when the backbuffer is ready to present. Game Viewport Only uses its
+		// own producer, which copies only the game viewport's rectangle (see FSpoutViewportSender).
+		FSpoutViewportSender& Producer = SendTextureFrom == ESpoutSendTextureFrom::GameViewportOnly
+			? FSpoutViewportSender::GetGameViewportOnly()
+			: FSpoutViewportSender::Get();
 		const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Sender);
-		return Token.IsSet() && FSpoutViewportSender::Get().QueueSend(Token);
+		return Token.IsSet() && Producer.QueueSend(Token);
 	}
 
 	FSpoutSendSource SendSource;
@@ -1602,7 +1755,9 @@ void FSpoutSender::Close(FName SpoutName)
 
 	// Drop the name from the viewport queue, so a closed viewport sender is not published again at
 	// the next present.
-	const bool bWasPending = FSpoutViewportSender::Get().RemovePending(SpoutName);
+	const bool bWasPendingWholeWindow = FSpoutViewportSender::Get().RemovePending(SpoutName);
+	const bool bWasPendingGameViewportOnly = FSpoutViewportSender::GetGameViewportOnly().RemovePending(SpoutName);
+	const bool bWasPending = bWasPendingWholeWindow || bWasPendingGameViewportOnly;
 
 	// Registry is keyed by (Name, Type); Close must scope to the Sender entry only,
 	// leaving any Receiver entry with the same FName untouched.
@@ -1621,14 +1776,17 @@ void FSpoutSender::Close(FName SpoutName)
 void FSpoutSender::DetachProducers()
 {
 	FSpoutViewportSender::Get().DetachProducer();
+	FSpoutViewportSender::GetGameViewportOnly().DetachProducer();
 }
 
 void FSpoutSender::ClearPendingWork()
 {
 	FSpoutViewportSender::Get().ClearPending();
+	FSpoutViewportSender::GetGameViewportOnly().ClearPending();
 }
 
 void FSpoutSender::ReleaseNativeResources()
 {
 	FSpoutViewportSender::Get().ReleaseNativeResources();
+	FSpoutViewportSender::GetGameViewportOnly().ReleaseNativeResources();
 }

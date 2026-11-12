@@ -54,8 +54,9 @@ namespace
 			// Staged copy beside the plugin's own module binary (editor/modular builds,
 			// BuildPlugin output, precompiled release zips).
 			CandidatePaths.Add(FPaths::Combine(BaseDir, TEXT("Binaries"), TEXT("Win64"), TEXT("Spout.dll")));
-			// Source tree under ThirdParty (source/editor builds before first stage).
-			CandidatePaths.Add(FPaths::Combine(BaseDir, TEXT("ThirdParty"), TEXT("Spout"), TEXT("lib"), TEXT("amd64"), TEXT("Spout.dll")));
+			// The SDK copy under Source/ThirdParty (source/editor builds before first stage, and raw BuildPlugin
+			// output such as Fab's, which carries no Binaries/Win64/Spout.dll).
+			CandidatePaths.Add(FPaths::Combine(BaseDir, TEXT("Source"), TEXT("ThirdParty"), TEXT("Spout"), TEXT("lib"), TEXT("amd64"), TEXT("Spout.dll")));
 		}
 		else
 		{

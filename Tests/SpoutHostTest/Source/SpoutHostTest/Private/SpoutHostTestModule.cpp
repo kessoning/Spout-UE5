@@ -8,6 +8,7 @@
 #include "SpoutHostTestReport.h"
 #include "SpoutHostTestSmoke.h"
 #include "SpoutHostTestIdentity.h"
+#include "SpoutHostTestActors.h"
 
 #include "Misc/CommandLine.h"
 
@@ -31,6 +32,7 @@ void FSpoutHostTestModule::StartupModule()
 
 	SpoutHostTest::FSmokeRunner::Start();
 	SpoutHostTest::FPerfHarness::Start();
+	SpoutHostTest::FActorsSmoke::Start();
 }
 
 void FSpoutHostTestModule::ShutdownModule()
@@ -40,6 +42,7 @@ void FSpoutHostTestModule::ShutdownModule()
 
 	SpoutHostTest::FSmokeRunner::Stop();
 	SpoutHostTest::FPerfHarness::Stop();
+	SpoutHostTest::FActorsSmoke::Stop();
 
 	SpoutHostTest::FReport* Report = SpoutHostTest::FReport::Get();
 	if (Report != nullptr && (bSmokeRan || bPerfRan))

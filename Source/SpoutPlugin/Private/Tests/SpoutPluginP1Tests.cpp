@@ -51,7 +51,7 @@ namespace
 			Pixels[Y * W + X] = FColor((X + Sequence) & 255, (Y * 11 + Sequence) & 255, (X * 13 + Y) & 255, (X * 3 + Y * 7 + Sequence) & 255);
 		return Pixels;
 	}
-	void Upload(UTextureRenderTarget2D* Target, int32 Sequence)
+	void P1Upload(UTextureRenderTarget2D* Target, int32 Sequence)
 	{
 		auto* Resource = Target->GameThread_GetRenderTargetResource();
 		const int32 W = Target->SizeX, H = Target->SizeY;
@@ -61,7 +61,7 @@ namespace
 			Cmd.UpdateTexture2D(Resource->GetTextureRHI(), 0, FUpdateTextureRegion2D(0, 0, 0, 0, W, H), W * 4, reinterpret_cast<const uint8*>(Pixels.GetData()));
 		});
 	}
-	TArray<FColor> Read(FTextureResource* Resource, int32 W, int32 H)
+	TArray<FColor> P1Read(FTextureResource* Resource, int32 W, int32 H)
 	{
 		TArray<FColor> Pixels;
 		ENQUEUE_RENDER_COMMAND(SpoutP1Read)([Resource, W, H, &Pixels](FRHICommandListImmediate& Cmd)
@@ -89,7 +89,7 @@ bool FSpoutP1Fanout::RunTest(const FString&)
 		Source->InitCustomFormat(256, 16, PF_B8G8R8A8, true);
 		A->InitCustomFormat(32, 16, PF_B8G8R8A8, true); B->InitCustomFormat(32, 16, PF_B8G8R8A8, true);
 		Bad->InitCustomFormat(8, 8, PF_FloatRGBA, true);
-		Upload(Source.Get(), 19);
+		P1Upload(Source.Get(), 19);
 		USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
 		UTexture2D* Texture = nullptr; UMaterialInstanceDynamic* Material = nullptr;
 		TestTrue(TEXT("texture-only consumer accepted first"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false));
@@ -97,14 +97,14 @@ bool FSpoutP1Fanout::RunTest(const FString&)
 		for (UTextureRenderTarget2D* Target : { A.Get(), B.Get() })
 		{
 			TestTrue(TEXT("late consumer accepted while sender is paused"), USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, Target, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false));
-			TestTrue(TEXT("late target receives full ramp and alpha"), Read(Target->GetResource(), 256, 16) == Pattern(256, 16, 19));
+			TestTrue(TEXT("late target receives full ramp and alpha"), P1Read(Target->GetResource(), 256, 16) == Pattern(256, 16, 19));
 		}
 		A->UpdateResource();
 		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, A.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
-		TestTrue(TEXT("recreated target catches up without upstream publication"), Read(A->GetResource(), 256, 16) == Pattern(256, 16, 19));
+		TestTrue(TEXT("recreated target catches up without upstream publication"), P1Read(A->GetResource(), 256, 16) == Pattern(256, 16, 19));
 		if (Texture) Texture->UpdateResource();
 		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
-		TestTrue(TEXT("recreated shared output restores last completed image"), Texture && Read(Texture->GetResource(), 256, 16) == Pattern(256, 16, 19));
+		TestTrue(TEXT("recreated shared output restores last completed image"), Texture && P1Read(Texture->GetResource(), 256, 16) == Pattern(256, 16, 19));
 		USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, Bad.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 		TestEqual(TEXT("incompatible target width remains unchanged"), Bad->SizeX, 8);
 		TestEqual(TEXT("incompatible target height remains unchanged"), Bad->SizeY, 8);
@@ -113,12 +113,12 @@ bool FSpoutP1Fanout::RunTest(const FString&)
 		TestTrue(TEXT("conflict leaves output identity unchanged"), Texture == Before);
 		if (!GPU)
 		{
-			Upload(Source.Get(), 23); USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
+			P1Upload(Source.Get(), 23); USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
 			SpoutReceiverInternal::FailNextCpuReadbackForTests();
 			USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, B.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
-			TestTrue(TEXT("failed readback keeps previous completed output"), Read(B->GetResource(), 256, 16) == Pattern(256, 16, 19));
+			TestTrue(TEXT("failed readback keeps previous completed output"), P1Read(B->GetResource(), 256, 16) == Pattern(256, 16, 19));
 			USpoutBPFunctionLibrary::SpoutReceiverWithMaterial(Name, nullptr, NAME_None, Texture, B.Get(), ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
-			TestTrue(TEXT("retry receives last upstream image without new publication"), Read(B->GetResource(), 256, 16) == Pattern(256, 16, 23));
+			TestTrue(TEXT("retry receives last upstream image without new publication"), P1Read(B->GetResource(), 256, 16) == Pattern(256, 16, 23));
 		}
 		USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material); USpoutBPFunctionLibrary::CloseSender(Name); FlushRenderingCommands();
 	}
@@ -166,7 +166,7 @@ bool FSpoutP1Color::RunTest(const FString&)
 		TStrongObjectPtr<UTextureRenderTarget2D> Source(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(256, 16, Format, Linear));
 		TestTrue(Case + TEXT(": created"), Source.IsValid());
 		if (!Source.IsValid()) continue;
-		Upload(Source.Get(), 41); USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
+		P1Upload(Source.Get(), 41); USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get()); FlushRenderingCommands();
 		auto Entry = FSpoutSenderRegistry::Get().Find(Name, ESpoutType::Sender);
 		TestTrue(Case + TEXT(": sender registered"), Entry.IsValid());
 		// Every 8-bit source is shared as the plain _UNORM format, whatever its gamma: SpoutGL
@@ -187,7 +187,7 @@ bool FSpoutP1Color::RunTest(const FString&)
 			{
 				TestEqual(ModeCase + TEXT(": decode setting follows the colour-space mode"), Texture->SRGB != 0, Mode != ESpoutColorSpace::Linear);
 				TestEqual(ModeCase + TEXT(": pixel format"), static_cast<int32>(Texture->GetPixelFormat()), static_cast<int32>(Format));
-				TestTrue(ModeCase + TEXT(": ramp and alpha bytes unchanged"), Read(Texture->GetResource(), 256, 16) == Expected);
+				TestTrue(ModeCase + TEXT(": ramp and alpha bytes unchanged"), P1Read(Texture->GetResource(), 256, 16) == Expected);
 			}
 			USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material); FlushRenderingCommands();
 		}
@@ -202,7 +202,7 @@ bool FSpoutP1Blueprint::RunTest(const FString&)
 	ExpectWrapDiagnostic(*this);
 	const FName Name(*(TEXT("SpoutP1Blueprint_")+FGuid::NewGuid().ToString(EGuidFormats::Digits)));
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(256,16,PF_B8G8R8A8,true));
-	Upload(Source.Get(),31); USpoutBPFunctionLibrary::SpoutSender(Name,ESpoutSendTextureFrom::TextureRenderTarget2D,Source.Get()); FlushRenderingCommands();
+	P1Upload(Source.Get(),31); USpoutBPFunctionLibrary::SpoutSender(Name,ESpoutSendTextureFrom::TextureRenderTarget2D,Source.Get()); FlushRenderingCommands();
 	TStrongObjectPtr<UBlueprint> Blueprint(FKismetEditorUtilities::CreateBlueprint(UObject::StaticClass(),GetTransientPackage(),MakeUniqueObjectName(GetTransientPackage(),UBlueprint::StaticClass()),BPTYPE_Normal,UBlueprint::StaticClass(),UBlueprintGeneratedClass::StaticClass()));
 	if (!TestNotNull(TEXT("test Blueprint created"),Blueprint.Get())) return false;
 	FEdGraphPinType MaterialType; MaterialType.PinCategory=UEdGraphSchema_K2::PC_Object; MaterialType.PinSubCategoryObject=UMaterialInstanceDynamic::StaticClass();

@@ -1237,10 +1237,18 @@ UMaterialInstanceDynamic* SpoutReceiverInternal::ResolveConsumerMaterial(
 	return Material;
 }
 
-bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace, bool bAsyncReceive)
+bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMaterial, FName TextureParameterName, UMaterialInstanceDynamic*& OutMat, UTexture2D*& OutTexture, UTextureRenderTarget2D* OptionalOutputRenderTarget, ESpoutColorSpace ColorSpace, bool bAsyncReceive,
+	const UObject* ManagedConsumer, ESpoutReceiveResult* OutResult)
 {
 	check(IsInGameThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_Receive);
+	// Every refusal below reports its reason to a caller that asked for it (the placeable receiver actor's status).
+	const auto Refuse = [OutResult](ESpoutReceiveResult Result)
+	{
+		if (OutResult) *OutResult = Result;
+		return false;
+	};
+	if (OutResult) *OutResult = ESpoutReceiveResult::Accepted;
 	// Validate the requested name before touching the interop context. An invalid name can never
 	// resolve to a sender, so there is nothing to initialize for it.
 	TArray<ANSICHAR> Utf8Name;
@@ -1255,25 +1263,29 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				*SpoutName.ToString(),
 				SpoutValidation::ToString(NameResult));
 		}
-		return false;
+		return Refuse(ESpoutReceiveResult::InvalidName);
 	}
 
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
-	if (!FSpoutSession::Get().IsRunning()) return false;
+	if (!FSpoutSession::Get().IsRunning()) return Refuse(ESpoutReceiveResult::Unavailable);
 	Context.InitializeIfNeeded();
 
 	if (!Context.GetSenderNames() || !Context.GetD3D11Device())
 	{
-		return false;
+		return Refuse(ESpoutReceiveResult::Unavailable);
 	}
 
 	unsigned int W = 0;
 	unsigned int H = 0;
 	HANDLE SharedHandle = nullptr;
 	unsigned long Format = 0;
-	if (!FSpoutSession::Get().IsRunning() || !QuerySenderInfo(Utf8Name.GetData(), W, H, SharedHandle, Format))
+	if (!FSpoutSession::Get().IsRunning())
 	{
-		return false;
+		return Refuse(ESpoutReceiveResult::Unavailable);
+	}
+	if (!QuerySenderInfo(Utf8Name.GetData(), W, H, SharedHandle, Format))
+	{
+		return Refuse(ESpoutReceiveResult::NoSender);
 	}
 
 	// Everything above came from another process through shared memory. Validate the whole set
@@ -1300,14 +1312,14 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)),
 				SharedHandle ? TEXT("present") : TEXT("null"));
 		}
-		return false;
+		return Refuse(ESpoutReceiveResult::BadMetadata);
 	}
 
 	const SpoutFormatPolicy::FReceiverFormat ReceiverFormat = SpoutFormatPolicy::ResolveReceiverFormat(static_cast<uint32>(Format));
 	// The frame as the sender published it. The received texture may differ (PixelFormat below).
 	const EPixelFormat StreamPixelFormat = ReceiverFormat.PixelFormat;
 	int64 StreamFrameBytes = 0;
-	if (!SpoutLimits::FrameBytes(W, H, StreamPixelFormat, StreamFrameBytes)) return false;
+	if (!SpoutLimits::FrameBytes(W, H, StreamPixelFormat, StreamFrameBytes)) return Refuse(ESpoutReceiveResult::FrameTooLarge);
 
 	// One explicit colour-space contract, resolved here and nowhere else. Auto follows the
 	// documented per-format convention; an explicit request is honoured where it is representable
@@ -1332,27 +1344,27 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)),
 				SpoutFormatPolicy::ToString(ColorSpaceResult));
 		}
-		return false;
+		return Refuse(ESpoutReceiveResult::ColorSpaceUnsupported);
 	}
 	// The received texture's format (and an output render target's), its sRGB flag, and whether it is decoded.
 	const EPixelFormat PixelFormat = Interpretation.TexturePixelFormat;
 	const bool bSRGB = Interpretation.bSRGB;
 	const bool bDecodeSrgb = Interpretation.Decode == SpoutFormatPolicy::EReceiveDecode::SrgbToLinear;
 	int64 FrameBytes = 0;
-	if (!SpoutLimits::FrameBytes(W, H, PixelFormat, FrameBytes)) return false;
+	if (!SpoutLimits::FrameBytes(W, H, PixelFormat, FrameBytes)) return Refuse(ESpoutReceiveResult::FrameTooLarge);
 
 	// Discovery failures above retain no stream/native records. Once metadata is valid,
 	// the explicit close/session lifecycle owns this connected name.
 	const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Receiver);
-	if (!Token.IsSet()) return false;
+	if (!Token.IsSet()) return Refuse(ESpoutReceiveResult::Busy);
 	const auto QueuedWork = FSpoutSession::Get().TryQueue(Token);
-	if (!QueuedWork) return false;
+	if (!QueuedWork) return Refuse(ESpoutReceiveResult::Busy);
 	TSharedPtr<FSpoutSharedSender> Receiver;
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReceiveFindOrAddEntry);
 		Receiver = FSpoutSenderRegistry::Get().FindOrAdd(SpoutName, ESpoutType::Receiver);
 	}
-	if (!Receiver || !Receiver->HasValidName()) return false;
+	if (!Receiver || !Receiver->HasValidName()) return Refuse(ESpoutReceiveResult::InvalidName);
 
 	// One session per name has one receive mode. The first accepted call fixed it; a call asking for the other mode
 	// is refused here, before any reservation, output, material or queued work is touched, so the session and every
@@ -1370,7 +1382,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 				bAsyncReceive ? TEXT("Async Receive") : TEXT("the synchronous receive"),
 				Receiver->bAsyncReceiveRequested ? TEXT("Async Receive") : TEXT("the synchronous receive"));
 		}
-		return false;
+		return Refuse(ESpoutReceiveResult::ModeConflict);
 	}
 
 	// One session has one colour interpretation, the one its first accepted receive asked for, applied to the sender's
@@ -1394,7 +1406,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 						*SpoutName.ToString(), SpoutFormatPolicy::ToString(ColorSpace), SpoutFormatPolicy::ToString(Receiver->EstablishedColorSpace),
 						*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Format)));
 				}
-				return false;
+				return Refuse(ESpoutReceiveResult::ColorConflict);
 			}
 		}
 		else
@@ -1410,19 +1422,21 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 
 	const FName ParamName = TextureParameterName.IsNone() ? FName("SpoutTexture") : TextureParameterName;
 	if ((OutMat || InputMaterial) && !Ownership.HasMaterialBinding(SpoutName, OutMat, ParamName)
-		&& Ownership.NumMaterialBindings(SpoutName) >= SpoutLimits::MaxConsumers()) return false;
+		&& Ownership.NumMaterialBindings(SpoutName) >= SpoutLimits::MaxConsumers()) return Refuse(ESpoutReceiveResult::ConsumerLimit);
 	for (auto It = Receiver->OutputReservations.CreateIterator(); It; ++It)
+		if (!It.Key().IsValid()) It.RemoveCurrent();
+	for (auto It = Receiver->OutputTargetUsers.CreateIterator(); It; ++It)
 		if (!It.Key().IsValid()) It.RemoveCurrent();
 	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> PreviousOutputReservation;
 	if (OptionalOutputRenderTarget && OptionalOutputRenderTarget->GetFormat() == PixelFormat && !OptionalOutputRenderTarget->bAutoGenerateMips)
 	{
 		const TWeakObjectPtr<UObject> Key(OptionalOutputRenderTarget);
 		auto* Existing = Receiver->OutputReservations.Find(Key);
-		if (!Existing && Receiver->OutputReservations.Num() >= SpoutLimits::MaxConsumers()) return false;
+		if (!Existing && Receiver->OutputReservations.Num() >= SpoutLimits::MaxConsumers()) return Refuse(ESpoutReceiveResult::ConsumerLimit);
 		if (!Existing || (*Existing)->GetBytes() != FrameBytes * 2)
 		{
 			const auto Reservation = FSpoutResourceReservation::TryReserve(FrameBytes * 2);
-			if (!Reservation) return false;
+			if (!Reservation) return Refuse(ESpoutReceiveResult::ConsumerLimit);
 			if (Existing) PreviousOutputReservation = *Existing;
 			Receiver->OutputReservations.Add(Key, Reservation);
 		}
@@ -1433,7 +1447,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	{
 		if (Receiver->FormatLogThrottle.ShouldLog())
 			UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': conflicting color space for an open session; use the established color space or close the session first."), *SpoutName.ToString());
-		return false;
+		return Refuse(ESpoutReceiveResult::ColorConflict);
 	}
 	bool bReplacedOutput = false;
 	{
@@ -1449,7 +1463,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 			if (Receiver->OpenLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("Spout receiver '%s': could not create a %ux%u %s texture for the incoming frame."),
 				*SpoutName.ToString(), W, H, GetPixelFormatString(PixelFormat));
-			return false;
+			return Refuse(ESpoutReceiveResult::TextureFailed);
 		}
 
 		// Adopting the replacement is also what drops the previous one: it loses this reference and
@@ -1529,6 +1543,22 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		}
 	}
 	const bool bAsyncRequested = Receiver->bAsyncReceiveRequested;
+	// Accepted: record who uses the session (and the compatible output target), only now, so a refused call never
+	// keeps a session from being released by the placeable actors.
+	{
+		const bool bOutputUsed = OutputResource != nullptr;
+		if (ManagedConsumer)
+		{
+			const FObjectKey ConsumerKey(ManagedConsumer);
+			Receiver->ManagedConsumers.Add(ConsumerKey);
+			if (bOutputUsed) Receiver->OutputTargetUsers.FindOrAdd(OutputIdentity).Managed.Add(ConsumerKey);
+		}
+		else
+		{
+			Receiver->bUnmanagedConsumer = true;
+			if (bOutputUsed) Receiver->OutputTargetUsers.FindOrAdd(OutputIdentity).bUnmanaged = true;
+		}
+	}
 	FSpoutSession::Get().MarkQueued(Token);
 	ENQUEUE_RENDER_COMMAND(SpoutRecvCmd)(
 		[Token, Receiver, TextureResource, OutputResource, OutputIdentity, W, H, SharedHandle, Format, PixelFormat, StreamPixelFormat, bDecodeSrgb, bUseGPUPath, bAsyncRequested, QueuedWork, PreviousOutputReservation](FRHICommandListImmediate& RHICmdList)
@@ -1643,4 +1673,85 @@ void FSpoutReceiver::Close(const FName SpoutName)
 		FSpoutSenderRegistry::Get().Remove(SpoutName, ESpoutType::Receiver);
 		UE_LOG(LogSpoutPlugin, Log, TEXT("Closed Spout Receiver: %s"), *SpoutName.ToString());
 	}
+}
+
+FSpoutReceiverSessionInfo FSpoutReceiver::GetSessionInfo(const FName SpoutName, const UObject* Consumer)
+{
+	check(IsInGameThread());
+	FSpoutReceiverSessionInfo Info;
+	if (const TSharedPtr<FSpoutSharedSender> Entry = FSpoutSenderRegistry::Get().Find(SpoutName, ESpoutType::Receiver))
+	{
+		// Process-unique identity, assigned on first query; a reopened session is a new entry with a new identity.
+		static uint64 NextSessionId = 0;
+		if (Entry->ConsumerSessionId == 0) Entry->ConsumerSessionId = ++NextSessionId;
+		Info.SessionId = Entry->ConsumerSessionId;
+		Info.bIsManagedConsumer = Consumer && Entry->ManagedConsumers.Contains(FObjectKey(Consumer));
+		Info.bExists = true;
+		Info.bReceiveModeEstablished = Entry->bReceiveModeEstablished;
+		Info.bAsyncReceive = Entry->bAsyncReceiveRequested;
+		Info.bColorSpaceEstablished = Entry->bColorSpaceEstablished;
+		Info.ColorSpace = Entry->EstablishedColorSpace;
+		Info.ManagedConsumers = Entry->ManagedConsumers.Num();
+		Info.bUnmanagedConsumer = Entry->bUnmanagedConsumer;
+	}
+	return Info;
+}
+
+void FSpoutReceiver::ReleaseManagedOutputTarget(const FName SpoutName, const UObject* Consumer, UTextureRenderTarget2D* OutputTarget)
+{
+	check(IsInGameThread());
+	if (!Consumer || !OutputTarget) return;
+	const TSharedPtr<FSpoutSharedSender> Entry = FSpoutSenderRegistry::Get().Find(SpoutName, ESpoutType::Receiver);
+	if (!Entry) return;
+	const TWeakObjectPtr<UObject> Key(OutputTarget);
+	FSpoutSharedSender::FOutputTargetUse* Use = Entry->OutputTargetUsers.Find(Key);
+	if (!Use) return;
+	Use->Managed.Remove(FObjectKey(Consumer));
+	if (Use->Managed.Num() > 0 || Use->bUnmanaged)
+	{
+		// Another consumer still copies into this target; its reservation and delivery stay.
+		return;
+	}
+	Entry->OutputTargetUsers.Remove(Key);
+	Entry->OutputReservations.Remove(Key);
+	// The delivery record is render-thread state; drop it in order after any queued receive for this entry.
+	ENQUEUE_RENDER_COMMAND(SpoutReleaseOutputTarget)([Entry, Key](FRHICommandListImmediate&)
+	{
+		Entry->DestinationDeliveries.Remove(Key);
+	});
+}
+
+bool FSpoutReceiver::ReleaseManagedConsumer(const FName SpoutName, const UObject* Consumer, UMaterialInstanceDynamic* Material, FName TextureParameterName, UTextureRenderTarget2D* OutputTarget)
+{
+	check(IsInGameThread());
+	// 1. This consumer's material binding only (restores the parameter if it still shows the received image).
+	if (Material)
+	{
+		if (FSpoutReceiverOwnership* Ownership = FSpoutReceiverOwnership::Peek())
+		{
+			Ownership->ReleaseMaterialBinding(SpoutName, Material, TextureParameterName.IsNone() ? FName(TEXT("SpoutTexture")) : TextureParameterName);
+		}
+	}
+	const TSharedPtr<FSpoutSharedSender> Entry = FSpoutSenderRegistry::Get().Find(SpoutName, ESpoutType::Receiver);
+	if (!Entry)
+	{
+		// Already closed (Close Receiver, end of Play) or never opened: nothing else is ours.
+		return false;
+	}
+	// 2. This consumer's use of its output target, keeping the reservation for any other user of the same target.
+	ReleaseManagedOutputTarget(SpoutName, Consumer, OutputTarget);
+	// 3. The lease. Idempotent: removing an absent key changes nothing.
+	if (Consumer) Entry->ManagedConsumers.Remove(FObjectKey(Consumer));
+	// 4. Close only a session nobody else uses: no other actor, and no Blueprint/C++ caller ever had a receive accepted
+	//    on it (such a caller owns the close, as documented for Close Receiver).
+	if (Entry->ManagedConsumers.Num() > 0 || Entry->bUnmanagedConsumer)
+	{
+		return false;
+	}
+	Close(SpoutName);
+	if (FSpoutReceiverOwnership* Ownership = FSpoutReceiverOwnership::Peek())
+	{
+		Ownership->Release(SpoutName);
+	}
+	return true;
 }

@@ -447,9 +447,9 @@ function Test-SourceDependencies
         'module source'          = Join-Path $Root 'Source\SpoutPlugin\Private'
         'module public headers'  = Join-Path $Root 'Source\SpoutPlugin\Public'
         'packaging filter'       = Join-Path $Root 'Config\FilterPlugin.ini'
-        'Spout headers'          = Join-Path $Root 'ThirdParty\Spout\include'
-        'Spout import library'   = Join-Path $Root 'ThirdParty\Spout\lib\amd64\Spout.lib'
-        'Spout runtime library'  = Join-Path $Root 'ThirdParty\Spout\lib\amd64\Spout.dll'
+        'Spout headers'          = Join-Path $Root 'Source\ThirdParty\Spout\include'
+        'Spout import library'   = Join-Path $Root 'Source\ThirdParty\Spout\lib\amd64\Spout.lib'
+        'Spout runtime library'  = Join-Path $Root 'Source\ThirdParty\Spout\lib\amd64\Spout.dll'
         'project license'        = Join-Path $Root 'LICENSE'
         'third-party notices'    = Join-Path $Root 'THIRD_PARTY_NOTICES.md'
         'shipped readme'         = Join-Path $Root 'README.md'
@@ -476,7 +476,8 @@ function Test-SourceDependencies
     if (Test-Path -LiteralPath $filterPath -PathType Leaf)
     {
         $filter = Get-Content -LiteralPath $filterPath -Raw
-        foreach ($entry in @('/ThirdParty/...', '/LICENSE', '/THIRD_PARTY_NOTICES.md', '/README.md'))
+        # The Spout SDK lives under Source/ThirdParty (Fab layout), which BuildPlugin ships with Source by default.
+        foreach ($entry in @('/LICENSE', '/THIRD_PARTY_NOTICES.md', '/README.md'))
         {
             if ($filter -notmatch [regex]::Escape($entry))
             {
@@ -628,6 +629,18 @@ function Test-ReleaseArchive
         # The shader module (the 10-bit sRGB decode): its source, its binary and the shader file it
         # maps. Without the .usf the module logs an error at startup and Color Space sRGB on a 10-bit
         # sender cannot be compiled or cooked.
+        if ($descriptor -and @($descriptor.Modules | Where-Object { $_.Name -eq 'SpoutPluginEditor' }).Count -gt 0)
+        {
+            # Editor-only module (Place Actors category): its source and editor binary must ship.
+            if (-not (Test-Entry $entries 'Source/SpoutPluginEditor/SpoutPluginEditor.Build.cs'))
+            {
+                [void] $problems.Add('missing Source/SpoutPluginEditor/SpoutPluginEditor.Build.cs')
+            }
+            if (@($entries | Where-Object { $_ -like "$PluginName/Binaries/Win64/*-SpoutPluginEditor.dll" }).Count -eq 0)
+            {
+                [void] $problems.Add('missing the SpoutPluginEditor module binary in Binaries/Win64')
+            }
+        }
         if ($descriptor -and @($descriptor.Modules | Where-Object { $_.Name -eq 'SpoutPluginShaders' }).Count -gt 0)
         {
             foreach ($shaderEntry in @('Source/SpoutPluginShaders/SpoutPluginShaders.Build.cs', 'Shaders/Private/SpoutColorDecode.usf'))
@@ -721,16 +734,16 @@ function Test-ReleaseArchive
         }
 
         # ThirdParty tree, required by SpoutPlugin.Build.cs at compile time.
-        foreach ($tp in @('ThirdParty/Spout/lib/amd64/Spout.lib', 'ThirdParty/Spout/lib/amd64/Spout.dll'))
+        foreach ($tp in @('Source/ThirdParty/Spout/lib/amd64/Spout.lib', 'Source/ThirdParty/Spout/lib/amd64/Spout.dll'))
         {
             if (-not (Test-Entry $entries $tp))
             {
                 [void] $problems.Add("missing $tp")
             }
         }
-        if (-not (Test-EntryPrefix $entries 'ThirdParty/Spout/include/'))
+        if (-not (Test-EntryPrefix $entries 'Source/ThirdParty/Spout/include/'))
         {
-            [void] $problems.Add('missing ThirdParty/Spout/include/')
+            [void] $problems.Add('missing Source/ThirdParty/Spout/include/')
         }
 
         # Licensing and shipped documentation.
@@ -984,9 +997,9 @@ try
         Test-SourceDependencies $PluginRoot
     }
 
-    $repoSpoutDll = Join-Path $PluginRoot 'ThirdParty\Spout\lib\amd64\Spout.dll'
+    $repoSpoutDll = Join-Path $PluginRoot 'Source\ThirdParty\Spout\lib\amd64\Spout.dll'
     $repoSpoutDllHash = Get-Sha256 $repoSpoutDll
-    $repoSpoutLib = Join-Path $PluginRoot 'ThirdParty\Spout\lib\amd64\Spout.lib'
+    $repoSpoutLib = Join-Path $PluginRoot 'Source\ThirdParty\Spout\lib\amd64\Spout.lib'
     $repoSpoutLibHash = Get-Sha256 $repoSpoutLib
 
     foreach ($dir in @($versionOutputRoot, $fabRoot, $patreonRoot, $logRoot))
@@ -1167,9 +1180,9 @@ try
             # and Resources\Icon128.png are staged by BuildPlugin's default behaviour, and are
             # checked here so that their absence cannot ship unnoticed.
             $requiredInOutput = @(
-                (Join-Path $buildOut 'ThirdParty\Spout\include'),
-                (Join-Path $buildOut 'ThirdParty\Spout\lib\amd64\Spout.lib'),
-                (Join-Path $buildOut 'ThirdParty\Spout\lib\amd64\Spout.dll'),
+                (Join-Path $buildOut 'Source\ThirdParty\Spout\include'),
+                (Join-Path $buildOut 'Source\ThirdParty\Spout\lib\amd64\Spout.lib'),
+                (Join-Path $buildOut 'Source\ThirdParty\Spout\lib\amd64\Spout.dll'),
                 (Join-Path $buildOut 'Source\SpoutPlugin\SpoutPlugin.Build.cs'),
                 (Join-Path $buildOut 'SpoutPlugin.uplugin'),
                 (Join-Path $buildOut 'LICENSE'),
@@ -1378,9 +1391,9 @@ finally
             $hasNoticeFile = $false
             if ($haveRoot)
             {
-                $bundledDllPath = Join-Path $PluginRoot 'ThirdParty\Spout\lib\amd64\Spout.dll'
+                $bundledDllPath = Join-Path $PluginRoot 'Source\ThirdParty\Spout\lib\amd64\Spout.dll'
                 $bundledDllHash = Get-Sha256 $bundledDllPath
-                $bundledLibPath = Join-Path $PluginRoot 'ThirdParty\Spout\lib\amd64\Spout.lib'
+                $bundledLibPath = Join-Path $PluginRoot 'Source\ThirdParty\Spout\lib\amd64\Spout.lib'
                 $bundledLibHash = Get-Sha256 $bundledLibPath
                 $hasLicenseFile = (Test-Path -LiteralPath (Join-Path $PluginRoot 'LICENSE'))
                 $hasNoticeFile = (Test-Path -LiteralPath (Join-Path $PluginRoot 'THIRD_PARTY_NOTICES.md'))

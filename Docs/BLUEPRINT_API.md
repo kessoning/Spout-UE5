@@ -33,10 +33,12 @@ static bool SpoutSender(FName SpoutName,
 Publishes a texture to Spout. The GPU copy runs on the render thread and does not stall the
 game thread.
 
-- Inputs: `SpoutName` (stream name); `SendTextureFrom` (`GameViewport` or `TextureRenderTarget2D`);
-  `TextureRenderTarget2D` (required for the render-target source, ignored for GameViewport).
+- Inputs: `SpoutName` (stream name); `SendTextureFrom` (`GameViewport`, `TextureRenderTarget2D` or
+  `GameViewportOnly`); `TextureRenderTarget2D` (required for the render-target source, ignored for the two viewport
+  sources).
 - Returns: `true` if the send was accepted or queued, `false` on invalid input (for example a
-  null render target, no game viewport, or Spout unavailable).
+  null render target, no game viewport, or Spout unavailable). `GameViewportOnly` also returns `false` when the
+  game viewport's on-screen rectangle cannot be resolved, for example outside Play in the editor.
 - Call it: every frame on Tick or on a timer, continuously, to request continuous frame updates.
 - Common mistakes: leaving the render target empty while using the TextureRenderTarget2D source;
   calling it once instead of continuously; using a name that does not match the receiver.
@@ -290,6 +292,73 @@ Blueprint instead of an asset.
 
 ---
 
+## Placeable actors: Spout Sender and Spout Receiver
+
+Two actors in the Place Actors panel (category **Spout**) that send and receive while the game plays, with no
+Blueprint. They call the functions above; everything here can also be read and set from Blueprint.
+
+### Spout Sender (`ASpoutSenderActor`)
+
+| Details setting | Default | Same as |
+|---|---|---|
+| Enabled | on | (actor) - off stops and closes the stream at once |
+| Spout Name | unique per placement (`UE Spout Sender`, `UE Spout Sender 2`, ...) | Spout Sender: Spout Name |
+| Send From | Game Viewport Only | Spout Sender: Send Texture From |
+| Texture Render Target (shown for the render-target mode) | none | Spout Sender: Texture Render Target 2D |
+| Status, Publishing (read-only, Play) | - | Get Spout Stream Status |
+
+- Sends every frame while playing (Tick, after the frame's game work); stops on Enabled off, on removal and at the end
+  of Play (Close Sender for its own name only).
+- Render-target mode without a target: nothing is sent, never another source. Status, one log warning and a Map Check
+  error say so.
+- One name, one source: it does not start on a name another sender actor, a Blueprint or C++ sender of this game, or
+  another application already publishes (Status says which). It checks when it starts; a Blueprint that starts sending
+  the same name later is not detected, and the actor's close would end that stream too.
+- Status separates a request the plugin accepted from frames actually published (Publishing is true only while the
+  published frame count advances).
+- Blueprint: Set Enabled, Set Spout Name, Set Source (they apply immediately). Use Enabled rather than toggling tick.
+
+### Spout Receiver (`ASpoutReceiverActor`)
+
+| Details setting | Default | Same as |
+|---|---|---|
+| Enabled | on | (actor) - off releases this actor's use of the stream at once |
+| Sender Name | empty: connect to a sender of another application | Spout Receiver: Spout Name |
+| Choose Running Sender (editor) | - | Spout Info (fills Sender Name) |
+| Color Space | Auto | Color Space |
+| Async Receive (advanced) | on | Async Receive |
+| Output Render Target | none | Optional Output Render Target |
+| Show Display, Display Height (180 cm), Keep Aspect Ratio, When Sender Is Lost (Hold Last Frame), Brightness | - | (actor screen) |
+| Display Material (advanced) | `M_SpoutDisplayUnlit` | Input Material / Consumer Material |
+| Texture Parameter Name (advanced) | `SpoutTexture` | Texture Parameter Name |
+| State, Status, Connected Sender Name, Received Size, Applied Settings (read-only, Play) | - | Get Spout Stream Status |
+
+- The two Blueprint receive variants become one setting: the actor creates one material instance from Display
+  Material when play starts (and again only if that setting changes) and binds it the way Spout Receiver With
+  Material does. Out Mat and Out Texture are available as Get Display Material Instance and Get Received Texture.
+- Sender Name empty: Spout's active sender if another application publishes it, otherwise the first sender of another
+  application; this game's own senders are never chosen automatically. The chosen name is kept until Sender Name
+  changes or Play ends. A typed name may be one of this game's senders.
+- State: Waiting (no sender yet, or the sender stopped; retried quietly), Request Accepted (accepted, no frame yet, or
+  no new frame for a second), Receiving (the received frame count advances), Refused (a configuration problem; Status
+  says what to change, logged once, retried every 2 s).
+- Sender lost: the screen holds the last frame (or shows No-Signal), the actor waits for the same sender and resumes
+  when it returns. Resolution or format changes: the screen follows the new aspect ratio.
+- Color Space and Async Receive belong to the stream, shared by all its consumers. If another consumer opened it with
+  other settings, the actor joins with the settings in effect and Status says yours were not applied (also while its
+  own receive is refused for another reason, such as the consumer limit). If the actor is
+  the stream's only user, changing them reopens the stream (a frame or two of No-Signal).
+- Output Render Target: used only when its format matches the stream (RGBA8 for 8-bit, RGB10A2 for 10-bit with Auto,
+  RGBA16f for 10-bit with sRGB and float streams) and Auto Generate Mips is off; otherwise Status names the format it
+  needs. Replacing it during Play releases only this actor's use of the old target.
+- Ownership: disabling or removing a receiver releases only its material binding and its use of its output target.
+  The stream closes only when no other actor uses it and no Blueprint or C++ caller received it since it opened; a
+  Blueprint caller's stream is left for its Close Receiver or the end of Play. Close Receiver in a Blueprint still
+  closes the stream for everyone; actors using it reopen it on their next frame and show the No-Signal color until the
+  reopened stream's first frame (State Request Accepted, then Receiving).
+- Blueprint: Set Enabled, Set Sender Name, Set Output Render Target.
+- Plugin-wide controls (`r.Spout.*`, Set Max Senders) are not per-actor settings.
+
 ## Enums
 
 ### ESpoutType
@@ -303,8 +372,19 @@ Blueprint instead of an asset.
 
 | Value | Meaning |
 |---|---|
-| `GameViewport` | Uses the active game viewport backbuffer. |
-| `TextureRenderTarget2D` | Uses a user-provided `UTextureRenderTarget2D`. |
+| `GameViewport` (0), shown as "Game Viewport (Whole Window)" | Uses the whole back buffer of the window that shows the game viewport. In Play In Editor that is the whole editor window. |
+| `TextureRenderTarget2D` (1) | Uses a user-provided `UTextureRenderTarget2D`. |
+| `GameViewportOnly` (2), shown as "Game Viewport Only" | Uses only the game viewport's rectangle of that back buffer, copied on the GPU: no editor toolbars or panels in Play In Editor; the scene, HUD and UMG widgets on the viewport are included. Sends only while the game is running. |
+
+`GameViewportOnly` was appended: the existing numeric values are unchanged. The display name of `GameViewport` changed,
+to tell it apart from the new value.
+
+The Spout Sender node's `Send Texture From` pin defaults to `GameViewportOnly`. Migration: when an existing node is
+reconstructed (for example when its Blueprint is loaded in the editor), Unreal compares the pin's saved value with
+its autogenerated default and does not track whether the value was selected explicitly. Existing unconnected pins
+holding the old default, `GameViewport`, take the new default, `GameViewportOnly`, even if `GameViewport` was
+selected explicitly. Existing `TextureRenderTarget2D` selections and connected inputs remain intact. To retain
+whole-window capture, select `GameViewport` (Game Viewport (Whole Window)) after upgrading and save the Blueprint.
 
 ### ESpoutColorSpace
 

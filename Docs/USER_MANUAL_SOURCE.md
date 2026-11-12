@@ -58,7 +58,7 @@ do not need to write C++ to use the plugin.
 - DirectX 12 RHI enabled in the project. The plugin creates its D3D11 interop devices on UE's
   D3D12 device and will not initialize on any other RHI. It logs `SpoutPlugin requires DX12 RHI.`
   and stops.
-- `Spout.dll`, bundled with the plugin under `ThirdParty/Spout/lib/amd64/` and staged to the
+- `Spout.dll`, bundled with the plugin under `Source/ThirdParty/Spout/lib/amd64/` and staged to the
   plugin's `Binaries/Win64/` at build time.
 - For source builds and for packaging a game (the supported workflow): Visual Studio 2022 with
   the C++ workload and toolchain and a Windows SDK supported by your engine version. Opening a
@@ -473,9 +473,9 @@ listed separately:
 
 | Layout | Where `Spout.dll` is |
 |---|---|
-| Source plugin in the repository | `ThirdParty/Spout/lib/amd64/Spout.dll` |
-| Raw `RunUAT BuildPlugin -Package` output | `ThirdParty/Spout/lib/amd64/Spout.dll` only. RuntimeDependencies does **not** copy it into `Binaries/Win64` here |
-| Release archive | `Binaries/Win64/Spout.dll`, put there explicitly by `build.ps1`, plus the `ThirdParty` copy |
+| Source plugin in the repository | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` |
+| Raw `RunUAT BuildPlugin -Package` output | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` only. RuntimeDependencies does **not** copy it into `Binaries/Win64` here |
+| Release archive | `Binaries/Win64/Spout.dll`, put there explicitly by `build.ps1`, plus the `Source/ThirdParty` copy |
 | Plugin installed in a project, editor build | `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll`, staged by RuntimeDependencies |
 | Packaged game | `<Project>/Binaries/Win64/Spout.dll` beside the game executable. The plugin module is linked into the executable, so `$(BinaryOutputDir)` resolves to the project's binaries and the plugin's own `Binaries` folder is not staged at all |
 
@@ -566,7 +566,7 @@ Plugin fails to load ("module could not be loaded"): the binary must match your 
 `Spout.dll` must be in `Binaries/Win64`. Read the log; the plugin logs a startup error if the DLL
 is missing.
 
-Spout.dll missing: for precompiled releases, copy it from `ThirdParty/Spout/lib/amd64/` to
+Spout.dll missing: for precompiled releases, copy it from `Source/ThirdParty/Spout/lib/amd64/` to
 `Binaries/Win64/` or rebuild from source.
 
 Sender does not appear externally: confirm DirectX 12; confirm continuous calls; one sender per
@@ -648,7 +648,7 @@ Source/SpoutPlugin/
   Private/  SpoutBPFunctionLibrary.cpp, SpoutModule.cpp,
             SpoutSender.*, SpoutReceiver.*, SpoutD3DContext.*,
             SpoutD3DUtils.*, SpoutSenderRegistry.*, SpoutTextureUtils.*
-ThirdParty/Spout/   include/, lib/amd64/ (Spout.dll, Spout.lib)
+Source/ThirdParty/Spout/   include/, lib/amd64/ (Spout.dll, Spout.lib)
 Content/            example Blueprints, material, render targets
 Resources/          Icon128.png
 build.ps1, build.bat

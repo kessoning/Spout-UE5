@@ -226,12 +226,18 @@ Add-Check -Name 'licensing.licenseExists' -Passed (Test-Path -LiteralPath $licen
 Add-Check -Name 'licensing.noticesExist' -Passed (Test-Path -LiteralPath $noticePath -PathType Leaf) `
     -Detail 'THIRD_PARTY_NOTICES.md exists (AUD-011)'
 
-foreach ($entry in @('/LICENSE', '/THIRD_PARTY_NOTICES.md', '/README.md', '/ThirdParty/...'))
+foreach ($entry in @('/LICENSE', '/THIRD_PARTY_NOTICES.md', '/README.md'))
 {
     Add-Check -Name "licensing.filterShips$($entry -replace '[^A-Za-z]','')" `
         -Passed ($filterText -match [regex]::Escape($entry)) `
         -Detail "Config/FilterPlugin.ini ships $entry into every archive" -Expected $entry
 }
+
+# The Spout SDK lives under Source/ThirdParty (Fab technical requirement 4.3.7.3.d) and ships with Source/ by default.
+Add-Check -Name 'licensing.sdkInsideSource' -Passed (Test-Path -LiteralPath (Join-Path $RepoRoot 'Source\ThirdParty\Spout\lib\amd64\Spout.dll') -PathType Leaf) `
+    -Detail 'the Spout SDK is under Source/ThirdParty, which BuildPlugin ships with Source/'
+Add-Check -Name 'licensing.noRootThirdPartyFilter' -Passed (-not ($filterText -match [regex]::Escape('/ThirdParty/...'))) `
+    -Detail 'Config/FilterPlugin.ini no longer lists the old root /ThirdParty/... layout'
 
 Add-Check -Name 'licensing.readmeReferencesLicense' -Passed ($readmeText -match '\[LICENSE\]\(LICENSE\)') `
     -Detail 'README links to the LICENSE file'
@@ -601,7 +607,7 @@ print("OK|" + "|".join(k for k, v in checks.items() if not v))
 # Documentation must distinguish five distinct DLL layouts. Each is checked by a phrase that only
 # the corresponding section would contain.
 $layoutMarkers = @(
-    @{ Name = 'sourcePlugin';   Pattern = 'ThirdParty/Spout/lib/amd64';                     Detail = 'the source-plugin layout' }
+    @{ Name = 'sourcePlugin';   Pattern = 'Source/ThirdParty/Spout/lib/amd64';              Detail = 'the source-plugin layout' }
     @{ Name = 'buildPluginRaw'; Pattern = 'RunUAT BuildPlugin|raw .?BuildPlugin';           Detail = 'raw BuildPlugin output' }
     @{ Name = 'releaseArchive'; Pattern = 'release archive|release ZIP|release zip';        Detail = 'the release archive layout' }
     @{ Name = 'projectPlugin';  Pattern = 'Plugins/SpoutPlugin/Binaries/Win64';             Detail = 'the plugin-installed-in-a-project layout' }

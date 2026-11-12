@@ -17,8 +17,8 @@ public class SpoutPlugin : ModuleRules
     }
 
     private string ThirdPartyPath {
-        // Third-party dependencies bundled with the plugin.
-        get { return Path.GetFullPath(Path.Combine(ModulePath, "ThirdParty/")); }
+        // Third-party dependencies bundled with the plugin, inside Source/ (Fab technical requirement 4.3.7.3.d).
+        get { return Path.GetFullPath(Path.Combine(ModulePath, "Source", "ThirdParty/")); }
     }
 
     public SpoutPlugin(ReadOnlyTargetRules Target) : base(Target)

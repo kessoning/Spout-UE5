@@ -1,8 +1,82 @@
 # Changelog
 
-## 1.0.0 - 2026-09-21
+## 1.0.0 - 2026-11-11
 
-First stable release. The plugin leaves beta: the sender and receiver lifecycles, the cross-process
+First public stable release. It is the release candidate described below (qualified on UE 5.3 to 5.8 in September
+and October 2026, not distributed) plus two additions made before publication: the drag-and-drop Spout Sender and
+Spout Receiver actors, and the Game Viewport Only sender mode, now the default. Supported engines: UE 5.3 to 5.8,
+Windows 64-bit, Direct3D 12. How the additions were checked: `Docs/RELEASE_READINESS.md` ("Final release
+additions").
+
+**Upgrading from earlier builds (0.0.x or test builds):** Spout Sender nodes left on Game Viewport switch to Game
+Viewport Only when their Blueprint loads (details below); receive nodes whose Async Receive box was left unchecked
+turn it on (see the release candidate notes).
+
+### Fixed in the additions before publication (UE 5.3 to 5.7)
+- **Older engines could not compile the new code:** `FCoreDelegates::GetOnPostEngineInit` (UE 5.8 only),
+  `FPlacementCategoryInfo::ShortDisplayName` (UE 5.5+) and the command-list `CreateTexture` (UE 5.4+) are now used
+  behind engine-version checks, with the older API on older engines.
+- **The receiver's display material and its default texture were saved by UE 5.8**, so UE 5.3 to 5.7 could not load
+  them (no display material; UE 5.7's cook failed). Both are now saved by UE 5.3, the oldest supported engine, like the
+  example assets.
+- **Game Viewport Only crashed a UE 5.3 game** (D3D12 assertion `RequiresResourceStateTracking` on the RHI thread): its
+  copy target was a shader-resource-only texture, which UE 5.3 does not state-track. It is now render-targetable, like
+  the render-target sources the send path is built for.
+- **Tests (shipped source, compiled in a C++ project's editor build):** four file-local test helpers were renamed so that
+  no unity-build grouping can put two same-named helpers in one translation unit (a UE 5.3 project build failed with an
+  ambiguous call). No behaviour change.
+
+### Added: drag-and-drop Spout Sender and Spout Receiver actors
+- **`ASpoutSenderActor` ("Spout Sender") and `ASpoutReceiverActor` ("Spout Receiver")**, in a new **Spout** category
+  of the Place Actors panel (new editor-only module `SpoutPluginEditor`). They send and receive during Play with no
+  Blueprint, through the existing `SpoutSender` / `CloseSender` and `SpoutReceiverWithMaterial` path; settings in
+  the Details panel (category Spout) map to the Blueprint inputs. The Blueprint API and the example assets are
+  unchanged.
+- Sender: Game Viewport Only by default; a unique name per placement; render-target mode never falls back to another
+  source; it does not start on a name another producer already publishes; Publishing reflects published frames.
+- Receiver: built-in unlit screen (`M_SpoutDisplayUnlit`, new; default texture `T_SpoutDisplayDefault`) sized to the
+  stream's aspect ratio; empty Sender Name connects to a sender of another application and keeps it through
+  disconnections; States Waiting / Request Accepted / Receiving / Refused; output-target format checked before use.
+- **Internal, no API change:** receiver sessions record actor consumers (leases), whether a Blueprint/C++ receive was
+  accepted, and who uses each output target. A departing actor releases only its own material binding and
+  output-target use, and closes the session only when nobody else uses it. `CloseReceiver` is unchanged. Each session
+  has an identity, so a receiver actor recognises a session reopened after a Blueprint `CloseReceiver` (its frame count
+  restarts) and decides shared-versus-own settings from its actual membership of the current session.
+- **Docs:** README drag-and-drop section; the shipped link to the unshipped `Docs/SENDER.md` now points to the Blueprint
+  reference; QUICK_START no longer tells users to pick `GameViewport` for the game alone.
+
+### Added: Game Viewport Only sender mode
+- **New `ESpoutSendTextureFrom::GameViewportOnly` ("Game Viewport Only").** Sends only the rendered game viewport.
+  On each presentation the game viewport's rectangle (the `SViewport` geometry relative to its window, in physical
+  pixels, resolved on the game thread when the send is queued) is copied on the GPU out of the window's back buffer
+  into a plugin-owned texture of the same format, which is published through the viewport sender's shared slot. In
+  Play In Editor the editor's toolbars and panels are therefore not sent; the scene, the HUD (Canvas) and UMG widgets
+  on the viewport are. Editor overlays drawn inside the viewport's area are included (the 1-pixel focus line on the
+  top edge, measured; the Play-start and breakpoint borders, from the engine source). Outside Play there is no game
+  viewport and the call returns `false`. Resizes recreate the copy target; the size is logged once per change.
+- **Changed default: Send Texture From now defaults to Game Viewport Only** (maintainer decision). New Spout Sender
+  nodes start on Game Viewport Only. **Behaviour change for existing projects:** when an existing Spout Sender node
+  is reconstructed (for example when its Blueprint is loaded in the editor), Unreal compares the pin's saved value
+  with its autogenerated default; it does not track whether the user selected that value explicitly. Existing
+  unconnected pins holding the old default, Game Viewport, therefore take the new default, Game Viewport Only,
+  even if the user explicitly selected Game Viewport. Existing Texture Render Target 2D selections and connected
+  inputs remain intact. In Play In Editor a switched node sends only the game viewport. In a packaged game whose
+  viewport fills the window the picture is expected to be the same, with one extra GPU copy (packaged games were
+  not validated for this mode). **To retain whole-window capture, select Game Viewport (Whole Window) after
+  upgrading and save the Blueprint.** C++: `SpoutSender`'s `SendTextureFrom` defaults to `GameViewportOnly` and `TextureRenderTarget2D` to
+  `nullptr`; existing calls pass both and are unaffected.
+- **Unchanged:** `GameViewport` (0) and `TextureRenderTarget2D` (1) keep their values and behaviour; the new value is
+  appended (2), so the numeric values are unchanged (Blueprint pins left on `GameViewport` migrate as described
+  above). `GameViewport`'s display name is now
+  "Game Viewport (Whole Window)", and every value has a tooltip.
+- **Checked:** UE 5.8 in embedded Play In Editor, D3D12, 125 % display scaling (exact rectangle and size, HUD
+  colours and position, UMG presence, resize during play, Play stop and restart, the two existing modes); UE 5.3 to 5.8
+  in a packaged Development game where the game viewport fills the window (received externally at the logged
+  rectangle). Not checked: New Editor Window, multi-player Play In Editor, Shipping, performance.
+
+## 1.0.0 release candidate (prepared 2026-09-21; not distributed)
+
+The release candidate of 1.0.0. The plugin leaves beta: the sender and receiver lifecycles, the cross-process
 synchronisation protocol and the packaging layout are now covered by automated validation that runs
 on every supported engine version, and the documentation matches the implementation.
 

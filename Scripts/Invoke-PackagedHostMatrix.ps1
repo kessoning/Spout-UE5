@@ -114,7 +114,7 @@ if ($PluginArchive) {
     $archiveCandidate = Expand-TrackDArchiveCandidate -ArchivePath $PluginArchive -DestinationParent $WorkRoot -EvidenceRoot $invocation.Directory
     if ($archiveCandidate.BuildIdentity.Engine.Version -ne $versions[0]) { throw 'Candidate archive belongs to a different engine' }
     $pluginSourceRoot = $archiveCandidate.PluginRoot
-    if ((Get-TrackDSha256 (Join-Path $pluginSourceRoot 'ThirdParty/Spout/lib/amd64/Spout.dll')) -ne (Get-TrackDSha256 (Join-Path $RepoRoot 'ThirdParty/Spout/lib/amd64/Spout.dll'))) { throw 'Native peer SDK differs from the candidate SDK' }
+    if ((Get-TrackDSha256 (Join-Path $pluginSourceRoot 'Source/ThirdParty/Spout/lib/amd64/Spout.dll')) -ne (Get-TrackDSha256 (Join-Path $RepoRoot 'Source/ThirdParty/Spout/lib/amd64/Spout.dll'))) { throw 'Native peer SDK differs from the candidate SDK' }
 }
 $runInputs = Get-TrackDSourceIdentity -Root $pluginSourceRoot
 $nativeTools = Build-TrackDNativeTools -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory
@@ -178,7 +178,7 @@ $pluginName = Get-TrackDPluginName
 $hostProjectName = Get-TrackDHostProjectName
 $pluginVersion = Get-TrackDPluginVersion $RepoRoot
 
-$repoSpoutDll = Join-Path $RepoRoot 'ThirdParty\Spout\lib\amd64\Spout.dll'
+$repoSpoutDll = Join-Path $RepoRoot 'Source\ThirdParty\Spout\lib\amd64\Spout.dll'
 $repoSpoutDllHash = Get-TrackDSha256 $repoSpoutDll
 if (-not $repoSpoutDllHash)
 {
@@ -527,6 +527,12 @@ foreach ($version in $EngineVersions)
 
         $descriptorEntry = '{0}/Plugins/{1}/{1}.uplugin' -f $hostProjectName, $pluginName
         $loosDescriptor = Join-Path $stagedProjectRoot ('Plugins\{0}\{0}.uplugin' -f $pluginName)
+        # Fab adaptation test harness (2026-11-10, test-only): an engine-level plugin stages under Engine/Plugins/Marketplace
+        if ($env:SPOUT_ENGINE_LEVEL_PLUGIN -eq '1')
+        {
+            $descriptorEntry = 'Engine/Plugins/Marketplace/{0}/{0}.uplugin' -f $pluginName
+            $loosDescriptor = Join-Path (Split-Path $stagedProjectRoot) ('Engine\Plugins\Marketplace\{0}\{0}.uplugin' -f $pluginName)
+        }
         $row.PluginDescriptorStaged = ($stagedUfsEntries -contains $descriptorEntry) -or
                                       (Test-Path -LiteralPath $loosDescriptor -PathType Leaf)
         $row.StagedPluginEntries = @($stagedUfsEntries + $stagedNonUfsEntries | Where-Object { $_ -like "*$pluginName*" -or $_ -like '*Spout*' })

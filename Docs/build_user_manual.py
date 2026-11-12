@@ -132,7 +132,7 @@ FIGURES = {
      "Capture the Default RHI dropdown showing DirectX 12 selected."]),
 "SP-003": ("SP-003_plugin-folder.png","The SpoutPlugin folder inside the project Plugins directory.",
     ["Open Windows File Explorer at MyProject/Plugins/SpoutPlugin/.",
-     "Show the top-level folders (Binaries, Content, Resources, Source, ThirdParty) and SpoutPlugin.uplugin in the same view."]),
+     "Show the top-level folders (Binaries, Content, Resources, Source) and SpoutPlugin.uplugin in the same view."]),
 "SP-004": ("SP-004_spout-dll-binaries.png","Spout.dll staged next to the module binary in Binaries/Win64.",
     ["Open File Explorer at MyProject/Plugins/SpoutPlugin/Binaries/Win64/.",
      "Make sure both Spout.dll and UnrealEditor-SpoutPlugin.dll are visible in the listing."]),
@@ -185,7 +185,7 @@ FIGURES = {
      "Capture lines 'Spout Plugin Loaded' and 'SpoutDX11on12 Initialized.'"]),
 "SP-014": ("SP-014_log-dll-missing.png","Output Log showing a missing Spout.dll startup error.",
     ["Reproduce by temporarily removing Spout.dll, or capture from a past failure.",
-     "Capture the LogSpoutPlugin error naming the Binaries/Win64 and ThirdParty paths it checked.",
+     "Capture the LogSpoutPlugin error naming the Binaries/Win64 and Source/ThirdParty paths it checked.",
      "Optional figure - include only if you can reproduce it cleanly."]),
 "SP-015": ("SP-015_cvar-console.png","Setting r.Spout.GPUReceiver from the console.",
     ["Open the editor console (tilde key) in PIE.",
@@ -301,7 +301,7 @@ H1("2. Requirements")
 B("Windows 64-bit.")
 B("Unreal Engine 5 (5.3 through 5.8).")
 B("DirectX 12 RHI enabled. The plugin creates its D3D11 interop devices on UE's D3D12 device and will not initialize on any other RHI; it logs <font face='Courier'>SpoutPlugin requires DX12 RHI.</font> and stops.")
-B("<font face='Courier'>Spout.dll</font>, bundled under <font face='Courier'>ThirdParty/Spout/lib/amd64/</font> and staged to the plugin's <font face='Courier'>Binaries/Win64/</font> at build time.")
+B("<font face='Courier'>Spout.dll</font>, bundled under <font face='Courier'>Source/ThirdParty/Spout/lib/amd64/</font> and staged to the plugin's <font face='Courier'>Binaries/Win64/</font> at build time.")
 B("For source builds and for packaging a game (the supported workflow): Visual Studio 2022 with the C++ workload and toolchain and a Windows SDK supported by your engine version. Opening a project with the prebuilt plugin in a matching editor does not need a compiler.")
 B("Install into your project's <font face='Courier'>Plugins/</font> folder, the qualified consumer layout. Qualify engine-wide installations separately.")
 B("Blueprint-only project with the plugin in its <font face='Courier'>Plugins/</font> folder: in the UE 5.8 test the packaged game did not contain the plugin and reported that module <font face='Courier'>SpoutPlugin</font> could not be found. The verified workaround is to add a C++ class to the project before packaging.")
@@ -523,7 +523,7 @@ P("<font face='Courier'>Spout.dll</font> ends up in a different place depending 
   "<font face='Courier'>Binaries/Win64</font>. In a packaged game the plugin module is linked into the game executable, so the same "
   "<font face='Courier'>$(BinaryOutputDir)</font> target resolves to the PROJECT's <font face='Courier'>Binaries/Win64</font> beside the .exe, and the plugin's own "
   "Binaries folder is not staged at all. Raw <font face='Courier'>RunUAT BuildPlugin -Package</font> output does NOT receive the DLL from RuntimeDependencies; it stays under "
-  "<font face='Courier'>ThirdParty/Spout/lib/amd64</font>, which is why <font face='Courier'>build.ps1</font> copies it into the release archive explicitly. The DLL is delay-loaded, "
+  "<font face='Courier'>Source/ThirdParty/Spout/lib/amd64</font>, which is why <font face='Courier'>build.ps1</font> copies it into the release archive explicitly. The DLL is delay-loaded, "
   "and the module loads it by full path at startup so the delay-load thunks bind by name.")
 P("A release folder contains Binaries (with <font face='Courier'>Spout.dll</font>), Content, Resources, Source, and <font face='Courier'>SpoutPlugin.uplugin</font>. Precompiled releases must include <font face='Courier'>Spout.dll</font> in <font face='Courier'>Binaries/Win64</font>.")
 P("Releases are built per engine version with <font face='Courier'>RunUAT BuildPlugin ... -TargetPlatforms=Win64 -Rocket</font>. Debug symbols are removed, but "
@@ -565,7 +565,7 @@ P("The plugin logs to the <font face='Courier'>LogSpoutPlugin</font> category, s
 table([["Symptom","What to do"],
     ["Plugin does not compile","Confirm it is in the project Plugins folder, you are on UE 5.3-5.8 with VS 2022; regenerate project files; clean rebuild after engine upgrades."],
     ["Module could not be loaded","Binary must match your exact engine; Spout.dll must be in Binaries/Win64. Read the log for the startup error."],
-    ["Spout.dll missing","Copy it from ThirdParty/Spout/lib/amd64/ to Binaries/Win64/, or rebuild from source."],
+    ["Spout.dll missing","Copy it from Source/ThirdParty/Spout/lib/amd64/ to Binaries/Win64/, or rebuild from source."],
     ["Sender not visible externally","Confirm DirectX 12; confirm continuous calls; one sender per name; for GameViewport the window must be rendering; look for SpoutDX11on12 Initialized."],
     ["Receiver returns invalid output","Exact name match; check the return value; validate outputs; texture parameter name must match the material (default SpoutTexture)."],
     ["Black texture from SceneCapture2D","Set Capture Source to Final Color (HDR) in Linear Working Color Space."],
@@ -597,7 +597,7 @@ B("Record the engine version and the plugin binary version together; binaries ar
 
 H1("18. Appendix")
 H3("File structure")
-CODE("SpoutPlugin.uplugin\nSource/SpoutPlugin/\n  SpoutPlugin.Build.cs\n  Public/   SpoutBPFunctionLibrary.h, SpoutModule.h\n  Private/  SpoutBPFunctionLibrary.cpp, SpoutModule.cpp,\n            SpoutSender.*, SpoutReceiver.*, SpoutD3DContext.*,\n            SpoutD3DUtils.*, SpoutSenderRegistry.*, SpoutTextureUtils.*\nThirdParty/Spout/   include/, lib/amd64/ (Spout.dll, Spout.lib)\nContent/            example Blueprints, material, render targets\nResources/          Icon128.png\nDocs/               documentation and this manual\nbuild.ps1, build.bat")
+CODE("SpoutPlugin.uplugin\nSource/SpoutPlugin/\n  SpoutPlugin.Build.cs\n  Public/   SpoutBPFunctionLibrary.h, SpoutModule.h\n  Private/  SpoutBPFunctionLibrary.cpp, SpoutModule.cpp,\n            SpoutSender.*, SpoutReceiver.*, SpoutD3DContext.*,\n            SpoutD3DUtils.*, SpoutSenderRegistry.*, SpoutTextureUtils.*\nSource/ThirdParty/Spout/   include/, lib/amd64/ (Spout.dll, Spout.lib)\nContent/            example Blueprints, material, render targets\nResources/          Icon128.png\nDocs/               documentation and this manual\nbuild.ps1, build.bat")
 H3("Module and dependency summary")
 P("Single Runtime module <font face='Courier'>SpoutPlugin</font>, Win64 only. Public dependencies: Core, CoreUObject, Engine, RHI, RenderCore. Private: ApplicationCore, Slate, SlateCore, Projects, D3D12RHI, D3D11RHI, plus the engine DX12 and DX11 third-party libraries. Spout.dll is delay-loaded and staged as a runtime dependency.")
 H3("Operational limits and status")

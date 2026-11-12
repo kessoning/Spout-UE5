@@ -75,7 +75,7 @@ namespace
 			Mode, *Unreal, bRead ? *Requested : TEXT("unread"), bRead ? *Actual : TEXT("unread"), bMatch ? 1 : 0);
 		Test.TestTrue(FString::Printf(TEXT("the %s peer's device was made on Unreal's adapter %s (requested %s, actual %s)"), Mode, *Unreal, *Requested, *Actual), bMatch);
 	}
-	TArray<FColor> MakePattern(int32 W, int32 H, int32 Sequence)
+	TArray<FColor> P0MakePattern(int32 W, int32 H, int32 Sequence)
 	{
 		TArray<FColor> Pixels;
 		Pixels.SetNumUninitialized(W * H);
@@ -88,7 +88,7 @@ namespace
 	{
 		FTextureRenderTargetResource* Resource = Target->GameThread_GetRenderTargetResource();
 		const int32 W = Target->SizeX, H = Target->SizeY;
-		TArray<FColor> Pixels = MakePattern(W, H, Sequence);
+		TArray<FColor> Pixels = P0MakePattern(W, H, Sequence);
 		ENQUEUE_RENDER_COMMAND(SpoutP0Pattern)([Resource, W, H, Pixels = MoveTemp(Pixels)](FRHICommandListImmediate& Cmd)
 		{
 			Cmd.UpdateTexture2D(Resource->GetRenderTargetTexture(), 0, FUpdateTextureRegion2D(0, 0, 0, 0, W, H), W * sizeof(FColor), reinterpret_cast<const uint8*>(Pixels.GetData()));
@@ -147,7 +147,7 @@ bool FSpoutP0Pixels::RunTest(const FString&)
 			Gate->Trigger();
 			FlushRenderingCommands();
 			FPlatformProcess::ReturnSynchEventToPool(Gate);
-			const TArray<FColor> Expected = MakePattern(W, H, Frame + 1);
+			const TArray<FColor> Expected = P0MakePattern(W, H, Frame + 1);
 			TestEqual(TEXT("readback dimensions"), Actual.Num(), Expected.Num());
 			TestTrue(*FString::Printf(TEXT("%s complete sequence %d matches every pixel"), GPU ? TEXT("GPU") : TEXT("CPU"), Frame + 1), Actual == Expected);
 
@@ -160,13 +160,13 @@ bool FSpoutP0Pixels::RunTest(const FString&)
 			Actual.Reset(); QueueRead(Texture, W, H, Actual);
 			if (Texture) Texture->UpdateResource();
 			FlushRenderingCommands();
-			TestTrue(TEXT("queued read survives later resource replacement"), Actual == MakePattern(W, H, Frame + 11));
+			TestTrue(TEXT("queued read survives later resource replacement"), Actual == P0MakePattern(W, H, Frame + 11));
 			QueuePattern(Source.Get(), Frame + 21);
 			USpoutBPFunctionLibrary::SpoutSender(Name, ESpoutSendTextureFrom::TextureRenderTarget2D, Source.Get());
 			FlushRenderingCommands();
 			USpoutBPFunctionLibrary::SpoutReceiver(Name, nullptr, NAME_None, Material, Texture, nullptr, ESpoutColorSpace::Linear, /*bAsyncReceive: the synchronous receive under test*/ false);
 			Actual.Reset(); QueueRead(Texture, W, H, Actual); FlushRenderingCommands();
-			TestTrue(TEXT("same-size receive restores writable resource after UpdateResource"), Actual == MakePattern(W, H, Frame + 21));
+			TestTrue(TEXT("same-size receive restores writable resource after UpdateResource"), Actual == P0MakePattern(W, H, Frame + 21));
 		}
 		USpoutBPFunctionLibrary::CloseReceiver(Name, Texture, Material);
 		USpoutBPFunctionLibrary::CloseSender(Name);
@@ -282,7 +282,7 @@ bool FSpoutP0ExternalPixels::RunTest(const FString&)
 				if (Actual.Num() && Actual[0].A == 255)
 				{
 					const int32 Sequence = Actual[0].R;
-					if (!TestTrue(TEXT("foreign frame matches every pixel without tearing"), Actual == MakePattern(W, H, Sequence))) break;
+					if (!TestTrue(TEXT("foreign frame matches every pixel without tearing"), Actual == P0MakePattern(W, H, Sequence))) break;
 					Widths.Add(W);
 					if (Sequence != LastSequence) { ++Verified; LastSequence = Sequence; }
 				}

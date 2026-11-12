@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"Version": 6,
+	"Version": 7,
 	"VersionName": "1.0.0",
 	"FriendlyName": "Spout Plugin",
 	"Description": "Windows-only Unreal Engine 5 plugin for sending and receiving GPU textures via Spout, bridging Unreal's Direct3D 12 renderer and Spout's Direct3D 11 shared textures.",
@@ -23,6 +23,12 @@
 		{
 			"Name": "SpoutPlugin",
 			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64" ]
+		},
+		{
+			"Name": "SpoutPluginEditor",
+			"Type": "Editor",
 			"LoadingPhase": "Default",
 			"PlatformAllowList": [ "Win64" ]
 		}

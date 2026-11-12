@@ -1,4 +1,4 @@
-﻿[![Patreon](https://img.shields.io/badge/Patreon-Support%20this%20project-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/c/kesson_lab)
+[![Patreon](https://img.shields.io/badge/Patreon-Support%20this%20project-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/c/kesson_lab)
 
 # SpoutPlugin (UE5)
 
@@ -24,8 +24,12 @@ If you need a production-ready, paid solution with more features beyond Spout, c
 
 ## Features
 
+- **Drag-and-drop actors**: **Spout Sender** and **Spout Receiver** in the Place Actors panel (Spout category) send and
+  receive while the game plays, with no Blueprint; the receiver has a built-in screen.
+
 - **Spout Sender**
-  - Send textures to external applications either from the **game viewport** or from a `UTextureRenderTarget2D`
+  - Send textures to external applications from the **game viewport** (the whole window, or only the game viewport
+    without the editor's toolbars and panels when playing in the editor) or from a `UTextureRenderTarget2D`
   - Automatic creation and update of the Spout sender stream
 
 - **Spout Receiver**
@@ -43,7 +47,7 @@ If you need a production-ready, paid solution with more features beyond Spout, c
 ## Requirements
 - Windows 64-bit
 - Unreal Engine 5 with D3D12 RHI enabled (Spout shares D3D11 textures; the plugin bridges them to D3D12)
-- Spout runtime (bundled `Spout.dll` and `Spout.lib` under `ThirdParty/Spout`)
+- Spout runtime (bundled `Spout.dll` and `Spout.lib` under `Source/ThirdParty/Spout`)
 
 ## Install, build and package
 
@@ -110,9 +114,9 @@ There are five distinct layouts, and confusing them is the single most common ca
 
 | # | Layout | `Spout.dll` location | How it gets there |
 |---|---|---|---|
-| 1 | **Source plugin** in this repository | `ThirdParty/Spout/lib/amd64/Spout.dll` | Committed. This is the master copy every other layout is derived from. |
-| 2 | **Raw `RunUAT BuildPlugin -Package` output** | `ThirdParty/Spout/lib/amd64/Spout.dll` **only** | `RuntimeDependencies` does **not** carry the DLL into `Binaries/Win64` here. This surprises people; it is why layout 3 exists. |
-| 3 | **Release archive** (the ZIP you download) | `Binaries/Win64/Spout.dll`, plus the `ThirdParty` copy | `build.ps1` copies it in explicitly after `BuildPlugin`, then verifies the copy's SHA-256 matches the repository copy. |
+| 1 | **Source plugin** in this repository | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` | Committed. This is the master copy every other layout is derived from. |
+| 2 | **Raw `RunUAT BuildPlugin -Package` output** (also what Fab builds) | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` **only** | `RuntimeDependencies` does **not** carry the DLL into `Binaries/Win64` here. The module falls back to this copy at startup; layout 3 adds a staged copy. |
+| 3 | **Release archive** (the ZIP you download) | `Binaries/Win64/Spout.dll`, plus the `Source/ThirdParty` copy | `build.ps1` copies it in explicitly after `BuildPlugin`, then verifies the copy's SHA-256 matches the repository copy. |
 | 4 | **Plugin installed in a project**, editor or other modular build | `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll` | `RuntimeDependencies` staging `$(BinaryOutputDir)`, which for a modular build is the plugin's own binaries folder. |
 | 5 | **Packaged game** | `<YourProject>/Binaries/Win64/Spout.dll`, beside the game executable | The plugin module is linked *into* the game executable in a monolithic build, so the same `$(BinaryOutputDir)` resolves to the **project's** binaries folder. The plugin's own `Binaries` folder is not staged at all in a packaged game — do not go looking for it there. |
 
@@ -169,12 +173,65 @@ Packaging a game is supported with Visual Studio only; see
 
 > The plugin includes ready-to-use **example Blueprints** under the plugin `Content/` folder, which can be used to quickly test both Sender and Receiver setups without writing any code.
 
+### Drag-and-drop actors (no Blueprint)
+
+The quickest way to use Spout: two ready-made actors, no Blueprint, no nodes, no code.
+
+1. Open **Place Actors** (Window > Place Actors, or the Quick Add button) and choose the **Spout** category. When
+   the panel is short, Spout is under **More** at the bottom of the category column; typing "Spout" in Search Classes
+   also finds both actors.
+2. Drag **Spout Sender** and/or **Spout Receiver** into the level.
+3. Press **Play**. Nothing streams while the editor is idle, only while the game runs.
+4. Change their settings in the **Details** panel (category **Spout**). Status lines there show what each actor is
+   doing while you play.
+
+**Spout Sender** sends **Game Viewport Only** by default (the game without the editor's panels). Each placed sender
+gets a unique **Spout Name** (`UE Spout Sender`, `UE Spout Sender 2`, ...). **Send From** also offers Game Viewport
+(Whole Window) and Texture Render Target 2D. In the render-target mode it sends only the **Texture Render Target** you
+set; without one it does not send (Status and Map Check say so). It does not take over a name that another sender
+(another actor, a Blueprint, or another application) already publishes. It stops when it is disabled or removed, or
+when Play ends.
+
+**Spout Receiver** shows the stream on its own screen, an unlit surface sized to the stream's aspect ratio.
+- **Sender Name** empty (the default): it connects to a sender of another application (Spout's active sender,
+  otherwise the first one listed) and never picks this game's own senders. Once connected it stays with that sender:
+  if the sender stops it waits for it, holding the last frame (or showing the No-Signal color, see **When Sender Is
+  Lost**), and does not switch to another one.
+- Type a name, or pick one under **Choose Running Sender** (a list of the senders running now), to receive a specific
+  sender, including one this game sends.
+- **Color Space**, **Async Receive** and the optional **Output Render Target** work as on the Spout Receiver nodes.
+  For a stream from an Unreal viewport choose Color Space **sRGB**. An Output Render Target whose format does not
+  match the stream is not used, and Status names the format it needs.
+- **Display**: Show Display, Display Height (cm), Keep Aspect Ratio, Brightness, and an optional custom Display
+  Material. The screen is an unlit surface in the level, so the level's exposure and tone mapping still affect what
+  you see; for exact values use the Output Render Target or an external receiver.
+
+**Actors or Blueprints?** The actors call the same functions as the Blueprint nodes and need no setup. Use the
+Blueprint nodes when you need custom logic (when to send, which material to drive, sending from several places). Both
+can be used together: several receiver actors, and Blueprint receivers, can share one sender's stream. A receiver
+actor never closes a stream that another actor or a Blueprint still uses. Close Receiver in a Blueprint still closes
+the stream for everyone, as before; the actors then reconnect. Plugin-wide limits (`r.Spout.*` console variables,
+Set Max Senders) are not actor settings. See [Blueprint API](Docs/BLUEPRINT_API.md#placeable-actors-spout-sender-and-spout-receiver)
+and [Limitations](Docs/LIMITATIONS.md#calls-identity-and-ownership).
+
 ### Sender
 
 - Call `USpoutBPFunctionLibrary::SpoutSender` every frame (Tick) or on a timer.
 - Set a **Spout Name**, which uniquely identifies the stream and must match the receiver.
 - Choose what to send using **Send Texture From**:
-  - `GameViewport` – sends the active game viewport (backbuffer).
+  - `GameViewport`, shown as **Game Viewport (Whole Window)** – sends the whole back buffer of the window that shows the
+    game. In a packaged or standalone game that is the game; in Play In Editor it is the whole editor window, toolbars
+    and panels included.
+  - `GameViewportOnly`, shown as **Game Viewport Only** (the default) – sends only the rendered game viewport, cut out of that back
+    buffer on the GPU. In Play In Editor the editor's toolbars and panels are left out. Everything drawn inside the game
+    viewport is included: the scene, the HUD (Canvas) and UMG widgets added to the viewport. It sends only while the
+    game is running; the editor's own viewport outside Play is not a source. See
+    [Blueprint API](Docs/BLUEPRINT_API.md#espoutsendtexturefrom).
+    **Upgrading:** existing unconnected pins set to `GameViewport`, the old default, switch to `GameViewportOnly` when
+    the node is reconstructed (for example when the Blueprint is loaded), even if `GameViewport` was selected
+    explicitly: Unreal compares the saved value with the default and does not track explicit selections.
+    `TextureRenderTarget2D` selections and connected inputs remain intact. To retain whole-window capture, select
+    Game Viewport (Whole Window) after upgrading and save the Blueprint.
   - `TextureRenderTarget2D` – sends the contents of a specified render target.
 - When using `TextureRenderTarget2D`, ensure the render target asset is valid and updated.
 - The sender automatically creates and updates the Spout stream while it is being called.
@@ -210,6 +267,8 @@ unchanged, with no colour conversion, and publishes:
 | `FloatRGBA` (HDR) | `R16G16B16A16_FLOAT` | linear | linear — correct |
 | `GameViewport`, Unreal's default back buffer | `R10G10B10A2_UNORM` | display values (sRGB-encoded), alpha as Unreal wrote it (0 in a standard scene) | linear, which is too bright — **set the receiver to sRGB** |
 | `GameViewport`, 8-bit back buffer | `B8G8R8A8_UNORM` | display values (sRGB-encoded) | decodes as sRGB — correct |
+
+`GameViewportOnly` publishes the same format and values as `GameViewport`: it is a copy of part of the same back buffer.
 
 The sender never publishes `_UNORM_SRGB`. Spout 2.007's OpenGL receivers (the Spout Demo Receiver
 2.007.015 and other SpoutGL applications) check the shared texture's real format and refuse
