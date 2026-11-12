@@ -140,8 +140,9 @@ Docs/                        documentation and this manual
 
 ### License
 
-MIT License. Commercial use is allowed, but reselling the plugin as-is as a standalone product goes against the
-spirit of the project. The Spout SDK's BSD notice is in `THIRD_PARTY_NOTICES.md`.
+MIT License (`LICENSE`). Use, modification and redistribution, including commercial redistribution, are permitted.
+Every copy must keep the copyright and license notices in `LICENSE`, and redistributions of the Spout SDK must keep
+its BSD notice in `THIRD_PARTY_NOTICES.md`. Crediting this project is appreciated but not required.
 
 ### Glossary
 

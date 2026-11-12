@@ -26,7 +26,9 @@ Three tasks have different requirements:
 
 ## Option A - Precompiled binary release
 
-Prebuilt binaries are distributed through Patreon with free download.
+Free precompiled ZIPs, one per engine version, are published on the project's GitHub Releases page
+(`https://github.com/kessoning/Spout-UE5/releases`). The plugin is also available on Fab, which installs it into the
+engine.
 
 1. Download the ZIP that matches your exact Unreal Engine version. A binary built for one
    engine version will not load in another.

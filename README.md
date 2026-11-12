@@ -1,691 +1,153 @@
-[![Patreon](https://img.shields.io/badge/Patreon-Support%20this%20project-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/c/kesson_lab)
+# Spout Texture Sharing for Unreal Engine 5
 
-# SpoutPlugin (UE5)
+![Fab: coming soon](https://img.shields.io/badge/Fab-coming%20soon-lightgrey)
+![GitHub Releases: v1.0.0 coming soon](https://img.shields.io/badge/GitHub%20Releases-v1.0.0%20coming%20soon-lightgrey)
+![Unreal Engine 5.3 to 5.8](https://img.shields.io/badge/Unreal%20Engine-5.3%20to%205.8-313131)
+![Windows 64-bit, DirectX 12](https://img.shields.io/badge/Windows%2064--bit-DirectX%2012-0078D6)
+![License: MIT](https://img.shields.io/badge/License-MIT-green)
 
-Windows-only Unreal Engine 5 plugin that sends and receives textures via Spout, bridging Unreal's Direct3D 12 renderer and Spout's Direct3D 11 shared textures.
+Hi, I'm Kesson, a new media artist and creative technologist. I built this plugin because my own work needed Unreal Engine to exchange live images with tools like TouchDesigner, and I found few practical, up-to-date ways to do that with Unreal's DirectX 12 renderer. It began as a fork of [zuyi53/Spout-UE5](https://github.com/zuyi53/Spout-UE5), an existing open-source Spout plugin, and grew from there. I share it freely because I believe creative technology should be accessible, and that tools like this get better when people build on them together.
 
-## Introduction
-This plugin started from a real production need rather than as a polished, ready-made solution.
-While working with Unreal Engine 5, I noticed there were very few practical and up-to-date ways to integrate UE with other real-time tools such as TouchDesigner, especially when dealing with modern DX12 workflows.
+The plugin shares live GPU textures between Unreal Engine and other Windows applications through [Spout](https://spout.zeal.co/), with no disk or network transfer: send Unreal's game view or any render target out, and bring other applications' streams in.
 
-So I decided to build my own solution. I strongly believe in the idea that sharing is caring, which is why I did not start entirely from scratch. Instead, I forked an existing open-source repository and focused on making it work again across multiple Unreal Engine 5 versions, adapting it to current engine constraints and workflows.
+**Version 1.0.0** · Unreal Engine 5.3 to 5.8 · Windows 64-bit · DirectX 12 · MIT License
 
-Although I am comfortable working with C++, DirectX 11, and DirectX 12, this tool was developed primarily from the perspective of an artist and technical user rather than a traditional software engineer. The focus is therefore on solving real workflow problems and enabling practical integration, rather than building a perfectly abstracted or enterprise-grade system.
-
-The goal of this project is to provide a clear and debuggable bridge between Unreal Engine and Spout, without hiding complexity, especially when dealing with DX11/DX12 interop and GPU resource sharing.
-
-This plugin should not be considered fully production-ready. However, depending on your use case and with enough testing, it can be reliable enough. At least, it has been for my own projects.
-
-I also started developing this plugin with future integration into generative AI workflows in mind.
-
-Thanks to zuyi53, the original author of the repository this work is based on: [[link](https://github.com/zuyi53/Spout-UE5)].
-If you find bugs or issues, please report them.
-If you need a production-ready, paid solution with more features beyond Spout, consider the Off World Live plugin: [[link](https://offworld.live/)].
+In Unreal the plugin appears as **Spout Plugin** (module `SpoutPlugin`, category Rendering).
 
 ## Features
 
-- **Drag-and-drop actors**: **Spout Sender** and **Spout Receiver** in the Place Actors panel (Spout category) send and
-  receive while the game plays, with no Blueprint; the receiver has a built-in screen.
+- **Drag-and-drop actors:** a Spout Sender and a Spout Receiver in the Place Actors panel. No Blueprint needed.
+- **Send** the game view, with or without the editor around it in Play In Editor, or any render target.
+- **Receive** into a texture, your own material, a render target, or the receiver actor's built-in screen.
+- **Colour control:** a per-receiver Color Space setting (Auto, sRGB, Linear), including exact decoding of Unreal viewport streams.
+- **Formats:** BGRA8, RGBA8, RGB10A2 and RGBA16F.
+- **GPU to GPU:** the plugin bridges Unreal's DirectX 12 renderer and Spout's DirectX 11 shared textures.
+- **Blueprint nodes and a C++ API**, with example content and a full user manual (PDF) in every download.
 
-- **Spout Sender**
-  - Send textures to external applications from the **game viewport** (the whole window, or only the game viewport
-    without the editor's toolbars and panels when playing in the editor) or from a `UTextureRenderTarget2D`
-  - Automatic creation and update of the Spout sender stream
+## What's new in 1.0.0
 
-- **Spout Receiver**
-  - Receive Spout streams into a transient `UTexture2D`
-  - Optional output to a user-provided `UTextureRenderTarget2D`
-  - Provides a dynamic material instance ready to be applied to meshes
+1.0.0 is the first major release. Compared with the 0.0.x builds:
 
-- **Rendering and Interop**
-  - GPU bridge between Unreal Engine 5's D3D12 RHI and Spout's D3D11 shared textures. By default
-    (the shared-slot path) pixels move through plugin-owned slot textures and a native D3D11
-    device, without wrapping Unreal's textures; the earlier D3D11-on-12 path stays selectable with
-    `r.Spout.SharedSlotInterop 0` (see [Limitations](Docs/LIMITATIONS.md#interop-path))
-  - GPU-based texture sharing via Spout, without disk or network transfer
+- Drag-and-drop **Spout Sender** and **Spout Receiver** actors.
+- **Game Viewport Only**, the new default sender source.
+- **Asynchronous sending and receiving** by default, so Unreal's render thread does not wait for the copies.
+- **A new interop path**, with a time limit on every wait.
+- **Correct colours for Unreal viewport streams** received with Color Space sRGB.
+- **Fixes:** no crash when resizing a window while sending the viewport; the Spout Demo Receiver and other OpenGL receivers now accept streams from 8-bit sRGB render targets; Close Receiver never destroys a texture or material it did not create.
+- **Automated release qualification** on every supported engine version, and the user manual.
 
-## Requirements
-- Windows 64-bit
-- Unreal Engine 5 with D3D12 RHI enabled (Spout shares D3D11 textures; the plugin bridges them to D3D12)
-- Spout runtime (bundled `Spout.dll` and `Spout.lib` under `Source/ThirdParty/Spout`)
+**Upgrading from 0.0.x or a test build:**
 
-## Install, build and package
+- Spout Sender nodes left on Game Viewport switch to Game Viewport Only when their Blueprint loads. To keep sending the whole window, select Game Viewport (Whole Window) again and save.
+- Receive nodes whose Async Receive box was left unchecked turn it on.
 
-These are three different tasks with different requirements:
+The full list is in the [changelog](https://github.com/kessoning/Spout-UE5/blob/main/CHANGELOG.md).
 
-| Task | What you need |
-|---|---|
-| **Install the prebuilt plugin and open a project in the editor** (Fab, or a release ZIP for your exact engine version) | The prebuilt archive for your engine version. No compiler is needed to enable the plugin and open a Blueprint-only project in a matching editor. |
-| **Build or modify the source** (this repository) | Visual Studio 2022 with the *Game development with C++* workload, its MSVC toolchain and a Windows SDK supported by your engine version. |
-| **Package a game that uses the plugin** | The same Visual Studio setup. This is the supported packaging workflow; packaging without it is not supported. The game executable has to contain the plugin, and the prebuilt editor binaries do not provide that. |
+## Status and testing
 
-**Blueprint-only projects.** With the plugin in a Blueprint-only project's `Plugins/` folder, our
-UE 5.8 packaging test finished without building the plugin into the game: the package used
-Unreal's prebuilt game executable, and the game reported at startup that module `SpoutPlugin`
-could not be found. Enabling the plugin explicitly in the `.uproject` did not change that. The
-verified workaround is to add a C++ class to the project (Tools > New C++ Class) and package
-again; Unreal then compiles the plugin from its `Source/` folder with Visual Studio and links it
-into the game. In that test, building the C++ project also rebuilt the plugin's editor binaries
-from `Source/`, replacing the prebuilt ones. The configurations that were tested are described
-under "Packaging a project that uses the plugin" in `Docs/PACKAGING_AND_DISTRIBUTION.md` of the
-source repository; that document is not included in the release archive.
+1.0.0 was tested on every supported engine version, with automated tests and packaged Development and Shipping test games. The two newest additions (the actors and Game Viewport Only) received focused checks. Testing used Spout's own demo applications and an independent native test sender on NVIDIA GPUs.
 
-## Supported Unreal Engine versions
+Not covered by the automated release tests:
 
-**Supported engine range: UE 5.3, 5.4, 5.5, 5.6, 5.7 and 5.8.**
+- other GPU vendors and multi-GPU machines;
+- driver resets;
+- external applications such as TouchDesigner, Resolume or OBS;
+- installation into the engine's own plugin folder, which is how Fab installs plugins.
 
-This release includes lifecycle, consumer and operational-limit changes. See
-[release readiness](Docs/RELEASE_READINESS.md) for how it was tested and
-[limitations](Docs/LIMITATIONS.md) for the deployment contract. Test results from earlier builds
-do not carry over to changed source. Release gates require `RunUAT BuildPlugin -Rocket`, archive
-checks, automation, and Development/Shipping consumer hosts for the declared engine matrix before
-publication.
+Test the plugin with your own engine version, hardware and applications before relying on it for production or a live show. The details are in [Release readiness](Docs/RELEASE_READINESS.md) and [Limitations](Docs/LIMITATIONS.md).
 
-An earlier version of this README said support started at UE 5.5 because 5.3 and 5.4 failed to
-build against an installed engine. That is no longer the case and has not been since 0.0.8.
+## Download
 
-> A plugin binary built for one engine version will not load in another. Use the archive that
-> matches your engine, or build from source.
+The plugin is free.
 
-Pre-compiled binaries are also available on Patreon:
-👉 https://www.patreon.com/posts/spout-plugin-for-146572687
+| Option | Best for | Where |
+|---|---|---|
+| **Fab** | Installing from the marketplace into your engine | Coming soon: the listing is awaiting Fab's review. Its link will be added here once it is live. |
+| **GitHub Releases** | Free precompiled ZIPs, one per engine version | Coming soon: the v1.0.0 ZIPs will be attached to the v1.0.0 release on the repository's Releases page. |
+| **Source** | Custom builds and modifications | https://github.com/kessoning/Spout-UE5 |
 
----
-
-## Building from source
-
-1. Use a C++ project, which is the supported source-build workflow. For a Blueprint-only project,
-   add a C++ class first (Tools > New C++ Class).
-2. Copy the `SpoutPlugin` folder into your project’s `Plugins/` directory.
-3. Make sure the plugin is enabled in your project settings.
-4. Ensure your project is using the **D3D12 RHI** (required).
-5. Generate project files if needed.
-6. Build the project using your IDE or Unreal Editor.
-
-The bundled `Spout.dll` is staged automatically during the build. Exactly *where* it lands depends
-on how the plugin is being used — see [Where `Spout.dll` ends up](#where-spoutdll-ends-up) below.
-
----
-
-## Where `Spout.dll` ends up
-
-There are five distinct layouts, and confusing them is the single most common cause of
-`Plugin 'SpoutPlugin' failed to load` reports. They are not interchangeable.
-
-| # | Layout | `Spout.dll` location | How it gets there |
-|---|---|---|---|
-| 1 | **Source plugin** in this repository | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` | Committed. This is the master copy every other layout is derived from. |
-| 2 | **Raw `RunUAT BuildPlugin -Package` output** (also what Fab builds) | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` **only** | `RuntimeDependencies` does **not** carry the DLL into `Binaries/Win64` here. The module falls back to this copy at startup; layout 3 adds a staged copy. |
-| 3 | **Release archive** (the ZIP you download) | `Binaries/Win64/Spout.dll`, plus the `Source/ThirdParty` copy | `build.ps1` copies it in explicitly after `BuildPlugin`, then verifies the copy's SHA-256 matches the repository copy. |
-| 4 | **Plugin installed in a project**, editor or other modular build | `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll` | `RuntimeDependencies` staging `$(BinaryOutputDir)`, which for a modular build is the plugin's own binaries folder. |
-| 5 | **Packaged game** | `<YourProject>/Binaries/Win64/Spout.dll`, beside the game executable | The plugin module is linked *into* the game executable in a monolithic build, so the same `$(BinaryOutputDir)` resolves to the **project's** binaries folder. The plugin's own `Binaries` folder is not staged at all in a packaged game — do not go looking for it there. |
-
-In every layout the DLL is delay-loaded, and the module additionally loads it by full path at
-startup so the delay-load thunks bind by name instead of raising `0xC06D007E`
-(`ERROR_MOD_NOT_FOUND`). The plugin logs the path it resolved:
-
-```
-LogSpoutPlugin: Loaded Spout.dll from '<path>'.
-```
-
-If that line is missing or names a path you did not expect, that is the problem.
-
-Release archives also deliberately **keep** `Intermediate/Build`: the precompiled UnrealGame
-Development and Shipping objects, generated headers and `.precompiled` manifests that
-`RunUAT BuildPlugin` produces. They are not a supported way to package a game without Visual
-Studio, and the tested project-folder installs compiled the plugin from `Source/` instead of
-reusing them; see [Install, build and package](#install-build-and-package).
-
----
-
-## Notes
-
-- This plugin is **Windows-only**
-- Building the source and packaging a game are supported with Visual Studio 2022, its C++
-  workload and a Windows SDK supported by your engine version. Opening a project with the prebuilt
-  plugin in a matching editor does not need a compiler.
-- If you encounter build errors after upgrading Unreal Engine versions:
-  - Clean the project
-  - Regenerate project files
-  - Rebuild from scratch
-
-
+A precompiled ZIP only works with the engine version it was built for. Download the one that matches your Unreal Engine version exactly (for example `SpoutPlugin_1.0.0_UE5.7_Win64.zip` for UE 5.7).
 
 ## Installation
 
-Pre-built versions of this plugin are distributed through Patreon **with free download**.
+### Requirements
 
-👉 **Download access and updates are available here:**  
-https://www.patreon.com/posts/spout-plugin-for-146572687
+- Windows 64-bit, Unreal Engine 5.3 to 5.8, and the **DirectX 12** RHI. The plugin does not start on any other RHI and logs `SpoutPlugin requires DX12 RHI.`
+- Both applications sharing a stream must run on the same GPU.
+- To build from source or package a game: Visual Studio 2022 with the *Game development with C++* workload, its MSVC toolchain and a Windows SDK supported by your engine version. Opening a project with the precompiled plugin in a matching editor needs no compiler.
 
-If you prefer building from source, clone this repository and follow
-[Building from source](#building-from-source).
+### Precompiled ZIP
 
-Use the prebuilt archive that matches your engine version exactly. In a matching editor the
-prebuilt binaries load without compiling. If Unreal offers to rebuild the plugin, the binaries do
-not match your engine version: use the matching archive, or build from source with Visual Studio.
-Packaging a game is supported with Visual Studio only; see
-[Install, build and package](#install-build-and-package).
+1. Extract the `SpoutPlugin` folder into your project's `Plugins` folder (`MyProject/Plugins/SpoutPlugin`).
+2. Check that `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll` is there (see [`Spout.dll`](#spoutdll) below).
+3. Set Edit > Project Settings > Platforms > Windows > Default RHI to **DirectX 12**, then restart the editor.
+4. Open the project. A plugin in the project's `Plugins` folder is enabled by default (Edit > Plugins, search "Spout"). If Unreal offers to rebuild the plugin, the ZIP does not match your engine version.
 
+### Fab
 
+Install the plugin to your engine version from Fab, then enable **Spout Plugin** in Edit > Plugins and set the project to DirectX 12 as above. Fab builds the plugin from the same source.
 
-## Usage
+### Build from source
 
-> **User manual (PDF):** [Docs/Manual/SpoutPlugin_User_Manual.pdf](Docs/Manual/SpoutPlugin_User_Manual.pdf) has
-> everything in one document: installation, the actors, sending and receiving, render targets and colour, packaging,
-> limitations, troubleshooting, and the complete Blueprint API and C++ API reference.
+1. Use a C++ project. For a Blueprint-only project, first add a C++ class (Tools > New C++ Class).
+2. Copy or clone the repository into `MyProject/Plugins/SpoutPlugin`.
+3. Set the project to DirectX 12, generate Visual Studio project files from the `.uproject`, and build.
 
-> The plugin includes ready-to-use **example Blueprints** under the plugin `Content/` folder, which can be used to quickly test both Sender and Receiver setups without writing any code.
+`Spout.dll` is staged automatically; do not copy it by hand.
 
-### Drag-and-drop actors (no Blueprint)
+### Packaging a game
 
-The quickest way to use Spout: two ready-made actors, no Blueprint, no nodes, no code.
+Packaging a game that uses the plugin requires the Visual Studio setup above: the plugin is compiled into the game executable from its `Source` folder.
 
-1. Open **Place Actors** (Window > Place Actors, or the Quick Add button) and choose the **Spout** category. When
-   the panel is short, Spout is under **More** at the bottom of the category column; typing "Spout" in Search Classes
-   also finds both actors.
-2. Drag **Spout Sender** and/or **Spout Receiver** into the level.
-3. Press **Play**. Nothing streams while the editor is idle, only while the game runs.
-4. Change their settings in the **Details** panel (category **Spout**). Status lines there show what each actor is
-   doing while you play.
+**Blueprint-only projects:** with the plugin in the project's `Plugins` folder, a UE 5.8 packaged game built during release testing did not contain the plugin, and it reported at startup that module `SpoutPlugin` could not be found. Add a C++ class to the project (Tools > New C++ Class) and package again. Enabling the plugin in the `.uproject` does not help. The packaged game must also run on DirectX 12.
 
-**Spout Sender** sends **Game Viewport Only** by default (the game without the editor's panels). Each placed sender
-gets a unique **Spout Name** (`UE Spout Sender`, `UE Spout Sender 2`, ...). **Send From** also offers Game Viewport
-(Whole Window) and Texture Render Target 2D. In the render-target mode it sends only the **Texture Render Target** you
-set; without one it does not send (Status and Map Check say so). It does not take over a name that another sender
-(another actor, a Blueprint, or another application) already publishes. It stops when it is disabled or removed, or
-when Play ends.
+### `Spout.dll`
 
-**Spout Receiver** shows the stream on its own screen, an unlit surface sized to the stream's aspect ratio.
-- **Sender Name** empty (the default): it connects to a sender of another application (Spout's active sender,
-  otherwise the first one listed) and never picks this game's own senders. Once connected it stays with that sender:
-  if the sender stops it waits for it, holding the last frame (or showing the No-Signal color, see **When Sender Is
-  Lost**), and does not switch to another one.
-- Type a name, or pick one under **Choose Running Sender** (a list of the senders running now), to receive a specific
-  sender, including one this game sends.
-- **Color Space**, **Async Receive** and the optional **Output Render Target** work as on the Spout Receiver nodes.
-  For a stream from an Unreal viewport choose Color Space **sRGB**. An Output Render Target whose format does not
-  match the stream is not used, and Status names the format it needs.
-- **Display**: Show Display, Display Height (cm), Keep Aspect Ratio, Brightness, and an optional custom Display
-  Material. The screen is an unlit surface in the level, so the level's exposure and tone mapping still affect what
-  you see; for exact values use the Output Render Target or an external receiver.
+The bundled `Spout.dll` is staged automatically, and its location depends on the layout: the source (`Source/ThirdParty/Spout/lib/amd64`), raw `RunUAT BuildPlugin` output, a release ZIP, a project install (`Plugins/SpoutPlugin/Binaries/Win64`) or a packaged game (beside the game executable). At startup the plugin logs the file it loaded (`Loaded Spout.dll from '<path>'`). If the plugin does not load, the full table is in [Packaging and distribution](https://github.com/kessoning/Spout-UE5/blob/main/Docs/PACKAGING_AND_DISTRIBUTION.md#spoutdll-staging) and the fixes are under Troubleshooting in the [user manual](Docs/Manual/SpoutPlugin_User_Manual.pdf).
 
-**Actors or Blueprints?** The actors call the same functions as the Blueprint nodes and need no setup. Use the
-Blueprint nodes when you need custom logic (when to send, which material to drive, sending from several places). Both
-can be used together: several receiver actors, and Blueprint receivers, can share one sender's stream. A receiver
-actor never closes a stream that another actor or a Blueprint still uses. Close Receiver in a Blueprint still closes
-the stream for everyone, as before; the actors then reconnect. Plugin-wide limits (`r.Spout.*` console variables,
-Set Max Senders) are not actor settings. See [Blueprint API](Docs/BLUEPRINT_API.md#placeable-actors-spout-sender-and-spout-receiver)
-and [Limitations](Docs/LIMITATIONS.md#calls-identity-and-ownership).
+## Quick start
 
-### Sender
+### Drag-and-drop actors
 
-- Call `USpoutBPFunctionLibrary::SpoutSender` every frame (Tick) or on a timer.
-- Set a **Spout Name**, which uniquely identifies the stream and must match the receiver.
-- Choose what to send using **Send Texture From**:
-  - `GameViewport`, shown as **Game Viewport (Whole Window)** – sends the whole back buffer of the window that shows the
-    game. In a packaged or standalone game that is the game; in Play In Editor it is the whole editor window, toolbars
-    and panels included.
-  - `GameViewportOnly`, shown as **Game Viewport Only** (the default) – sends only the rendered game viewport, cut out of that back
-    buffer on the GPU. In Play In Editor the editor's toolbars and panels are left out. Everything drawn inside the game
-    viewport is included: the scene, the HUD (Canvas) and UMG widgets added to the viewport. It sends only while the
-    game is running; the editor's own viewport outside Play is not a source. See
-    [Blueprint API](Docs/BLUEPRINT_API.md#espoutsendtexturefrom).
-    **Upgrading:** existing unconnected pins set to `GameViewport`, the old default, switch to `GameViewportOnly` when
-    the node is reconstructed (for example when the Blueprint is loaded), even if `GameViewport` was selected
-    explicitly: Unreal compares the saved value with the default and does not track explicit selections.
-    `TextureRenderTarget2D` selections and connected inputs remain intact. To retain whole-window capture, select
-    Game Viewport (Whole Window) after upgrading and save the Blueprint.
-  - `TextureRenderTarget2D` – sends the contents of a specified render target.
-- When using `TextureRenderTarget2D`, ensure the render target asset is valid and updated.
-- The sender automatically creates and updates the Spout stream while it is being called.
+1. Open **Place Actors** (Window > Place Actors) and choose the **Spout** category. If the panel is short, it is under **More**; searching "Spout" also finds both actors.
+2. Drag **Spout Sender** and/or **Spout Receiver** into the level and press **Play**. Nothing streams outside Play.
+3. Adjust them in the **Details** panel (category Spout).
 
-#### SceneCapture2D and Render Target Notes
+- **Spout Sender** sends Game Viewport Only by default, under a unique name per placement (`UE Spout Sender`, `UE Spout Sender 2`, and so on). It never takes over a name another sender already publishes.
+- **Spout Receiver** with an empty **Sender Name** connects to a sender from another application and stays with it, holding the last frame if the sender stops. Type a name, or use **Choose Running Sender**, to receive a specific sender. For a stream coming from an Unreal viewport, set **Color Space** to **sRGB**.
+- The receiver's screen is an unlit surface in the level, so the level's exposure and tone mapping still affect what you see. For exact colours, use its Output Render Target.
 
-When using a `TextureRenderTarget2D` as the source for the Sender, a common setup is to drive it using a `SceneCapture2D`, as shown in the example Blueprints included with the plugin.
+### Blueprints
 
-In this case, the `SceneCapture2D` **Capture Source** must be set to:
+- **Send:** call **Spout Sender** on Tick or a timer, with a **Spout Name** and a **Send Texture From** source. **Close Sender** stops it.
+- **Receive:** create a Dynamic Material Instance once, then call **Spout Receiver With Material** on Tick with the same Spout Name. It returns the received texture and binds it to the texture parameter you name (for example `SpoutTexture`). **Close Receiver** ends the stream.
+- **Status and discovery:** **Spout Info**, **Get Sender Info**, **Get Spout Stream Status** and **Get Spout Runtime Status**.
 
-- **~~`FinalColor (LDR)`~~**
-- **Final Color (HDR) in Linear Working Color Space**
+The example Blueprints `BP_SpoutSenderExample_` and `BP_SpoutReceiverExample` are in the plugin's content (enable Show Plugin Content in the Content Browser). Every node, and C++ use, is described in the [Blueprint API reference](Docs/BLUEPRINT_API.md) and the [user manual](Docs/Manual/SpoutPlugin_User_Manual.pdf).
 
-as a starting point for qualification.
+## Documentation
 
-Other capture modes, including SceneColor HDR, require matching exposure, alpha, target format and receiver interpretation. Inspect the source target inside Unreal before attributing a black image to sharing.
+Shipped with the plugin:
 
-At the moment, this limitation is still under investigation. A proper fix or improvement will be added in a future update if possible.  
-If you have suggestions or insights on how to handle this correctly, contributions and advice are very welcome.
+- [User manual (PDF)](Docs/Manual/SpoutPlugin_User_Manual.pdf): everything below in one document, including the C++ API reference.
+- [Blueprint API reference](Docs/BLUEPRINT_API.md).
+- [Limitations](Docs/LIMITATIONS.md): platform, interop, formats and colour, operational limits, performance.
+- [Release readiness](Docs/RELEASE_READINESS.md): how this release was tested, and what was not covered.
 
-Once the Capture Source is set correctly, the `Texture Target` of the `SceneCapture2D` can be safely used as the input Render Target for the Spout Sender.
+In the repository: [Installation](https://github.com/kessoning/Spout-UE5/blob/main/Docs/INSTALLATION.md), [Quick start](https://github.com/kessoning/Spout-UE5/blob/main/Docs/QUICK_START.md), [Sender](https://github.com/kessoning/Spout-UE5/blob/main/Docs/SENDER.md), [Receiver](https://github.com/kessoning/Spout-UE5/blob/main/Docs/RECEIVER.md), [Render targets and formats](https://github.com/kessoning/Spout-UE5/blob/main/Docs/RENDER_TARGETS_AND_FORMATS.md), [SceneCapture2D](https://github.com/kessoning/Spout-UE5/blob/main/Docs/SCENECAPTURE2D.md), [Packaging and distribution](https://github.com/kessoning/Spout-UE5/blob/main/Docs/PACKAGING_AND_DISTRIBUTION.md) (including building and validating releases), [Troubleshooting](https://github.com/kessoning/Spout-UE5/blob/main/Docs/TROUBLESHOOTING.md), [C++ API](https://github.com/kessoning/Spout-UE5/blob/main/Docs/CPP_API.md) and the [changelog](https://github.com/kessoning/Spout-UE5/blob/main/CHANGELOG.md).
 
-#### Colour space when sending
+## Support
 
-Spout carries a DXGI format and nothing else. The sender copies the source's pixel bytes and alpha
-unchanged, with no colour conversion, and publishes:
+Bug reports and questions are welcome through the GitHub repository. If the plugin is useful to you and you would like to support its development, you can. It is entirely optional; the plugin is and stays free.
 
-| Source render target | Published format | The bytes are | What a receiver on **Auto** does |
-|---|---|---|---|
-| 8-bit, sRGB (`Force Linear Gamma` **off**) | `B8G8R8A8_UNORM` / `R8G8B8A8_UNORM` | gamma-encoded (sRGB), the Spout convention | decodes as sRGB — correct |
-| 8-bit, linear (`Force Linear Gamma` **on**) | `B8G8R8A8_UNORM` / `R8G8B8A8_UNORM` | linear | decodes as sRGB — **set the receiver to Linear** |
-| `A2B10G10R10` | `R10G10B10A2_UNORM` | linear | linear — correct |
-| `FloatRGBA` (HDR) | `R16G16B16A16_FLOAT` | linear | linear — correct |
-| `GameViewport`, Unreal's default back buffer | `R10G10B10A2_UNORM` | display values (sRGB-encoded), alpha as Unreal wrote it (0 in a standard scene) | linear, which is too bright — **set the receiver to sRGB** |
-| `GameViewport`, 8-bit back buffer | `B8G8R8A8_UNORM` | display values (sRGB-encoded) | decodes as sRGB — correct |
+- Patreon (ongoing support and development updates): https://www.patreon.com/c/kesson_lab
+- Ko-fi (one-time donation): https://ko-fi.com/kesson
 
-`GameViewportOnly` publishes the same format and values as `GameViewport`: it is a copy of part of the same back buffer.
+If you build something with the plugin and would like to share it, get in touch: a showcase section may follow.
 
-The sender never publishes `_UNORM_SRGB`. Spout 2.007's OpenGL receivers (the Spout Demo Receiver
-2.007.015 and other SpoutGL applications) check the shared texture's real format and refuse
-`B8G8R8A8_UNORM_SRGB`, so every 8-bit source, including sRGB render targets, typeless sources and
-`_UNORM_SRGB` sources, is shared as the plain `_UNORM` format.
+## Credits and license
 
-**The sRGB format tag is not carried.** Keeping the bytes unchanged does not keep the sRGB format
-tag: an sRGB render target (Force Linear Gamma off) and a Force Linear Gamma render target both
-publish plain `_UNORM`, so a receiving application cannot tell the source's colour intent from the
-format. `_UNORM` does not mean the bytes are linear. The bytes plus the configuration on both ends
-decide it: by the Spout convention 8-bit `_UNORM` bytes are gamma-encoded (sRGB), which is what an
-sRGB render target produces and what receivers on **Auto** (and other Spout applications that
-follow the convention) expect. A Force Linear Gamma render target stores linear values, so its
-receiver must be set to **Color Space = Linear**, or the equivalent setting in the receiving
-application.
-
-`Create Texture Render Target 2D` defaults to `Force Linear Gamma = true`, which is the second row.
-Either turn `Force Linear Gamma` off so the render target stores sRGB-encoded bytes, which is what
-receivers expect, or set **Color Space = Linear** on the receiving side. Unreal-to-Unreal results
-are the same as before: this plugin's receiver decodes 8-bit `_UNORM` as sRGB on Auto.
-
-**The viewport stream carries display values.** The viewport sender publishes the back buffer as it is: the
-values Unreal shows on screen, encoded for an sRGB display, in the back buffer's format (10-bit by default in
-Unreal Engine 5). A 10-bit frame does not say whether its values are display-encoded (a viewport) or linear (a 10-bit
-render target), so a receiver on **Auto** reads every 10-bit frame as linear: right for a 10-bit render target,
-too bright for a viewport stream. Set **Color Space = sRGB** on a receiver of an Unreal viewport stream; the
-receiver then decodes it exactly (below). Applications that show the values as they are, such as the Spout Demo
-Receiver, show a viewport stream correctly. A back buffer with HDR output enabled holds a different encoding that
-no setting decodes.
-
-The sender never converts or reinterprets: a format it cannot share is refused with a log line
-naming it, rather than being published as something it is not.
-
-**Notes**
-- Only one sender can own a given Spout Name at a time.
-- The sender must be called continuously to request continuous frame updates.
-- The sender takes Spout's cross-process texture lock around every publish and announces each frame
-  through Spout's frame counter, so receivers see whole frames and can tell a new frame from a
-  repeated one. If a receiver is holding the texture, the sender waits at most `r.Spout.AccessWaitMs`
-  (default 2 ms) for it to finish. If it is still busy after that, the frame is skipped rather than
-  overwritten mid-read, the next frame is published once the texture is free, and the skip is logged
-  (at most one line per stream every 5 seconds).
-- This workflow is Windows-only and relies on GPU interop between Direct3D 12 and Direct3D 11.
-
-
----
-
-### Receiver
-
-- In Blueprint, create a Dynamic Material Instance once, store it in a variable, and pass it to
-  **Spout Receiver With Material** (`SpoutReceiverWithMaterial`) on Tick or a timer. This explicit
-  input reuses your material without allocating a new one on each call. Pass null for texture-only use.
-- The original `SpoutReceiver` signature remains available for existing graphs and C++ callers.
-  Its material reference is an output pin in Blueprint; prefer the new node for repeated material use.
-- **Async Receive**, an advanced input of both nodes and a checkbox on the receiver example
-  (Spout section of its Details), is on by default. A worker thread takes the sender's texture and
-  waits for each copy, so the render thread does not; turn it off for the synchronous receive. It
-  applies per sender name and is fixed while that receiver is open. Existing graphs whose box was
-  left unchecked take the new default when they load; see
-  [Async Receive](Docs/BLUEPRINT_API.md#async-receive).
-- The **Spout Name** must exactly match the name used by the sender.
-- The function outputs:
-  - `OutTexture` – a transient `UTexture2D` updated from the Spout stream.
-  - `OutMat` – a dynamic material instance bound to the received texture.
-  - Optional `UTextureRenderTarget2D` – the receiver will copy the stream into it.
-- Always validate `OutMat` before using it, as the sender may not be available or may reconnect.
-
-#### Ownership and closing
-
-There is **one receiver session per Spout sender name**.
-
-- `OutTexture` belongs to the plugin, which keeps it alive while the receiver is open. Every graph
-  receiving the same sender name shares that one texture, because the session is per name.
-- **Each consumer supplies and retains its own material instance** through the new node. Materials
-  are not shared merely because sender names match. Rebinding a parameter to another sender transfers
-  that binding, so closing the old sender's receiver cannot overwrite it.
-- `ReleaseReceiverMaterialBinding(Name, MID, Parameter)` releases just that parameter. It restores
-  the texture present before binding, or the engine default when none was set. Later manual changes
-  are preserved. Other consumers and the per-name receiver remain open.
-- Call `CloseReceiver` when a receiver is no longer needed, passing back the `OutTexture` and
-  `OutMat` you were given. It closes the shared session for **every** graph receiving that name,
-  restores every material parameter still owned by that session, releases the plugin's texture,
-  and clears plugin-owned output variables. A caller-created MID remains yours.
-- Graphs still receiving that name recover on their next `SpoutReceiver` call, with a **new** texture
-  object. References you handed the old texture to (a UMG image, another material) keep the old one
-  and stop updating, so re-read `OutTexture` after a close.
-- `CloseReceiver` will not destroy a texture or material it did not create. If you pass something
-  else, it is left untouched and the mismatch is written to the log.
-- A full shutdown (PIE stop, `Close All Streams`, editor exit) releases every open receiver's
-  texture and detaches every material binding automatically.
-
-#### Colour space
-
-`Color Space` (an advanced pin on the Spout Receiver node) decides how the incoming bytes are read:
-
-| Setting | What it does |
-|---|---|
-| **Auto** (default) | 8-bit frames decode as sRGB, whether the sender publishes `_UNORM` or `_UNORM_SRGB`; 10-bit and 16-bit float frames are read as linear. This is right for 8-bit video and for 10-bit and float render targets. A 10-bit frame of display values, such as an Unreal viewport stream, needs **sRGB** instead: its format cannot say what it holds. |
-| **Linear** | No decoding. Use it when the sender publishes linear or data values in an 8-bit format — including this plugin's own sender when the source render target was created with `Force Linear Gamma`. The format cannot tell the receiver this, because such a sender publishes the same `_UNORM` format as an sRGB one. |
-| **sRGB** | Decode the values as sRGB-encoded. On an 8-bit frame the texture's sampler decodes them. On a 10-bit frame, such as an Unreal viewport stream, each frame is decoded once into a linear 16-bit float texture: the exact sRGB function in 32-bit float, alpha copied unchanged, no extra frame of delay. On a 16-bit float frame it fails the call and logs, rather than being quietly ignored. |
-
-With **sRGB** on a 10-bit sender, the received texture is `PF_FloatRGBA` (16-bit float, linear), so an optional
-output render target must be RGBA16f; one of another format is left untouched and logged. Auto and Linear keep the
-frame's own format, as before. The decode runs on the synchronous receive (Async Receive handles 8-bit senders
-only and falls back, logged, for 10-bit ones).
-
-Consumers sharing a sender name must agree on the resolved color interpretation. A conflicting
-request fails without changing the existing output. Close the shared receiver before changing
-interpretation; a source pixel-format change also establishes a new interpretation.
-
-Optional targets receive the last completed frame independently. Attaching another target or
-recreating its resource works even while the sender is paused. The plugin skips repeat copies
-when both the target resource and frame are unchanged.
-
-A frame whose format this plugin cannot share — anything outside BGRA8, RGBA8, RGB10A2 and RGBA16F,
-including compressed and planar formats — is refused with a log line naming it. It is never
-reinterpreted as something else.
-
-#### Render Target Notes
-
-If you choose to output the received Spout stream into a `UTextureRenderTarget2D`, the recommended and most reliable format is:
-
-- **RTF RGBA8 sRGB**
-
-Other formats may either not work correctly or result in poor visual quality.  
-Support for additional formats is still under investigation, and users are encouraged to test and choose what best fits their use case.
-
-#### Material Output Notes
-
-If you want to use a **Material** as the output for the Spout Receiver:
-
-- You can provide **any material** as input to the Receiver.
-- Inside that material, add a **Texture Parameter**.
-- The name of this Texture Parameter **must exactly match** the parameter name specified in the Spout Receiver node.
-- The Receiver will automatically bind the incoming Spout texture to that parameter at runtime.
-
-If you do not wish to use a material, this step can be safely skipped and the raw texture or render target output can be used instead.
-
-**Notes**
-- The receiver automatically reconnects when the sender becomes available.
-- The assigned material must be compatible with Spout input.
-- Avoid heavy logic on Tick; use a timer if possible.
-- The receiver only copies when the sender has actually published a new frame, so calling it every
-  tick against a slower sender avoids another upstream copy, while discovery and bookkeeping still have a cost. It also takes Spout's
-  cross-process texture lock around the copy, so a frame is never read while the sender is midway
-  through writing it. If a peer (the sender or another receiver) holds it, the receiver waits at
-  most `r.Spout.AccessWaitMs` (default 2 ms) for it. If it is still busy after that, the receiver
-  tries again on a following call and a throttled warning says so. That call copies the sender's
-  newest frame, so a frame the sender has replaced in the meantime is lost, not queued.
-- The receiver samples the stream once per Unreal frame; it does not queue frames. When the sender
-  and Unreal run at the same frame rate, their timing drifts in and out of alignment, and near
-  alignment single frames can be skipped and the previous frame shown twice, with no access
-  contention involved. A higher Unreal frame rate reduces this but does not guarantee every frame.
-  See [Docs/LIMITATIONS.md](Docs/LIMITATIONS.md#performance-and-diagnostics).
-- Frame counting can be turned off machine-wide in SpoutSettings, and some senders do not publish a
-  count. When there is no count to compare, every call is treated as a new frame and copies, which
-  is the only safe answer.
-
-
-
-
-## Content
-This plugin ships with sample content under `Content/` when `CanContainContent` is enabled in `SpoutPlugin.uplugin`.
-
-## Notes and Limitations
-
-- This plugin is **Windows-only** and requires Unreal Engine to run with the **D3D12 RHI** enabled.  
-  Internally, the plugin moves pixels between Unreal's D3D12 textures and Spout's D3D11 shared
-  textures on the GPU; the interop path is chosen once per process (see
-  [Limitations](Docs/LIMITATIONS.md#interop-path)).
-
-- At the moment, only a **limited set of texture formats** is supported.  
-  Support for additional formats is still a work in progress.
-
-- For now, the **recommended and most reliable format** for Render Targets are (tested):  
-  **RTF RGBA8 sRGB**
-  **RTF RGB10A2**
-
-- The Spout Receiver uses a **GPU-direct path by default** (`r.Spout.GPUReceiver=1`): the shared texture is copied straight into the Unreal texture on the GPU. Setting the CVar to `0` falls back to the legacy **CPU readback** path, which is expensive at large resolutions or high update rates.
-
-- Shared-texture access is held until the GPU copy completes. This prevents handing a texture
-  to another process while it is still being read or written, but can stall Unreal's render
-  thread. With Async Receive (the default) a worker thread waits for the receive's copy, and the
-  render thread waits at most 1 ms per frame for a copy already in progress. With the synchronous
-  receive, on the default shared-slot path, the render thread waits at most 100 ms for the
-  receive's native copy. On that path the wait for Unreal's copy into a send slot is at most 1 s;
-  a copy that does not finish in time is not published. On the D3D11-on-12 path (`r.Spout.SharedSlotInterop 0`) UE 5.3 waits for
-  GPU idle at the Unreal-to-interop boundary and UE 5.4+ uses a submission-order barrier. Measure
-  frame time in your target workload.
-
-- Receiving samples a stream and does not queue frames, so some frames can be skipped. In the
-  release's 30-minute test with Async Receive (the default), on one laptop with the plugin's native
-  test sender at 60 fps, Unreal showed 97.1 % of the sender's frames. Motion stuttered in a few
-  10-second stretches where about one frame in ten was skipped, 5 frames in a row were missed once
-  in the first second, and the picture froze once for about 83 ms. Other senders, scenes and
-  machines were not measured this way. See
-  [Limitations](Docs/LIMITATIONS.md#async-receive-the-default).
-
-- Disable **Auto Generate Mips** on send sources and optional receive render targets.
-  Transfers require one mip, one array slice and one sample. An optional target with an
-  incompatible format or mip policy is rejected before resizing it.
-
-- Call the Blueprint/C++ send, receive and close APIs on the **game thread**. A `true` send
-  or receive result means the request was accepted, not that a frame completed. Native handle
-  opening and descriptor checks run later; failures are reported in the log. A newly created
-  received texture stays transparent until a frame can be copied.
-
-- The Sender and Receiver must be called **continuously** (Tick or timer) to request continuous frame updates; registration persists until close.
-
-- Only **one sender per Spout Name** can be active at a time. Multiple senders using the same name will conflict.
-  Registration now refuses a name already advertised by another sender, preserving that sender.
-  Missing synchronization prevents publication or copying until a later retry succeeds.
-
-- This plugin is **not guaranteed to be production-ready** for shipping products without thorough testing.  
-  Stability and performance may vary depending on hardware, drivers, texture sizes, and usage patterns.
-
-- Error handling and recovery are intentionally minimal and designed to favor debuggability over silent failure.
-
-- This plugin is intended primarily for **real-time workflows, prototyping, tools, and experimentation**, rather than long-running unattended deployments.
-
-## Troubleshooting
-
-### No texture received / Receiver outputs invalid material
-- Ensure the **Spout Name** exactly matches between Sender and Receiver.
-- Verify that the Sender is running and being called continuously (Tick or timer).
-- Check that only **one sender** is using the same Spout Name.
-- Make sure the Render Target format is supported.  
-  The recommended format is **RTF RGBA8 sRGB**.
-
-### Sender does not appear in external applications
-- Confirm that the project is running with the **D3D12 RHI** enabled.
-- Ensure the Spout runtime is available and that `Spout.dll` is correctly staged in `Binaries/Win64`.
-- If sending from the viewport, make sure the game window is actively rendering and not minimized.
-- **Spout Demo Receiver (or another OpenGL-based Spout app) says "No sender detected" for an sRGB
-  render target:** fixed in 1.0.0. Earlier 1.0.0 builds published 8-bit sRGB render
-  targets, including the shipped sender example, as `_UNORM_SRGB`, which Spout 2.007's OpenGL
-  receivers refuse. The sender now publishes plain `_UNORM` with the bytes unchanged; see
-  [Colour space when sending](#colour-space-when-sending) for what that means for colour.
-
-### Log says "shared-texture access was unavailable"
-- A sender or receiver found the shared texture busy because another application (or another
-  receiver) was still using it after the access wait (`r.Spout.AccessWaitMs`, default 2 ms). The
-  sender skips that frame and publishes the next one, and the receiver keeps the frame pending and
-  reads it on a later call. The warning is throttled to at most one line per stream every 5
-  seconds, so count skipped accesses with `Get Spout Stream Status` (`AccessMisses`) rather than
-  log lines. An occasional miss is normal when two applications share a texture; frequent misses
-  mean a peer holds the texture for a large part of each frame.
-- The wait applies to each access attempt, not to a frame, and runs on the render thread, so a peer
-  that keeps a texture locked costs up to that long on every frame for that stream, and several
-  locked streams add up (in testing, eight locked 1080p streams cost about 13 ms per frame). Set
-  `r.Spout.AccessWaitMs 0` to never wait, at the cost of more skipped frames when two applications
-  run at the same frame rate. That restores zero-wait acquisition only; the plugin's other fixes
-  stay active. See [Docs/LIMITATIONS.md](Docs/LIMITATIONS.md).
-- Frames that are skipped or repeated while `AccessMisses` stays flat are not access contention:
-  the receiver samples the stream once per Unreal frame, and a sender at the same frame rate can
-  drift into alignment with it. See [Docs/LIMITATIONS.md](Docs/LIMITATIONS.md#performance-and-diagnostics).
-
-### Performance issues or frame drops
-- Large textures and high update rates can be expensive, especially on the Receiver side due to CPU readback.
-- Reduce resolution or update frequency if possible.
-- Prefer timers over Tick when full frame-rate updates are not required.
-
-### Crashes or instability
-- Verify GPU drivers are up to date.
-- Test with different texture resolutions and formats.
-- Avoid changing Render Target resources at runtime while the Sender or Receiver is active.
-- If issues persist, reproduce the problem in a minimal project before reporting it.
-
-### Plugin does not compile or load
-- Ensure the plugin is placed inside the project `Plugins` directory, not the engine directory.
-- Confirm you are using a supported Unreal Engine 5 version.
-- Regenerate project files and rebuild after enabling the plugin.
-
-### `Could not find definition for module 'SpoutPlugin'` (compile or packaging fails instantly)
-
-This is a **build-time** error (it aborts in well under a second, and packaging reports `dotnet.exe ExitCode=8`), different from the load-time error below. It means your copy of the plugin has **no `Source/` folder**, so Unreal Build Tool can't find `SpoutPlugin.Build.cs`. A source-less, binary-only copy only loads in the editor when the prebuilt binary matches your exact engine version; it cannot be compiled or packaged against.
-
-1. Use a copy that **includes `Source/`**. Every current release ships it (0.0.8 and later). If you have an older, source-less download, re-download or clone this repository into `YourProject/Plugins/SpoutPlugin/`.
-2. Confirm `Plugins/SpoutPlugin/Source/SpoutPlugin/SpoutPlugin.Build.cs` exists.
-3. Delete `Plugins/SpoutPlugin/Binaries` and `Plugins/SpoutPlugin/Intermediate`, regenerate project files, and rebuild.
-
-### `Plugin 'SpoutPlugin' failed to load because module 'SpoutPlugin' could not be loaded`
-
-This almost always means the compiled module binary doesn't match your engine, or `Spout.dll` isn't beside the module binary.
-
-1. **Verify the build matches your engine.** A precompiled download must be built for your **exact** Unreal Engine version. If it isn't, rebuild from source.
-2. **Verify `Spout.dll` is present — in the right place for your layout.** This is where most reports go wrong, because the location differs depending on how you are using the plugin. In the editor it belongs at `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll`, beside `UnrealEditor-SpoutPlugin.dll`. In a **packaged game** it belongs at `<YourProject>/Binaries/Win64/Spout.dll`, beside the game executable, and the plugin's own `Binaries` folder is not staged at all. See [Where `Spout.dll` ends up](#where-spoutdll-ends-up) for all five layouts.
-3. **Read the log.** Open `Project/Saved/Logs/ProjectName.log` and search for `SpoutPlugin`, `Missing import`, `GetLastError`, `Spout.dll`. The plugin logs the path it resolved — `Loaded Spout.dll from '<path>'` — or an explicit error if it could not find it. If that line names a path you did not expect, you have found the problem.
-4. **If rebuilding from source,** delete these folders, then regenerate project files and rebuild:
-   - `Project/Binaries`
-   - `Project/Intermediate`
-   - `Plugins/SpoutPlugin/Binaries`
-   - `Plugins/SpoutPlugin/Intermediate`
-
-
-## Building a release, and validating one
-
-The developer workflows below require the full repository, **PowerShell 7.2 or newer**, CMake,
-and the Windows C++ toolchain for the selected Unreal engine. `build.bat` requires `pwsh`;
-Windows PowerShell 5.1 is rejected before any release action.
-
-Everything below runs from the repository root and returns a non-zero exit code on any failure, so
-a partial or failed run can never be mistaken for a successful one.
-
-### Release archives
-
-```bat
-:: Every declared engine must be installed and must pass. Any missing engine is fatal.
-build.bat -FullMatrix -OutputRoot "D:\staging"
-
-:: Only the engines you name are expected. The manifest is marked partial and lists what was omitted.
-build.bat -Partial -EngineVersions 5.3,5.8 -OutputRoot "D:\staging"
-
-:: Re-open and re-validate archives that already exist, without rebuilding.
-build.bat -Partial -EngineVersions 5.3 -OutputRoot "D:\staging" -ValidateOnly
-```
-
-Each run writes a machine-readable `release-manifest-*.json` next to the artifacts, containing the
-commit, working-tree dirty state, engine build IDs, UAT exit codes, per-archive SHA-256 hashes and
-the content-validation result for every ZIP.
-
-### Validation pipeline
-
-```bat
-:: Fast pre-release check: documentation drift, then the automation suite on both engine floors.
-build.bat -TrackD
-
-:: Boundary validation: UE 5.3 and UE 5.8, packaged hosts included.
-build.bat -TrackD -BoundaryOnly
-
-:: The complete matrix: all six engines, Development and Shipping packaged hosts.
-build.bat -TrackD -FullMatrix
-
-:: Performance baselines (1080p60, 4K60, multi-stream, CPU fallback, idle, resize and restart churn).
-build.bat -TrackD -Performance
-
-:: Prove the release needs nothing beyond its declared inputs.
-build.bat -TrackD -CleanSource
-```
-
-Individual stages can also be run directly:
-
-```powershell
-.\Scripts\Validate-Documentation.ps1
-.\Scripts\Invoke-AutomationTests.ps1     -EngineVersions 5.3,5.8 -EvidenceRoot .\Artifacts\TrackD\dev
-.\Scripts\Invoke-PackagedHostMatrix.ps1  -EngineVersions 5.8 -Configurations Development -EvidenceRoot .\Artifacts\TrackD\dev
-.\Scripts\Invoke-PerformanceBaselines.ps1 -EngineVersion 5.8 -EvidenceRoot .\Artifacts\TrackD\dev
-.\Scripts\New-CleanSourceCopy.ps1        -EvidenceRoot .\Artifacts\TrackD\dev
-```
-
-Evidence — build logs, staging manifests, smoke-test markers, performance JSON, hashes and
-Unreal Insights traces — is retained under `Artifacts/TrackD/<run-id>/`, which is git-ignored and
-never included in a release archive.
-
-The release gates create fresh invocation directories and require the launched process to report
-its run ID and embedded plugin/host source hashes. Packaged smoke tests compare actual pixels before
-receiver close and run a separate native peer in both directions, including the published format
-(advertised and real), alpha and resizing.
-The scripts build that peer automatically; CMake and a Windows C++ toolchain are required.
-
-Performance runs publish at a target of 60 Hz (1 Hz in the idle-receiver case), observe pixel sequences
-during measurement, and fail below 90% delivery or on corruption. Their timing includes a serialized
-pixel observer and queue drain; observer time and delivery latency are reported separately. Compare
-against `baseline` (Spout loaded without stream work) and `noplugin` (a separately built host with
-Spout disabled and no Spout module/SDK dependency). The control uses the same host configuration,
-window and pacing, and attests its own compiled host identity plus Spout's absence. These measurements
-are not a claim about unobserved asynchronous throughput.
-`observerSeconds` includes waiting for queued plugin work as well as reading pixels; it cannot
-be subtracted to derive an isolated plugin cost. The observer keeps at most one frame per stream
-in flight and reports observed loss, rather than estimating transfers from accepted API calls.
-The release gates cover ordinary transfer, resize churn and a paced close/reopen workload (one 1080p
-stream closed and reopened every two seconds). The twice-per-second close/reopen stress case
-(`startupshutdown`) is kept as a record: at the default retention budget its new receiver outputs
-are refused between garbage collections, so it fails its delivery gate by contract. See
-[release readiness](Docs/RELEASE_READINESS.md) for what qualification covers.
-
-Build artifacts carry immutable `.identity.json` sidecars. Keep those with the artifacts:
-`-ValidateOnly` and `-ExistingExecutable` reject missing or mismatched provenance and preserve the
-original build identity. Legacy artifacts require rebuilding. Manifest merging rejects duplicate
-rows and mixed source builds; use `-RowManifestPaths` to select the exact attempts after retries.
-
----
-
-## Third-Party
-- Spout: http://spout.zeal.co/ (BSD 2-Clause, © Lynn Jarvis)
-
-The Spout SDK headers and the redistributed `Spout.dll` / `Spout.lib` are covered by their
-own license. Full terms, bundled file paths, and binary hashes are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which ships inside every release archive.
-
-## Attribution and Redistribution
-
-This project is released under the MIT License.
-
-While commercial use is allowed, redistributing this plugin as-is or with minimal changes and selling it as a standalone product goes against the spirit of this project.
-
-If you build something cool with this plugin and feel like sharing it, let me know. I would be happy to consider adding it to a future **Showcase** section.
-
-### Note on AI-assisted development
-
-Parts of this plugin were refined with the assistance of modern AI tools.  
-AI was used primarily as a development aid to help debug certain edge cases, accelerate some refactoring steps, and improve code clarity and documentation.
-
-The overall architecture, implementation, and the majority of the code were designed and written by the author, building on the original repository and hands-on development work. AI assistance was used in the same spirit as other developer tools: to help review, polish, and streamline parts of the process.
-
-
-## License
-
-This project is licensed under the MIT License.  
-See the [LICENSE](LICENSE) file for the full terms, which preserve the original
-copyright of the upstream [zuyi53/Spout-UE5](https://github.com/zuyi53/Spout-UE5) project
-alongside the copyright for the modifications in this fork.
-
-Bundled third-party components are listed with their own license terms in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Both files are included in every release
-archive.
+- **License:** MIT License, see [LICENSE](LICENSE). You may use, modify and redistribute the plugin, including commercially. Every copy or substantial portion must keep the copyright and license notices in `LICENSE`, and redistributions of the bundled Spout SDK must keep its BSD notice from [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Crediting this project is appreciated but not required.
+- **Original work:** based on [zuyi53/Spout-UE5](https://github.com/zuyi53/Spout-UE5) by RockmanZuyi, whose copyright is preserved in the license. Developed and maintained by Giovanni Muzio (Kesson).
+- **Spout:** the bundled Spout2 SDK (headers, `Spout.dll`, `Spout.lib`) is by Lynn Jarvis, under the BSD 2-Clause license. Both license files ship in every release archive.
+- **Development tools:** parts of the plugin were refined with AI-assisted tools, used for debugging, refactoring and documentation. The overall architecture, the implementation and most of the code are the author's.

@@ -19,15 +19,27 @@ is linked into, so it resolves to two different places depending on the build ty
 The startup loader (0.0.9+) checks, in order: the plugin's `Binaries/Win64`, the plugin's
 `Source/ThirdParty/Spout/lib/amd64`, the project's `Binaries/Win64`, the executable directory, and
 finally the OS search order. The DLL is also delay-loaded (`PublicDelayLoadDLLs`) so the
-module itself loads even when the DLL resolves late. Do not commit or copy `Spout.dll` into
-any other location.
-
-Source layout for the DLL and import library:
+module itself loads even when the DLL resolves late; loading it by full path at startup makes the
+delay-load thunks bind by name instead of raising `0xC06D007E` (`ERROR_MOD_NOT_FOUND`). The plugin
+logs the file it loaded:
 
 ```
-Source/ThirdParty/Spout/lib/amd64/Spout.dll
-Source/ThirdParty/Spout/lib/amd64/Spout.lib
+LogSpoutPlugin: Loaded Spout.dll from '<path>'.
 ```
+
+If that line is missing, or names a path you did not expect, that is the problem. Do not commit or
+copy `Spout.dll` into any other location.
+
+Where the DLL is in each layout (a missing or misplaced DLL is the most common cause of
+"module could not be loaded"):
+
+| Layout | `Spout.dll` location | How it gets there |
+|---|---|---|
+| Source plugin (this repository) | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` | Committed, with `Spout.lib` beside it. Every other layout is derived from this copy. |
+| Raw `RunUAT BuildPlugin -Package` output (also what Fab builds) | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` only | `RuntimeDependencies` does not carry the DLL into `Binaries/Win64` here; the startup loader falls back to this copy. |
+| Release ZIP | `Binaries/Win64/Spout.dll`, plus the `Source/ThirdParty` copy | `build.ps1` copies it in after `BuildPlugin` and verifies that its SHA-256 matches the repository copy. |
+| Plugin installed in a project (editor or other modular build) | `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll` | `RuntimeDependencies` staging to `$(BinaryOutputDir)`, the plugin's own binaries folder. |
+| Packaged game | `<YourProject>/Binaries/Win64/Spout.dll`, beside the game executable | The module is linked into the game executable, so `$(BinaryOutputDir)` is the project's binaries folder. The plugin's own `Binaries` folder is not staged. |
 
 ## What ships in a release
 
@@ -141,14 +153,105 @@ Plugins/SpoutPlugin/Intermediate
 
 ## Distribution channel
 
-Prebuilt binaries are distributed through Patreon with free download. Source is available on
-GitHub (`https://github.com/kessoning/Spout-UE5`).
+- **Fab:** marketplace installation into the engine. Fab builds the plugin itself from the submitted source package.
+- **GitHub Releases** (`https://github.com/kessoning/Spout-UE5/releases`): free precompiled ZIPs, one per engine
+  version.
+- **Source:** `https://github.com/kessoning/Spout-UE5`.
+
+Patreon is optional support for the project, never required for a download.
 
 ## License and attribution
 
-- Licensed under the MIT License (see the README license section; if a standalone `LICENSE`
-  file is not present in your copy, the MIT terms in the README apply).
+- Licensed under the MIT License; see `LICENSE`, which ships in every release archive together with
+  `THIRD_PARTY_NOTICES.md` (the Spout2 SDK's BSD 2-Clause license). Use, modification and
+  redistribution, including commercial redistribution, are permitted. Every copy must keep the
+  copyright and license notices in `LICENSE`, and redistributions of the Spout SDK must keep its BSD
+  notice. Crediting this project is appreciated but not required.
 - Based on the original repository by zuyi53 (`https://github.com/zuyi53/Spout-UE5`).
 - Spout: `http://spout.zeal.co/`.
-- Redistributing the plugin as-is and selling it as a standalone product goes against the
-  spirit of the project, even though the MIT license permits commercial use.
+
+## Building and validating a release (maintainers)
+
+The developer workflows below require the full repository, **PowerShell 7.2 or newer**, CMake,
+and the Windows C++ toolchain for the selected Unreal engine. `build.bat` requires `pwsh`;
+Windows PowerShell 5.1 is rejected before any release action.
+
+Everything below runs from the repository root and returns a non-zero exit code on any failure, so
+a partial or failed run can never be mistaken for a successful one.
+
+### Release archives
+
+```bat
+:: Every declared engine must be installed and must pass. Any missing engine is fatal.
+build.bat -FullMatrix -OutputRoot "D:\staging"
+
+:: Only the engines you name are expected. The manifest is marked partial and lists what was omitted.
+build.bat -Partial -EngineVersions 5.3,5.8 -OutputRoot "D:\staging"
+
+:: Re-open and re-validate archives that already exist, without rebuilding.
+build.bat -Partial -EngineVersions 5.3 -OutputRoot "D:\staging" -ValidateOnly
+```
+
+Each run writes a machine-readable `release-manifest-*.json` next to the artifacts, containing the
+commit, working-tree dirty state, engine build IDs, UAT exit codes, per-archive SHA-256 hashes and
+the content-validation result for every ZIP.
+
+### Validation pipeline
+
+```bat
+:: Fast pre-release check: documentation drift, then the automation suite on both engine floors.
+build.bat -TrackD
+
+:: Boundary validation: UE 5.3 and UE 5.8, packaged hosts included.
+build.bat -TrackD -BoundaryOnly
+
+:: The complete matrix: all six engines, Development and Shipping packaged hosts.
+build.bat -TrackD -FullMatrix
+
+:: Performance baselines (1080p60, 4K60, multi-stream, CPU fallback, idle, resize and restart churn).
+build.bat -TrackD -Performance
+
+:: Prove the release needs nothing beyond its declared inputs.
+build.bat -TrackD -CleanSource
+```
+
+Individual stages can also be run directly:
+
+```powershell
+.\Scripts\Validate-Documentation.ps1
+.\Scripts\Invoke-AutomationTests.ps1     -EngineVersions 5.3,5.8 -EvidenceRoot .\Artifacts\TrackD\dev
+.\Scripts\Invoke-PackagedHostMatrix.ps1  -EngineVersions 5.8 -Configurations Development -EvidenceRoot .\Artifacts\TrackD\dev
+.\Scripts\Invoke-PerformanceBaselines.ps1 -EngineVersion 5.8 -EvidenceRoot .\Artifacts\TrackD\dev
+.\Scripts\New-CleanSourceCopy.ps1        -EvidenceRoot .\Artifacts\TrackD\dev
+```
+
+Evidence (build logs, staging manifests, smoke-test markers, performance JSON, hashes and Unreal
+Insights traces) is retained under `Artifacts/TrackD/<run-id>/`, which is git-ignored and never
+included in a release archive.
+
+The release gates create fresh invocation directories and require the launched process to report
+its run ID and embedded plugin/host source hashes. Packaged smoke tests compare actual pixels before
+receiver close and run a separate native peer in both directions, including the published format
+(advertised and real), alpha and resizing. The scripts build that peer automatically; CMake and a
+Windows C++ toolchain are required.
+
+Performance runs publish at a target of 60 Hz (1 Hz in the idle-receiver case), observe pixel
+sequences during measurement, and fail below 90% delivery or on corruption. Their timing includes a
+serialized pixel observer and queue drain; observer time and delivery latency are reported
+separately. Compare against `baseline` (Spout loaded without stream work) and `noplugin` (a
+separately built host with Spout disabled and no Spout module/SDK dependency). The control uses the
+same host configuration, window and pacing, and attests its own compiled host identity plus Spout's
+absence. These measurements are not a claim about unobserved asynchronous throughput.
+`observerSeconds` includes waiting for queued plugin work as well as reading pixels; it cannot be
+subtracted to derive an isolated plugin cost. The observer keeps at most one frame per stream in
+flight and reports observed loss, rather than estimating transfers from accepted API calls. The
+release gates cover ordinary transfer, resize churn and a paced close/reopen workload (one 1080p
+stream closed and reopened every two seconds). The twice-per-second close/reopen stress case
+(`startupshutdown`) is kept as a record: at the default retention budget its new receiver outputs
+are refused between garbage collections, so it fails its delivery gate by contract. See
+[release readiness](RELEASE_READINESS.md) for what qualification covers.
+
+Build artifacts carry immutable `.identity.json` sidecars. Keep those with the artifacts:
+`-ValidateOnly` and `-ExistingExecutable` reject missing or mismatched provenance and preserve the
+original build identity. Legacy artifacts require rebuilding. Manifest merging rejects duplicate
+rows and mixed source builds; use `-RowManifestPaths` to select the exact attempts after retries.

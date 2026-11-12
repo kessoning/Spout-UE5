@@ -211,6 +211,8 @@ collects it normally.
   a wrong pointer can no longer take out another receiver's texture.
 - Sessions: there is one receiver session per sender name, so this closes it for **every** graph
   receiving that name. Those graphs get a fresh texture on their next Spout Receiver call.
+  References you handed the old texture to (a UMG image, another material) keep the old one and
+  stop updating, so read Out Texture again after a close.
 - Memory: the released texture keeps its share of `r.Spout.MaxRetainedMiB` until Unreal
   garbage-collects it, even when nothing references it any more. Closing and reopening receivers
   rapidly can exhaust the budget between collections, after which new outputs are refused; see

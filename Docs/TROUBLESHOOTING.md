@@ -41,8 +41,10 @@ beside the module binary.
    source.
 2. Verify `Spout.dll` is at `Plugins/SpoutPlugin/Binaries/Win64/Spout.dll`, beside
    `UnrealEditor-SpoutPlugin.dll`.
-3. Read the log. The plugin logs an explicit error or warning at startup if `Spout.dll` is not
-   found, naming the paths it checked. Search the log for `SpoutPlugin` and `Spout.dll`.
+3. Read the log (`<Project>/Saved/Logs/<Project>.log`). Search for `SpoutPlugin`, `Spout.dll`,
+   `Missing import` and `GetLastError`. On success the plugin logs
+   `Loaded Spout.dll from '<path>'.`; if `Spout.dll` is not found it logs an explicit error or
+   warning naming the paths it checked. A path you did not expect is the problem.
 4. If rebuilding from source, do the clean-rebuild steps from the previous section.
 
 ## Spout.dll missing
