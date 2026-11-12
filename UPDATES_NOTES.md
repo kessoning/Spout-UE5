@@ -7,7 +7,7 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 ## NOVEMBER 2026 UPDATES
 
 This is the big one: the plugin's first proper release, version 1.0.0, is out. It's on Patreon for Unreal 5.3 to 5.8,
-and on Fab for 5.6 to 5.8. Besides everything I tested over the last months, I added two things before letting it go.
+and on Fab for the same versions. Besides everything I tested over the last months, I added two things before letting it go.
 
 First, a sender option called **Game Viewport Only**. If you sent the game view while playing inside the Unreal editor,
 the other app used to get the whole editor window, toolbars, panels and all. Now it can get just the game, and
@@ -33,6 +33,12 @@ mapping still change how it looks a little; for exact colours, use its output re
 And I tested the two new things most on Unreal 5.8, then on every version from 5.3 to 5.8 in a small test game. Getting
 them ready for the older versions turned up three real problems (the code didn't build there, the receiver's screen
 couldn't load its look, and sending only the game crashed Unreal 5.3). All three are fixed in the files you download.
+
+There's also a proper manual now. Every download comes with a PDF in the plugin's Docs folder that has it all in one
+place: how to install it, the drag-and-drop actors, sending and receiving, colours, packaging your game, the known
+limits, what to do when something goes wrong, and a full list of every Blueprint node. For the coders among you, it
+also explains how to use everything from C++, with ready-to-copy examples. It's made straight from the same pages as
+the online docs, so the two always say the same thing.
 
 ## OCTOBER 2026 UPDATES
 

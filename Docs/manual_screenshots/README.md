@@ -1,23 +1,8 @@
 # Manual screenshots
 
-Drop the User Manual screenshots here, then rebuild the PDF.
-
-## Workflow
-
-1. Capture a screenshot listed in `../SCREENSHOT_CHECKLIST.md`.
-2. Save it in this folder using the exact filename from the checklist, for example
-   `SP-005_sender-viewport-graph.png`.
-3. Rebuild the manual:
-
-   ```
-   python ../build_user_manual.py
-   ```
-
-   (Requires Python with `reportlab`: `pip install reportlab`.)
-
-Each placeholder in the PDF whose file exists here is replaced automatically by the embedded
-image with a numbered caption. Missing files keep their instruction placeholder, so you can add
-screenshots incrementally and rebuild as you go.
+Storage for the screenshots listed in `../SCREENSHOT_CHECKLIST.md`. The current User Manual
+(`../Manual/SpoutPlugin_User_Manual.pdf`, built by `python ../build_user_manual.py`) is generated from the
+documentation pages and embeds no screenshots.
 
 ## Expected filenames
 

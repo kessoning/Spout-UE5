@@ -321,6 +321,7 @@ $publicDocRelatives = @(
     'CHANGELOG.md',
     'UPDATES_NOTES.md',
     'Docs/BLUEPRINT_API.md',
+    'Docs/CPP_API.md',
     'Docs/CHANGELOG.md',
     'Docs/INSTALLATION.md',
     'Docs/LIMITATIONS.md',
@@ -497,11 +498,16 @@ Add-Check -Name 'contract.dllStaging.packaging' -Passed ($packagingText -match '
 # 5b. The manual GENERATOR must state the same contracts as the Markdown source
 # =================================================================================================
 
-# Docs/USER_MANUAL_SOURCE.md and Docs/build_user_manual.py both carry public prose, maintained
-# independently: the PDF's body lives in the generator and is NOT rendered from the Markdown, so
-# a correction to one does not reach the other. Until the two are consolidated, this section
-# checks the generator's own text so they cannot diverge.
+# Docs/build_user_manual.py renders the PDF from Markdown: Docs/USER_MANUAL_SOURCE.md and every page it names on an
+# '<!-- include: Docs/X.md -->' line. The contracts below are therefore checked across the generator and all of
+# those sources together, which is exactly the text the PDF is made from.
 $manualGeneratorText = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\build_user_manual.py')
+$manualFrameText = Get-TextOrEmpty (Join-Path $RepoRoot 'Docs\USER_MANUAL_SOURCE.md')
+$manualGeneratorText += "`n" + $manualFrameText
+foreach ($include in [regex]::Matches($manualFrameText, '(?m)^<!--\s*include:\s*(\S+)\s*-->'))
+{
+    $manualGeneratorText += "`n" + (Get-TextOrEmpty (Join-Path $RepoRoot ($include.Groups[1].Value -replace '/', '\')))
+}
 if (-not [string]::IsNullOrWhiteSpace($manualGeneratorText))
 {
     # Whitespace-insensitive view, so line wrapping inside the generator's string literals cannot
@@ -550,7 +556,7 @@ if (-not [string]::IsNullOrWhiteSpace($manualGeneratorText))
 # PDF says. Extraction is attempted with the interpreter the generator already requires; when no
 # extractor is available the result is recorded as UNVERIFIED rather than silently passing, so a
 # green run never implies the rendered PDF was machine-checked when it was not.
-$manualPdfPath = Join-Path $RepoRoot 'Docs\2026-06-05-SpoutPlugin-User-Manual.pdf'
+$manualPdfPath = Join-Path $RepoRoot 'Docs\Manual\SpoutPlugin_User_Manual.pdf'
 $pdfTextVerified = $false
 $pdfTextProblems = @()
 if ((-not $SkipGeneratedDocs) -and (Test-Path -LiteralPath $manualPdfPath -PathType Leaf))
@@ -665,7 +671,7 @@ if (-not $SkipGeneratedDocs)
         $generatedDocs += [ordered] @{ Path = $generated.Relative; Kind = $generated.Kind; StaleVersions = $stale }
     }
 
-    $pdfPath = Join-Path $RepoRoot 'Docs\2026-06-05-SpoutPlugin-User-Manual.pdf'
+    $pdfPath = Join-Path $RepoRoot 'Docs\Manual\SpoutPlugin_User_Manual.pdf'
     if (Test-Path -LiteralPath $pdfPath -PathType Leaf)
     {
         # A rendered PDF cannot be diffed. Its freshness is judged by content: Docs/build_user_manual.py
@@ -767,14 +773,14 @@ if (-not $SkipGeneratedDocs)
                 $problemsFound += "the record could not be read: $($_.Exception.Message)"
             }
             $fresh = ($problemsFound.Count -eq 0)
-            $expected = 'the PDF, every input recorded in Docs/2026-06-05-SpoutPlugin-User-Manual.pdf.inputs.json and every screenshot it lists as absent unchanged'
+            $expected = 'the PDF, every input recorded in Docs/Manual/SpoutPlugin_User_Manual.pdf.inputs.json and every screenshot it lists as absent unchanged'
             $actual = $(if ($fresh) { "unchanged ($inputCount inputs)" } else { $problemsFound -join '; ' })
         }
         Add-Check -Name 'generatedDocs.pdfFreshness' -Passed $fresh `
-            -Detail "Docs/2026-06-05-SpoutPlugin-User-Manual.pdf checked against its inputs, by $freshnessBasis (regenerate with: python Docs/build_user_manual.py)" `
+            -Detail "Docs/Manual/SpoutPlugin_User_Manual.pdf checked against its inputs, by $freshnessBasis (regenerate with: python Docs/build_user_manual.py)" `
             -Expected $expected -Actual $actual
 
-        $generatedDocs += [ordered] @{ Path = 'Docs/2026-06-05-SpoutPlugin-User-Manual.pdf'; Kind = 'pdf'; Fresh = $fresh }
+        $generatedDocs += [ordered] @{ Path = 'Docs/Manual/SpoutPlugin_User_Manual.pdf'; Kind = 'pdf'; Fresh = $fresh }
     }
 }
 

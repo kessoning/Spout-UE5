@@ -1,0 +1,26 @@
+{
+ "absent": [],
+ "basis": "generated",
+ "inputs": {
+  "Docs/BLUEPRINT_API.md": "d5a68017c53b1a5a2ad5f15c7e2c8d3e1d4484f9051f576659fe92694efbbab3",
+  "Docs/CPP_API.md": "025e7dceeae237b56ec902778beecbe520cb58f4a74c3533bfc1bdf14f5aaca1",
+  "Docs/INSTALLATION.md": "9e2dc2597060f0ef69af7feb77eea921a28992a244344d6a5bcd0d8c32feb304",
+  "Docs/LIMITATIONS.md": "27ff435ea38ff5c3ce981b29a572aa22f1b2ad987943a098c5f26a0783c1ca17",
+  "Docs/PACKAGING_AND_DISTRIBUTION.md": "0d0e6e4eba8b66dca7f852087ab121ee86399d638fd208cfe720f555a1bb0ee2",
+  "Docs/QUICK_START.md": "1993329472d810003b557105f731a47ee53f5a748c9a0cba766fa3d3e2deef70",
+  "Docs/RECEIVER.md": "8073b0b6476e563d4277540f553b517ed6e7ee5be79b018c83202906a0b47b54",
+  "Docs/RENDER_TARGETS_AND_FORMATS.md": "6b3d0029398e0480f628a04d9ccde66d6e2ffd597a429680664ff57fde7fe3bc",
+  "Docs/SCENECAPTURE2D.md": "769ef2283db81fd7e0480df592cb4013f35dc766718644277265aa22053c2ee4",
+  "Docs/SENDER.md": "e224fd6fa3a5c08f6fd94e246802fc772d4a1d93bfb71d91581a08ecf03475d2",
+  "Docs/TROUBLESHOOTING.md": "e38b3d8d7baf957003e1d9ca65d071b5ab0cc6a9e75e2095e1559da585a5f527",
+  "Docs/USER_MANUAL_SOURCE.md": "570ba6ebb91042c16b3d1ac1115bbea8b9ba559b6883fb8f59a27c7f82928ac6",
+  "Docs/build_user_manual.py": "8850c8e6d4a15af8b03f201a045bd79d99d7453155de729be3b322cc9823f4bc",
+  "SpoutPlugin.uplugin": "8d271c077e8afa1bfda381f744a3925cd40ac7c6601e61e1ca347bf247c6befb",
+  "build.ps1": "0616a5cffd2e609666e68c5abe788c81d2130397c66fe5986d3f79b069e91fa9"
+ },
+ "pdf": {
+  "path": "Docs/Manual/SpoutPlugin_User_Manual.pdf",
+  "sha256": "b359d1e9b0a9b28accab4552aa1d1787c65c8f8d4988dd49a2f4c9239d83d890"
+ },
+ "what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them"
+}

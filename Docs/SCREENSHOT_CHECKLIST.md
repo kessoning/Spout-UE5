@@ -1,15 +1,14 @@
 # Screenshot Checklist
 
-Screenshots for the User Manual PDF. The manual embeds each image automatically when a file
-with the exact name below exists in `Docs/manual_screenshots/`; until then it shows an
-instruction placeholder. After adding images, rebuild the PDF.
+Screenshots planned for an illustrated edition of the User Manual. The current manual,
+`Docs/Manual/SpoutPlugin_User_Manual.pdf`, is generated from the documentation pages and embeds no
+screenshots; this list records what each image should show so they can be captured consistently.
 
 How to add a screenshot:
 
 1. Capture it (1920x1080 or higher, Windows, clean editor theme).
 2. Save it into `Docs/manual_screenshots/` with the exact filename in the table.
-3. Rebuild the PDF (re-run the manual build script). The placeholder is replaced by the image
-   with a numbered caption.
+3. Reference it from the documentation page it illustrates.
 
 Filenames and what each must show:
 

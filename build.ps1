@@ -747,7 +747,7 @@ function Test-ReleaseArchive
         }
 
         # Licensing and shipped documentation.
-        foreach ($required in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md', 'Docs/BLUEPRINT_API.md', 'Docs/LIMITATIONS.md', 'Docs/RELEASE_READINESS.md'))
+        foreach ($required in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md', 'Docs/BLUEPRINT_API.md', 'Docs/LIMITATIONS.md', 'Docs/RELEASE_READINESS.md', 'Docs/Manual/SpoutPlugin_User_Manual.pdf'))
         {
             if (-not (Test-Entry $entries $required))
             {
@@ -804,14 +804,14 @@ function Test-ReleaseArchive
             [void] $problems.Add("contains internal track records: $(($trackRecords | Select-Object -First 3) -join ', ')")
         }
 
-        $publicDocs = @('Docs/BLUEPRINT_API.md','Docs/LIMITATIONS.md','Docs/RELEASE_READINESS.md')
+        $publicDocs = @('Docs/BLUEPRINT_API.md','Docs/LIMITATIONS.md','Docs/RELEASE_READINESS.md','Docs/Manual/SpoutPlugin_User_Manual.pdf')
         foreach ($entry in $entries) {
             if ($entry.StartsWith("$PluginName/Docs/") -and $publicDocs -notcontains $entry.Substring($PluginName.Length+1)) {
                 [void]$problems.Add("unapproved documentation file: $entry")
             }
         }
         # Resolve every local Markdown link against the actual archive, not the checkout.
-        foreach ($document in @('README.md','THIRD_PARTY_NOTICES.md') + $publicDocs) {
+        foreach ($document in @('README.md','THIRD_PARTY_NOTICES.md') + @($publicDocs | Where-Object { $_ -like '*.md' })) {
             $docEntry = $archive.Entries | Where-Object { $_.FullName.Replace('\','/') -eq "$PluginName/$document" } | Select-Object -First 1
             if (-not $docEntry) { continue }
             $docReader = [IO.StreamReader]::new($docEntry.Open())
@@ -934,8 +934,10 @@ try
             if (Test-Path -LiteralPath $sourcePath) { Copy-Item -LiteralPath $sourcePath -Destination $cleanBuildSource -Recurse -Force }
         }
         New-Item -ItemType Directory -Path (Join-Path $cleanBuildSource 'Docs') -Force | Out-Null
-        foreach ($document in @('BLUEPRINT_API.md','LIMITATIONS.md','RELEASE_READINESS.md')) {
-            Copy-Item -LiteralPath (Join-Path $PluginRoot "Docs/$document") -Destination (Join-Path $cleanBuildSource 'Docs') -Force
+        foreach ($document in @('BLUEPRINT_API.md','LIMITATIONS.md','RELEASE_READINESS.md','Manual/SpoutPlugin_User_Manual.pdf')) {
+            $documentTarget = Split-Path -Parent (Join-Path (Join-Path $cleanBuildSource 'Docs') $document)
+            New-Item -ItemType Directory -Path $documentTarget -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $PluginRoot "Docs/$document") -Destination $documentTarget -Force
         }
         if ((Get-TrackDSourceIdentity -Root $cleanBuildSource).Digest -ne $buildInputs.Digest) { throw 'Clean build input copy differs from the plugin sources' }
         $buildDescriptorPath = Join-Path $cleanBuildSource 'SpoutPlugin.uplugin'

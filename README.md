@@ -171,6 +171,10 @@ Packaging a game is supported with Visual Studio only; see
 
 ## Usage
 
+> **User manual (PDF):** [Docs/Manual/SpoutPlugin_User_Manual.pdf](Docs/Manual/SpoutPlugin_User_Manual.pdf) has
+> everything in one document: installation, the actors, sending and receiving, render targets and colour, packaging,
+> limitations, troubleshooting, and the complete Blueprint API and C++ API reference.
+
 > The plugin includes ready-to-use **example Blueprints** under the plugin `Content/` folder, which can be used to quickly test both Sender and Receiver setups without writing any code.
 
 ### Drag-and-drop actors (no Blueprint)

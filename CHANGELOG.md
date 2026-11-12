@@ -12,6 +12,20 @@ additions").
 Viewport Only when their Blueprint loads (details below); receive nodes whose Async Receive box was left unchecked
 turn it on (see the release candidate notes).
 
+### Added: the user manual (PDF) in every archive
+- **`Docs/Manual/SpoutPlugin_User_Manual.pdf`** now ships inside every Patreon and Fab archive. It covers:
+  - installation, the drag-and-drop actors, sending and receiving, render targets and colour, packaging, limitations
+    and troubleshooting;
+  - the complete Blueprint API reference;
+  - a new C++ API reference (`Docs/CPP_API.md`): module setup, every function and both actors from C++, and examples.
+- **It is generated from the documentation pages themselves.** `Docs/build_user_manual.py` renders
+  `Docs/USER_MANUAL_SOURCE.md` and every page it includes, so the PDF cannot contradict them.
+- **It replaces the earlier `Docs/2026-06-05-SpoutPlugin-User-Manual.pdf`.** That manual predated the actors and Game
+  Viewport Only and was not shipped.
+- **Blueprint API reference fixes:**
+  - the summary lists all 13 nodes; it missed four;
+  - the access-miss description states the bounded access wait (`r.Spout.AccessWaitMs`) instead of "does not wait".
+
 ### Fixed in the additions before publication (UE 5.3 to 5.7)
 - **Older engines could not compile the new code:** `FCoreDelegates::GetOnPostEngineInit` (UE 5.8 only),
   `FPlacementCategoryInfo::ShortDisplayName` (UE 5.5+) and the command-list `CreateTexture` (UE 5.4+) are now used

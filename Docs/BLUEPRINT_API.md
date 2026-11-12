@@ -12,8 +12,12 @@ functions and are not callable from Blueprints.
 |---|---|---|
 | Spout Sender | `bool` | Spout |
 | Close Sender | `void` | Spout |
+| Spout Receiver With Material | `bool` | Spout |
 | Spout Receiver | `bool` | Spout |
+| Release Receiver Material Binding | `bool` | Spout |
 | Close Receiver | `void` | Spout |
+| Get Spout Stream Status | `FSpoutStreamStatus` | Spout |
+| Get Spout Runtime Status | `FSpoutRuntimeStatus` | Spout |
 | Spout Info | `bool` | Spout |
 | Get Sender Info | `bool` | Spout |
 | Set Max Senders | `int32` | Spout |
@@ -430,8 +434,8 @@ fields are available for your own Blueprint use but are not driven by the plugin
 
 All public functions require the game thread. `GetSpoutStreamStatus(Name, Type)` returns the current
 role's active flag, pending commands, accepted queued requests, queue rejections, submitted frames,
-access misses (transfers skipped because a peer held the shared texture; the access check does
-not wait), native-failure count and last native error. An active role can be awaiting its first
+access misses (transfers skipped because a peer still held the shared texture after the access
+wait, `r.Spout.AccessWaitMs`), native-failure count and last native error. An active role can be awaiting its first
 successful transfer; `bHasFrame` means a submitted frame has been recorded, not that a foreign peer
 has displayed it. CPU receive uploads may still be queued when submission is recorded. For a
 receiver it also reports `RequestedReceiveMode`, `EffectiveReceiveMode` and `ReceiveModeNote`; see
