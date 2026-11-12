@@ -23,13 +23,13 @@ Additional credit recorded in the bundled headers: thanks and credit to Malcolm 
 
 | Path | Description |
 |---|---|
-| `ThirdParty/Spout/include/SpoutDX/` | DirectX 11 SDK headers (used by this plugin) |
-| `ThirdParty/Spout/include/SpoutDX12/` | DirectX 12 SDK headers |
-| `ThirdParty/Spout/include/SpoutDX9/` | DirectX 9 SDK headers |
-| `ThirdParty/Spout/include/SpoutGL/` | OpenGL SDK headers |
-| `ThirdParty/Spout/include/SpoutLibrary/` | C-style library interface header |
-| `ThirdParty/Spout/lib/amd64/Spout.lib` | x64 import library |
-| `ThirdParty/Spout/lib/amd64/Spout.dll` | x64 runtime library, redistributed in release archives |
+| `Source/ThirdParty/Spout/include/SpoutDX/` | DirectX 11 SDK headers (used by this plugin) |
+| `Source/ThirdParty/Spout/include/SpoutDX12/` | DirectX 12 SDK headers |
+| `Source/ThirdParty/Spout/include/SpoutDX9/` | DirectX 9 SDK headers |
+| `Source/ThirdParty/Spout/include/SpoutGL/` | OpenGL SDK headers |
+| `Source/ThirdParty/Spout/include/SpoutLibrary/` | C-style library interface header |
+| `Source/ThirdParty/Spout/lib/amd64/Spout.lib` | x64 import library |
+| `Source/ThirdParty/Spout/lib/amd64/Spout.dll` | x64 runtime library, redistributed in release archives |
 
 In a release archive the runtime library is also staged at
 `SpoutPlugin/Binaries/Win64/Spout.dll`, which is the copy the plugin loads at startup.

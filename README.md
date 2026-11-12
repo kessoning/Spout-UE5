@@ -6,6 +6,9 @@
 ![Windows 64-bit, DirectX 12](https://img.shields.io/badge/Windows%2064--bit-DirectX%2012-0078D6)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
 
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20this%20project-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/kesson)
+[![Patreon](https://img.shields.io/badge/Patreon-Support%20development-FF424D?logo=patreon&logoColor=white)](https://www.patreon.com/c/kesson_lab)
+
 Hi, I'm Kesson, a new media artist and creative technologist. I built this plugin because my own work needed Unreal Engine to exchange live images with tools like TouchDesigner, and I found few practical, up-to-date ways to do that with Unreal's DirectX 12 renderer. It began as a fork of [zuyi53/Spout-UE5](https://github.com/zuyi53/Spout-UE5), an existing open-source Spout plugin, and grew from there. I share it freely because I believe creative technology should be accessible, and that tools like this get better when people build on them together.
 
 The plugin shares live GPU textures between Unreal Engine and other Windows applications through [Spout](https://spout.zeal.co/), with no disk or network transfer: send Unreal's game view or any render target out, and bring other applications' streams in.
