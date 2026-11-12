@@ -6,8 +6,8 @@ Hey! These are my casual, plain-English notes on what I've been changing in the 
 
 ## NOVEMBER 2026 UPDATES
 
-This is the big one: the plugin's first proper release, version 1.0.0, is out. It's on Patreon for Unreal 5.3 to 5.8,
-and on Fab for the same versions. Besides everything I tested over the last months, I added two things before letting it go.
+This is the big one: the plugin's first proper release, version 1.0.0, is out. It's a free download on GitHub for
+Unreal 5.3 to 5.8, and it's coming to Fab for the same versions once their review is done. Besides everything I tested over the last months, I added two things before letting it go.
 
 First, a sender option called **Game Viewport Only**. If you sent the game view while playing inside the Unreal editor,
 the other app used to get the whole editor window, toolbars, panels and all. Now it can get just the game, and

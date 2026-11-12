@@ -1,7 +1,7 @@
 # Spout Texture Sharing for Unreal Engine 5
 
 ![Fab: coming soon](https://img.shields.io/badge/Fab-coming%20soon-lightgrey)
-![GitHub Releases: v1.0.0 coming soon](https://img.shields.io/badge/GitHub%20Releases-v1.0.0%20coming%20soon-lightgrey)
+[![GitHub Releases: v1.0.0](https://img.shields.io/badge/GitHub%20Releases-v1.0.0-2ea44f)](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.0)
 ![Unreal Engine 5.3 to 5.8](https://img.shields.io/badge/Unreal%20Engine-5.3%20to%205.8-313131)
 ![Windows 64-bit, DirectX 12](https://img.shields.io/badge/Windows%2064--bit-DirectX%2012-0078D6)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
@@ -63,7 +63,7 @@ The plugin is free.
 | Option | Best for | Where |
 |---|---|---|
 | **Fab** | Installing from the marketplace into your engine | Coming soon: the listing is awaiting Fab's review. Its link will be added here once it is live. |
-| **GitHub Releases** | Free precompiled ZIPs, one per engine version | Coming soon: the v1.0.0 ZIPs will be attached to the v1.0.0 release on the repository's Releases page. |
+| **GitHub Releases** | Free precompiled ZIPs, one per engine version | [v1.0.0 release](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.0) |
 | **Source** | Custom builds and modifications | https://github.com/kessoning/Spout-UE5 |
 
 A precompiled ZIP only works with the engine version it was built for. Download the one that matches your Unreal Engine version exactly (for example `SpoutPlugin_1.0.0_UE5.7_Win64.zip` for UE 5.7).
