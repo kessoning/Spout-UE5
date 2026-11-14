@@ -43,8 +43,9 @@ the online docs, so the two always say the same thing.
 One small fix after release, found by Fab's review. Their build machine for Unreal 5.3 couldn't compile the plugin. It
 has an older copy of Microsoft's Windows developer files than I do, and one of my files ended up picking a graphics
 header from that older copy instead of the newer one that comes with Unreal. I changed the order of two lines so the
-plugin always uses Unreal's own copy. Nothing changes in how the plugin works. The Fab downloads have the fix. The
-ready-to-use GitHub downloads work as they are, and the fix will be in the next GitHub release too.
+plugin always uses Unreal's own copy. Nothing changes in how the plugin works. All the downloads, on Fab, GitHub and
+Patreon, have been rebuilt with the fix. If you grabbed the plugin earlier this month, it keeps working as it is. You
+only need the new download if you compile the plugin yourself from its source.
 
 ## OCTOBER 2026 UPDATES
 

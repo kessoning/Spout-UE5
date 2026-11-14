@@ -12,7 +12,7 @@ additions").
 Viewport Only when their Blueprint loads (details below); receive nodes whose Async Receive box was left unchecked
 turn it on (see the release candidate notes).
 
-### Fixed in the Fab source packages: building with older Windows SDKs (2026-11-14)
+### Fixed after publication: building with older Windows SDKs (2026-11-14)
 - **Fab's UE 5.3 build failed** in the engine's `d3dx12_core.h` (`'D3D12_RESOURCE_DESC1': base class undefined`,
   `'Format': undeclared identifier`, `D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS` undeclared).
 - **Cause:** `SpoutD3DContext.h` included the Windows SDK's `d3d11on12.h` before `d3d12.h`.
@@ -26,12 +26,13 @@ turn it on (see the release candidate notes).
   - reproduced with the UE 5.3 package's own compiler command lines and the Windows SDK 10.0.18362 headers: 98 errors,
     the same as Fab's report;
   - with the fix, every unit compiles with those headers, in the unity build and file by file;
-  - the regenerated packages pass `RunUAT BuildPlugin -Rocket` on UE 5.3 to 5.8, with no errors and no warnings from
-    plugin code.
-- **Scope:** the Fab packages were regenerated with this fix (they also carry the README and notices updates made after
-  the release). The GitHub v1.0.0 release (tag `v1.0.0`) and its precompiled ZIPs do not include it. Their binaries are
-  unaffected; a build that compiles their sources with a Windows SDK older than 10.0.19041 can hit the same error. The
-  fix ships in the next GitHub release.
+  - the regenerated Fab packages pass `RunUAT BuildPlugin -Rocket` on UE 5.3 to 5.8, and the rebuilt precompiled ZIPs
+    were built the same way, with no errors and no warnings from plugin code.
+- **Scope:** every 1.0.0 download was rebuilt with this fix: the Fab source packages and the six precompiled ZIPs
+  (GitHub release `v1.0.0` and Patreon), which replace the earlier files of the same names. Tag `v1.0.0` now points to
+  the commit with this entry. The rebuilt packages also carry the README and notices updates made after the release.
+  ZIPs downloaded earlier keep working: their binaries were not affected. Only compiling their sources with a Windows
+  SDK older than 10.0.19041 can hit the error.
 
 ### Added: the user manual (PDF) in every archive
 - **`Docs/Manual/SpoutPlugin_User_Manual.pdf`** now ships inside every Patreon and Fab archive. It covers:
