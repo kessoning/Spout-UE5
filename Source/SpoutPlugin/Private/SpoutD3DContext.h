@@ -16,8 +16,11 @@
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include "Windows/WindowsHWrapper.h"
 #include <d3d11.h>
-#include <d3d11on12.h>
+// Include the engine's d3d12.h (DirectX module include path) before the Windows SDK's d3d11on12.h.
+// d3d11on12.h includes "d3d12.h" from its own SDK folder; if that copy is first, its include guard
+// hides the engine's newer copy and the engine's d3dx12.h fails to compile on older Windows SDKs.
 #include <d3d12.h>
+#include <d3d11on12.h>
 #include <wrl/client.h>
 #include "SpoutDX/SpoutDirectX.h"
 #include "SpoutDX/SpoutSenderNames.h"
