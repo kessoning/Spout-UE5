@@ -68,6 +68,11 @@ project carry a bit less. And I finally tracked down exactly which version of th
 with. It's the official Spout 2.007.017 release, identical down to the last byte. The newest Spout came out in
 October, and moving to it is on the list for the next bigger update.
 
+For testing, besides my usual automated checks on every version, I installed the actual downloads into small test
+projects for each Unreal version, from 5.3 to 5.9: build, open, play with a sender and two receivers, then make
+packaged games and run those too. Everything passed. I also checked something I hadn't before: that the ready-made
+files in each download load and work in a project that can't compile anything, which is how most of you use them.
+
 ## OCTOBER 2026 UPDATES
 
 This month is mostly groundwork. Two changes are on for everyone: the new way pictures travel between

@@ -46,6 +46,17 @@ Windows 64-bit, Direct3D 12.
 - **Automation suite:** all 177 tests pass on every supported engine, UE 5.3 to 5.9, built from the release source
   with the test marker (one desktop, NVIDIA GeForce RTX 4090). The 17 tests that log a warning provoke it on
   purpose (rejected input, injected faults).
+- **The published downloads, installed in the per-engine test projects** (build, launch, Play with a Spout Sender
+  and two Spout Receivers, one receiving Unreal's own sender and one an external test sender, rebuild, relaunch, then
+  packaged Development and Shipping games run with the same checks):
+  - the precompiled ZIPs on UE 5.3 to 5.9 and the Fab source packages on UE 5.3 to 5.8: every check passes. In these
+    C++ projects Unreal compiles the plugin from the download's source. UE 5.9 used the 5.8 test project with its
+    build settings upgraded for 5.9.
+  - the prebuilt editor binaries of every ZIP, in a new Blueprint-only project where nothing can compile: they load
+    without compiling, send a render target that a separate application receives (exact size, red as sent), and
+    receive a separate application's sender. The binaries are unchanged afterwards. This closes the gap left by 1.0.0,
+    whose precompiled binaries were never run.
+  - the Async Receive fallback for Unreal's 10-bit viewport stream now appears as an information line in these runs.
 - **Not repeated for 1.0.1:** the packaged-host matrix, performance runs and soaks. Their 1.0.0 results stand for the
   code this release did not change (`Docs/RELEASE_READINESS.md`).
 
