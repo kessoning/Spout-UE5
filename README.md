@@ -1,8 +1,8 @@
 # Spout Texture Sharing for Unreal Engine 5
 
 ![Fab: coming soon](https://img.shields.io/badge/Fab-coming%20soon-lightgrey)
-[![GitHub Releases: v1.0.0](https://img.shields.io/badge/GitHub%20Releases-v1.0.0-2ea44f)](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.0)
-![Unreal Engine 5.3 to 5.8](https://img.shields.io/badge/Unreal%20Engine-5.3%20to%205.8-313131)
+[![GitHub Releases: v1.0.1](https://img.shields.io/badge/GitHub%20Releases-v1.0.1-2ea44f)](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.1)
+![Unreal Engine 5.3 to 5.9](https://img.shields.io/badge/Unreal%20Engine-5.3%20to%205.9-313131)
 ![Windows 64-bit, DirectX 12](https://img.shields.io/badge/Windows%2064--bit-DirectX%2012-0078D6)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
 
@@ -13,7 +13,7 @@ Hi, I'm Kesson, a new media artist and creative technologist. I built this plugi
 
 The plugin shares live GPU textures between Unreal Engine and other Windows applications through [Spout](https://spout.zeal.co/), with no disk or network transfer: send Unreal's game view or any render target out, and bring other applications' streams in.
 
-**Version 1.0.0** · Unreal Engine 5.3 to 5.8 · Windows 64-bit · DirectX 12 · MIT License
+**Version 1.0.1** · Unreal Engine 5.3 to 5.9 · Windows 64-bit · DirectX 12 · MIT License
 
 In Unreal the plugin appears as **Spout Plugin** (module `SpoutPlugin`, category Rendering).
 
@@ -26,6 +26,16 @@ In Unreal the plugin appears as **Spout Plugin** (module `SpoutPlugin`, category
 - **Formats:** BGRA8, RGBA8, RGB10A2 and RGBA16F.
 - **GPU to GPU:** the plugin bridges Unreal's DirectX 12 renderer and Spout's DirectX 11 shared textures.
 - **Blueprint nodes and a C++ API**, with example content and a full user manual (PDF) in every download.
+
+## What's new in 1.0.1
+
+A maintenance release: fixes and Unreal Engine 5.9, with nothing you rely on changed.
+
+- **Unreal Engine 5.9** is supported, with a precompiled download of its own.
+- **Two Game Viewport Only senders started at different times both keep sending.** Before, the first one stopped as soon as the second one started.
+- **No warning when Async Receive meets a 10-bit or float sender**, such as another Unreal's viewport. Async Receive takes 8-bit senders; other streams are received synchronously, as before, and the log now says so as information. The Spout Receiver actor's Applied Settings shows the receive path in use.
+- **Lighter builds of your project:** the plugin's own test suite is no longer compiled into your editor, and building the plugin no longer reads and hashes every one of its files.
+- **The bundled Spout SDK is identified:** it is the official Spout2 2.007.017 release, byte for byte (see [third-party notices](THIRD_PARTY_NOTICES.md)).
 
 ## What's new in 1.0.0
 
@@ -48,7 +58,7 @@ The full list is in the [changelog](https://github.com/kessoning/Spout-UE5/blob/
 
 ## Status and testing
 
-1.0.0 was tested on every supported engine version, with automated tests and packaged Development and Shipping test games. The two newest additions (the actors and Game Viewport Only) received focused checks. Testing used Spout's own demo applications and an independent native test sender on NVIDIA GPUs.
+1.0.1 passed the full automated test suite on every supported engine version, UE 5.3 to 5.9. 1.0.0 was tested on every supported engine version, with automated tests and packaged Development and Shipping test games. The two newest additions (the actors and Game Viewport Only) received focused checks. Testing used Spout's own demo applications and an independent native test sender on NVIDIA GPUs.
 
 Not covered by the automated release tests:
 
@@ -66,16 +76,16 @@ The plugin is free.
 | Option | Best for | Where |
 |---|---|---|
 | **Fab** | Installing from the marketplace into your engine | Coming soon: the listing is awaiting Fab's review. Its link will be added here once it is live. |
-| **GitHub Releases** | Free precompiled ZIPs, one per engine version | [v1.0.0 release](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.0) |
+| **GitHub Releases** | Free precompiled ZIPs, one per engine version | [v1.0.1 release](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.1) |
 | **Source** | Custom builds and modifications | https://github.com/kessoning/Spout-UE5 |
 
-A precompiled ZIP only works with the engine version it was built for. Download the one that matches your Unreal Engine version exactly (for example `SpoutPlugin_1.0.0_UE5.7_Win64.zip` for UE 5.7).
+A precompiled ZIP only works with the engine version it was built for. Download the one that matches your Unreal Engine version exactly (for example `SpoutPlugin_1.0.1_UE5.7_Win64.zip` for UE 5.7).
 
 ## Installation
 
 ### Requirements
 
-- Windows 64-bit, Unreal Engine 5.3 to 5.8, and the **DirectX 12** RHI. The plugin does not start on any other RHI and logs `SpoutPlugin requires DX12 RHI.`
+- Windows 64-bit, Unreal Engine 5.3 to 5.9, and the **DirectX 12** RHI. The plugin does not start on any other RHI and logs `SpoutPlugin requires DX12 RHI.`
 - Both applications sharing a stream must run on the same GPU.
 - To build from source or package a game: Visual Studio 2022 with the *Game development with C++* workload, its MSVC toolchain and a Windows SDK supported by your engine version. Opening a project with the precompiled plugin in a matching editor needs no compiler.
 

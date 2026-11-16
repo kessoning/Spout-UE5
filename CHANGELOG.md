@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.0.1 - 2026-11-16
+
+A maintenance release on top of 1.0.0: one sender fix, UE 5.9 support, quieter logs and lighter builds. Nothing that
+existing Blueprints, C++ callers, console variables or saved assets rely on changes. Supported engines: UE 5.3 to 5.9,
+Windows 64-bit, Direct3D 12.
+
+### Fixed
+- **Two Game Viewport Only senders started at different times.** When one Game Viewport Only name had been sending on
+  its own and a second name started, the first name stopped publishing: every frame for it was refused with the
+  warning "a viewport send to a name whose render-target sender uses the asynchronous send ... was refused".
+  - **Cause:** a name sent alone goes through its own asynchronous sender. Once two names shared the viewport image,
+    both went to the synchronous send, which refuses a name that already has an asynchronous sender (one name, one
+    source).
+  - **Fix:** in a send of several names, a name that already publishes through its asynchronous sender keeps doing
+    so; the other names share the synchronous send as before (`SpoutSender.cpp`).
+  - **Test:** `SpoutPlugin.AsyncSend.ANameSentAloneKeepsItsSenderWhenASecondNameJoins`. Without the fix it fails on
+    UE 5.8 (the first name refused 3 times, 1 frame published instead of 4, its image not received); with the fix it
+    passes on UE 5.3 to 5.9.
+
+### Changed
+- **Async Receive and 10-bit or float senders.** Async Receive takes 8-bit senders (BGRA8, RGBA8); other formats were
+  always received synchronously. That fallback is expected, for example for another Unreal's 10-bit viewport stream,
+  so it is now logged as information instead of a warning, with a clearer reason ("it supports 8-bit senders (BGRA8
+  and RGBA8), and this sender is DXGI_FORMAT_R10G10B10A2_UNORM"). Real failures (device, resources, worker) are still
+  warnings. `GetSpoutStreamStatus` reports the same reason in `ReceiveModeNote`.
+- **Spout Receiver actor:** Applied Settings shows the receive path in use (`Async Receive on`, `synchronous receive
+  (<reason>)`, `Async Receive off`), not only the one requested.
+- **The automation tests no longer compile into users' editors.** The test suite, its test hooks and the
+  development console commands (`Spout.T1.*`) are built only when the plugin's root folder holds the marker file
+  `SpoutTests.enable`. The test pipeline writes the marker into every plugin it stages; release archives and Fab
+  packages are built without it. The runtime module's editor build no longer depends on `UnrealEd`,
+  `BlueprintGraph` or `KismetCompiler`.
+- **Building the plugin no longer hashes every plugin file.** The build-input digest the test host checks is
+  computed only in test builds; other builds record `unidentified`. A file that cannot be read gives `unidentified`
+  instead of a failed build.
+- **Example content:** the sender example's comments list the three Send Texture From sources and the supported
+  render target formats, and no longer describe the old interop path or "just few" formats.
+
+### Added
+- **UE 5.9 support** and a precompiled UE 5.9 download. The one compile error on 5.9 was in test code (a printf
+  argument type, `SpoutPluginColorDecodeTests.cpp`); it is fixed for every engine.
+
+### Checked
+- **Automation suite:** all 177 tests pass on every supported engine, UE 5.3 to 5.9, built from the release source
+  with the test marker (one desktop, NVIDIA GeForce RTX 4090). The 17 tests that log a warning provoke it on
+  purpose (rejected input, injected faults).
+- **Not repeated for 1.0.1:** the packaged-host matrix, performance runs and soaks. Their 1.0.0 results stand for the
+  code this release did not change (`Docs/RELEASE_READINESS.md`).
+
+### Documentation and repository
+- **Spout SDK provenance:** the bundled `Spout.dll` and `Spout.lib` are byte for byte the MD build in the official
+  Spout2 2.007.017 release (`Spout-SDK-binaries_2-007-017_1.zip`), and the 36 headers match it apart from line
+  endings. Recorded in `THIRD_PARTY_NOTICES.md`.
+- **`LICENSE`** is the standard MIT text with both copyright lines, so GitHub recognises it. The fork note moved to
+  `THIRD_PARTY_NOTICES.md`.
+- `Docs/INSTALLATION.md` explains why the release archives' descriptor has no `EnabledByDefault` entry;
+  `Docs/SCREENSHOT_CHECKLIST.md` matches the current layout and defaults; supported-engine ranges read 5.3 to 5.9.
+- Build scripts: UE 5.9 joins the declared engines; stale entries for the old root `ThirdParty` folder are removed.
+
 ## 1.0.0 - 2026-11-11
 
 First public stable release. It is the release candidate described below (qualified on UE 5.3 to 5.8 in September

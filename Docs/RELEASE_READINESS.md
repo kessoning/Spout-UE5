@@ -1,10 +1,30 @@
 # Release readiness
 
-This page ships inside the 1.0.0 release archives. It describes what qualification of a release
+This page ships inside the 1.0.1 release archives. It describes what qualification of a release
 consists of and what it does not cover. Do not treat historical releases or successful compilation
 as approval of changed source.
 
-## Final release additions
+## Release 1.0.1
+
+1.0.1 changes, compared with 1.0.0: a sender fix (a Game Viewport Only name that had been sending alone kept being
+refused once a second name started), UE 5.9 support, the Async Receive fallback for 10-bit and float senders logged
+as information instead of a warning (with the receiver actor's Applied Settings showing the receive path in use), the
+automation tests and the build-input digest compiled only in test builds, and comment and documentation updates. The
+transfer paths, the defaults and the public API are unchanged. The changes were checked as follows, on one desktop
+(NVIDIA GeForce RTX 4090, Windows 11):
+
+- the complete automation suite, 177 tests including a new one for the sender fix, on every declared engine (UE 5.3
+  through 5.9), built from the release source with the test marker: all passed on every engine;
+- the new sender test on UE 5.8 against the same source without the fix: it fails there (the first name refused three
+  times and one frame published instead of four), so the test detects the defect;
+- the release archives are built by BuildPlugin without the test marker and pass the pipeline's archive checks, as
+  for 1.0.0.
+
+The packaged-host matrix, the performance runs and the soaks were not repeated for 1.0.1; their 1.0.0 results below
+stand for the code 1.0.1 did not change. UE 5.9 is UE 5.9.0 (changelist 60351404), an installed build without local
+changes; the other engines are those described for 1.0.0 below.
+
+## Final release additions (1.0.0)
 
 The final 1.0.0 release adds, to the qualified release-candidate code described under "Automated qualification of
 the release candidate" below: Game Viewport Only (now the default of the Spout Sender node), the drag-and-drop

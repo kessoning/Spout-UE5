@@ -47,6 +47,27 @@ plugin always uses Unreal's own copy. Nothing changes in how the plugin works. A
 Patreon, have been rebuilt with the fix. If you grabbed the plugin earlier this month, it keeps working as it is. You
 only need the new download if you compile the plugin yourself from its source.
 
+Mid-month I put out a small follow-up, version 1.0.1. Nothing big changes in how you use the plugin, it's mostly
+fixes and housekeeping, but a couple of them are worth knowing about.
+
+The main fix: if you had two Game Viewport Only senders and started the second one a bit later than the first, the
+first one quietly stopped sending. Both keep going now. I wrote a test that does exactly that, checked that it caught
+the problem on the old code, and it passes with the fix on every Unreal version.
+
+Unreal 5.9 is in. There's a download for it on GitHub next to the 5.3 to 5.8 ones. The only thing 5.9 complained about
+was a line in my own test code, not in the plugin itself.
+
+If you receive another Unreal's viewport with Async Receive on (the default), you used to get a yellow warning in the
+log, and it even called Async Receive "the prototype", which was a leftover from when I was building it. Async
+Receive only takes 8-bit pictures, and an Unreal viewport sends 10-bit ones, so those streams are received the
+regular way. That's how it's meant to work, so it's now a quiet information line instead. On the Spout Receiver
+actor, Applied Settings now tells you which way it's actually receiving, not just what you asked for.
+
+Behind the scenes: my own test suite no longer gets built into your editor when you use the plugin, so builds of your
+project carry a bit less. And I finally tracked down exactly which version of the Spout library the plugin ships
+with. It's the official Spout 2.007.017 release, identical down to the last byte. The newest Spout came out in
+October, and moving to it is on the list for the next bigger update.
+
 ## OCTOBER 2026 UPDATES
 
 This month is mostly groundwork. Two changes are on for everyone: the new way pictures travel between

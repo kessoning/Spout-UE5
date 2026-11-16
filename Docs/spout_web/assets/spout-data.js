@@ -11,7 +11,7 @@
 window.SPOUT = {};
 
 SPOUT.facts = {
-  version: "1.0.0",
+  version: "1.0.1",
   engine: "UE 5.3 - 5.8",
   module: "SpoutPlugin (Runtime)",
   platform: "Windows 64-bit",
@@ -212,7 +212,7 @@ SPOUT.troubleshooting = [
   { symptom: "Black texture from SceneCapture2D", fix: "Set Capture Source to Final Color (HDR) in Linear Working Color Space. Capture Source, exposure and output format must be qualified together." },
   { symptom: "Wrong colors or gamma", fix: "Adjust render target format and Capture Source; try RGBA8 sRGB first, then RGB10A2. 8-bit sources are published as _UNORM whatever their gamma, so set Color Space = Linear on the receiver (Unreal or external) for a Force Linear Gamma source." },
   { symptom: "Viewport stream too bright in Unreal", fix: "The GameViewport sender publishes display (sRGB-encoded) values in 10 bits, which Auto reads as linear. Set Color Space = sRGB on the receiving Unreal; an output render target must then be RGBA16f." },
-  { symptom: "Spout Demo Receiver: \"No sender detected\" for an sRGB render target", fix: "Fixed in 1.0.0. Earlier release candidates published 8-bit sRGB render targets as _UNORM_SRGB, which Spout 2.007's OpenGL receivers refuse; the sender now publishes plain _UNORM with unchanged bytes." },
+  { symptom: "Spout Demo Receiver: \"No sender detected\" for an sRGB render target", fix: "Fixed in the first stable release (1.0). Earlier release candidates published 8-bit sRGB render targets as _UNORM_SRGB, which Spout 2.007's OpenGL receivers refuse; the sender now publishes plain _UNORM with unchanged bytes." },
   { symptom: "Log: \"shared-texture access was unavailable\"", fix: "Another application still held the shared texture after the access wait (r.Spout.AccessWaitMs, default 2 ms). The sender skips that frame and publishes the next; the receiver copies the sender's newest frame on a later call. Throttled to one line per stream every 5 seconds; Get Spout Stream Status counts every miss. The wait applies to each attempt on the render thread, not to a frame, so several locked streams add up; r.Spout.AccessWaitMs 0 never waits (zero-wait acquisition only; other fixes stay active)." },
   { symptom: "Frames skip or repeat, no access misses", fix: "Sampling, not contention: the receiver reads once per Unreal frame and a sender at the same frame rate drifts in and out of alignment with it. r.Spout.AccessWaitMs does not change this; a higher Unreal frame rate reduces it but does not guarantee every frame. See Limitations." },
   { symptom: "Stream name mismatch", fix: "Use the exact external name from Spout Info. Local FName keys do not distinguish case." },

@@ -6,7 +6,7 @@ that document as a chapter. The included documents are the same pages shipped an
 manual and the documentation cannot say different things.
 
 - Plugin: SpoutPlugin (Spout Plugin)
-- Version: 1.0.0 (must match `SpoutPlugin.uplugin`; `Scripts/Validate-Documentation.ps1` fails the
+- Version: 1.0.1 (must match `SpoutPlugin.uplugin`; `Scripts/Validate-Documentation.ps1` fails the
   release when it does not)
 - Engine target: Unreal Engine 5.3 - 5.8 (Win64)
 - Modules: SpoutPlugin (Runtime), SpoutPluginShaders (Runtime), SpoutPluginEditor (Editor)
