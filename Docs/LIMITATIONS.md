@@ -196,7 +196,10 @@ the end of October 2026 it was an opt-in beta, off by default.
 - **Fallback is visible.** A session that asked for it runs synchronously, and says why in the log
   and in `GetSpoutStreamStatus` (`EffectiveReceiveMode`, `ReceiveModeNote`), when the sender's
   format is not BGRA8 or RGBA8, when the worker's device or resources cannot be created, or after
-  the worker failed. A later sender size, format or handle is tried again.
+  the worker failed. A sender format Async Receive does not take (a 10-bit Unreal viewport stream,
+  for example) is expected and logged as information; the other causes are warnings. The Spout
+  Receiver actor shows the receive path in use in its Applied Settings. A later sender size, format
+  or handle is tried again.
 - **Console variables.** `r.Spout.AsyncReceive` is retired: still registered, ignored, and it logs a
   warning when set to anything but 0. It selects nothing for any receiver.
   `r.Spout.AsyncReceive.GpuPriority` (default 0) is a diagnostic for Async Receive sessions.

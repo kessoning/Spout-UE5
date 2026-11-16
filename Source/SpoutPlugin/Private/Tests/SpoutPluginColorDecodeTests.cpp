@@ -528,7 +528,6 @@ bool FSpoutDecodeAsync::RunTest(const FString&)
 {
 	using namespace SpoutColorDecodeTests;
 	SpoutTestExpectations::ExpectLegacyWrapDiagnostic(*this);
-	AddExpectedMessage(TEXT("was requested but is not used"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	const FName Name = UniqueName(TEXT("Async"));
 	TStrongObjectPtr<UTextureRenderTarget2D> Source(NewTarget(Width, Height, PF_A2B10G10R10));
 	Upload(Source.Get());

@@ -176,6 +176,12 @@ public:
 	 */
 	static TUniquePtr<FSpoutAsyncStream> Create(const FName& Name, int32 InstrumentStream, FSpoutFrameSync& FrameSync, const FIdentity& Identity, EPixelFormat PixelFormat, FString& OutWhy);
 
+	/**
+	 * Whether Async Receive can take a sender of this format: the 8-bit BGRA8 and RGBA8 senders. Other formats (10-bit,
+	 * 16-bit float) are received synchronously, which is expected rather than a failure.
+	 */
+	static bool SupportsFormat(DXGI_FORMAT Format) { return Format == DXGI_FORMAT_B8G8R8A8_UNORM || Format == DXGI_FORMAT_R8G8B8A8_UNORM; }
+
 	/** Any thread. Stops the worker (it finishes a transfer in progress and releases access) and releases everything. */
 	virtual ~FSpoutAsyncStream();
 

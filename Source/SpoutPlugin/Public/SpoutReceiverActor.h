@@ -143,7 +143,10 @@ public:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "Spout|Status")
 	FIntPoint ReceivedSize = FIntPoint::ZeroValue;
 
-	/** The settings in effect for this stream, which can differ from the ones above when the stream is shared. */
+	/**
+	 * The settings in effect for this stream, which can differ from the ones above when the stream is shared, and the
+	 * receive path in use: a sender that Async Receive cannot take (10-bit or float) is received synchronously.
+	 */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "Spout|Status")
 	FString AppliedSettings;
 

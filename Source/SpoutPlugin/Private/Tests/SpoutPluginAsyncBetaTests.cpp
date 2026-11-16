@@ -433,7 +433,6 @@ bool FSpoutAsyncBetaCpuPath::RunTest(const FString&)
 
 	// A sender Async Receive refuses (RGBA16F): after the setting went to 0 and back, the note gives the refusal's own
 	// reason again, not the setting.
-	AddExpectedMessage(TEXT("was requested but is not used"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	const FName Half = AB::UniqueName(TEXT("CpuPathHalf"));
 	TStrongObjectPtr<UTextureRenderTarget2D> HalfSource(AB::MakeSource(32, 16, PF_FloatRGBA));
 	AB::FConsumer H;
@@ -630,7 +629,6 @@ bool FSpoutAsyncBetaFallback::RunTest(const FString&)
 {
 	namespace AB = SpoutAsyncBetaTests;
 	if (!AB::RequireSharedSlot(*this)) return false;
-	AddExpectedMessage(TEXT("was requested but is not used"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
 	const int32 WorkersBefore = FSpoutAsyncStream::GetLiveStreams();
 	const FName Name = AB::UniqueName(TEXT("Fallback"));
 	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;

@@ -549,9 +549,19 @@ namespace
 			{
 				Receiver.AsyncRefusedFor = Identity;
 				Receiver.bAsyncReceiveActive.store(false);
-				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive is not available for this sender: %s"), *Why));
-				UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive was requested but is not used (%s); the stream uses the synchronous path."),
-					*Receiver.Name.ToString(), *Why);
+				Receiver.SetAsyncReceiveNote(FString::Printf(TEXT("Async Receive is not available for this sender: %s."), *Why));
+				// A sender format Async Receive does not take is expected (an Unreal viewport stream is 10-bit) and is
+				// reported quietly; anything else is a failure worth a warning.
+				if (FSpoutAsyncStream::SupportsFormat(Identity.Format))
+				{
+					UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout receiver '%s': Async Receive was requested but is not used (%s); the stream uses the synchronous receive."),
+						*Receiver.Name.ToString(), *Why);
+				}
+				else
+				{
+					UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': Async Receive is not used because %s; the stream uses the synchronous receive."),
+						*Receiver.Name.ToString(), *Why);
+				}
 				return false;
 			}
 			Receiver.SetAsyncReceiveNote(FString());

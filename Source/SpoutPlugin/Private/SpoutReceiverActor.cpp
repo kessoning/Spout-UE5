@@ -48,6 +48,24 @@ namespace
 		}
 	}
 
+	/** The receive path this stream actually uses, which differs from the request when Async Receive cannot take the sender. */
+	FString DescribeReceiveMode(bool bAsyncRequested, const FSpoutStreamStatus& StreamStatus)
+	{
+		if (!bAsyncRequested)
+		{
+			return TEXT("Async Receive off");
+		}
+		if (StreamStatus.EffectiveReceiveMode == ESpoutReceiveMode::AsyncBeta)
+		{
+			return TEXT("Async Receive on");
+		}
+		if (!StreamStatus.ReceiveModeNote.IsEmpty())
+		{
+			return FString::Printf(TEXT("synchronous receive (%s)"), *StreamStatus.ReceiveModeNote);
+		}
+		return TEXT("Async Receive starting");
+	}
+
 	FString RequiredTargetFormat(EPixelFormat Format)
 	{
 		switch (Format)
@@ -392,7 +410,9 @@ void ASpoutReceiverActor::UpdateReceiving()
 			LastFrames = 0;
 			bSessionHasFrame = false;
 		}
-		const int64 Frames = USpoutBPFunctionLibrary::GetSpoutStreamStatus(Name, ESpoutType::Receiver).FramesSubmitted;
+		const FSpoutStreamStatus StreamStatus = USpoutBPFunctionLibrary::GetSpoutStreamStatus(Name, ESpoutType::Receiver);
+		AppliedSettings = FString::Printf(TEXT("Color Space %s, %s"), ColorSpaceName(UseColorSpace), *DescribeReceiveMode(bUseAsync, StreamStatus));
+		const int64 Frames = StreamStatus.FramesSubmitted;
 		if (Frames > LastFrames)
 		{
 			// A frame really arrived (the session's received-frame count advanced), not merely a request accepted.

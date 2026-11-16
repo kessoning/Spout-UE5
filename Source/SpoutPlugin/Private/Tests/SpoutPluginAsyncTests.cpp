@@ -224,7 +224,7 @@ bool FSpoutAsyncRefusals::RunTest(const FString&)
 	FlushRenderingCommands();
 
 	TestFalse(TEXT("an unsupported format is refused"), Unsupported->bMade);
-	TestEqual(TEXT("for its format"), Unsupported->Why, FString(TEXT("the prototype handles BGRA8 and RGBA8 senders only")));
+	TestTrue(TEXT("for its format"), Unsupported->Why.StartsWith(TEXT("it supports 8-bit senders (BGRA8 and RGBA8)")));
 	TestFalse(TEXT("a sender without a texture is refused"), NoTexture->bMade);
 	TestEqual(TEXT("for its null handle"), NoTexture->Why, FString(TEXT("the sender's shared texture handle is null")));
 	AddInfo(FString::Printf(TEXT("refused: '%s' and '%s'"), *Unsupported->Why, *NoTexture->Why));

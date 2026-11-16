@@ -11,6 +11,7 @@
 
 #if PLATFORM_WINDOWS
 
+#include "SpoutFormatPolicy.h"
 #include "SpoutFrameSync.h"
 #include "SpoutInstrument.h"
 #include "SpoutLimits.h"
@@ -337,9 +338,10 @@ bool FSpoutAsyncStream::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 		OutWhy = TEXT("the stream's access mutex is not open");
 		return false;
 	}
-	if (Identity.Format != DXGI_FORMAT_B8G8R8A8_UNORM && Identity.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+	if (!SupportsFormat(Identity.Format))
 	{
-		OutWhy = TEXT("the prototype handles BGRA8 and RGBA8 senders only");
+		OutWhy = FString::Printf(TEXT("it supports 8-bit senders (BGRA8 and RGBA8), and this sender is %s"),
+			*SpoutFormatPolicy::DescribeDxgiFormat(static_cast<uint32>(Identity.Format)));
 		return false;
 	}
 	// No texture can be opened from a null handle: refused before any slot memory is reserved and before the open.
