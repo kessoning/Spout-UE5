@@ -68,8 +68,9 @@ manually copy `Spout.dll` elsewhere.
 ## Enable the plugin
 
 A plugin in the project's `Plugins/` folder is enabled by default, so it is usually active once
-present. The descriptor inside the release archives does not set `EnabledByDefault`; if the
-plugin is installed into the engine instead (for example by Fab), enable it for each project.
+present. The repository's descriptor sets `EnabledByDefault`, but Unreal rewrites the descriptor
+when it packages a plugin, and the descriptor inside the release archives has no such entry. A
+copy installed into the engine (for example by Fab) may therefore need enabling in each project.
 To confirm: Edit > Plugins, search for "Spout Plugin", and verify it is enabled. Restart the
 editor if you change the state.
 

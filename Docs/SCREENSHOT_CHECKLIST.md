@@ -14,12 +14,12 @@ Filenames and what each must show:
 
 | ID | Filename | Must show |
 |---|---|---|
-| SP-001 | `SP-001_plugin-enabled.png` | Edit > Plugins with "Spout" searched; the Spout Plugin tile, its ticked enabled checkbox, and the Rendering category. Include the Beta label if shown. |
+| SP-001 | `SP-001_plugin-enabled.png` | Edit > Plugins with "Spout" searched; the Spout Plugin tile, its ticked enabled checkbox, the Rendering category and the version number. |
 | SP-002 | `SP-002_rhi-directx12.png` | Project Settings > Platforms > Windows; the Default RHI dropdown set to DirectX 12. |
-| SP-003 | `SP-003_plugin-folder.png` | File Explorer at MyProject/Plugins/SpoutPlugin/ showing Binaries, Content, Resources, Source, ThirdParty, and SpoutPlugin.uplugin. |
+| SP-003 | `SP-003_plugin-folder.png` | File Explorer at MyProject/Plugins/SpoutPlugin/ showing Binaries, Config, Content, Docs, Resources, Shaders, Source and SpoutPlugin.uplugin; the Spout SDK is under Source/ThirdParty. |
 | SP-004 | `SP-004_spout-dll-binaries.png` | File Explorer at Plugins/SpoutPlugin/Binaries/Win64/ with both Spout.dll and UnrealEditor-SpoutPlugin.dll visible. |
 | SP-017 | `SP-017_add-sender-node.png` | Blueprint context menu (right-click) with "Spout Sender" searched, showing the node under the Spout category before placing. |
-| SP-005 | `SP-005_sender-viewport-graph.png` | Event Tick -> Spout Sender; Spout Name = UnrealViewport; Send Texture From = GameViewport; Texture Render Target 2D empty. Pin text legible. |
+| SP-005 | `SP-005_sender-viewport-graph.png` | Event Tick -> Spout Sender; Spout Name = UnrealViewport; Send Texture From = Game Viewport Only (the default); Texture Render Target 2D empty. Pin text legible. |
 | SP-018 | `SP-018_timer-setup.png` | Set Timer by Event (or by Function Name) calling the function that runs Spout Sender; Time = 0.033, Looping = true; bound event/function name visible. |
 | SP-006 | `SP-006_sender-rendertarget-graph.png` | Event Tick -> Spout Sender; Send Texture From = TextureRenderTarget2D; the render target reference and Spout Name visible. |
 | SP-007 | `SP-007_scenecapture-source.png` | SceneCapture2D Details > Capture Source dropdown showing "Final Color (HDR) in Linear Working Color Space". Highest-priority figure. |
