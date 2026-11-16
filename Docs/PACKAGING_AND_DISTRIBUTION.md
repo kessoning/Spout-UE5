@@ -69,14 +69,14 @@ the download smaller.
 ## Building releases (RunUAT)
 
 Releases are produced with `RunUAT BuildPlugin` per engine version. The repository's `build.ps1`
-loops over engine versions 5.3 through 5.8, runs:
+loops over engine versions 5.3 through 5.9, runs:
 
 ```
 RunUAT BuildPlugin -Plugin="<...>/SpoutPlugin.uplugin" -Package="<out>" -TargetPlatforms=Win64 -Rocket
 ```
 
 then strips `.pdb` files and zips a `SpoutPlugin/` folder per version (for example
-`SpoutPlugin_1.0.0_UE5.7_Win64.zip`). `build.bat` is a one-line launcher for `build.ps1`.
+`SpoutPlugin_1.0.1_UE5.7_Win64.zip`). `build.bat` is a one-line launcher for `build.ps1`.
 
 `Intermediate/Build` is kept in the zips on purpose (since 0.0.9). `BuildPlugin` emits
 precompiled `UnrealGame` Development and Shipping objects, generated headers and `.precompiled`
@@ -136,7 +136,7 @@ per engine version and label it clearly.
 
 ## Engine version matching
 
-- Tested across UE 5.3 to 5.8 (Win64).
+- Tested across UE 5.3 to 5.9 (Win64).
 - Distribute a separate build per engine version. Users must download the build matching their
   exact engine.
 

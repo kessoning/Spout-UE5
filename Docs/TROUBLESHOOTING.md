@@ -6,7 +6,7 @@ Work top to bottom within each section. The plugin logs to the `LogSpoutPlugin` 
 ## Plugin does not compile
 
 - Confirm the plugin is in the project `Plugins/` folder, not the engine plugins folder.
-- Confirm you are on a supported engine (5.3 to 5.8) and have Visual Studio 2022 with the C++
+- Confirm you are on a supported engine (5.3 to 5.9) and have Visual Studio 2022 with the C++
   toolchain and a matching Windows SDK.
 - Regenerate Visual Studio project files, then rebuild.
 - After an engine upgrade, clean first: delete `Project/Binaries`, `Project/Intermediate`,

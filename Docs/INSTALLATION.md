@@ -16,7 +16,7 @@ Three tasks have different requirements:
 ## Requirements
 
 - Windows 64-bit.
-- Unreal Engine 5 (5.3 through 5.8).
+- Unreal Engine 5 (5.3 through 5.9).
 - The project must run on the DirectX 12 RHI. The plugin creates a D3D11-on-D3D12 interop
   device and logs `SpoutPlugin requires DX12 RHI.` and stops if the active RHI is not D3D12.
 - For source builds and for packaging: Visual Studio 2022 with the C++ workload and toolchain and

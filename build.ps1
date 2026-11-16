@@ -95,7 +95,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 # The engine matrix this plugin declares support for. -FullMatrix requires all of them.
-$DeclaredEngineVersions = @('5.3', '5.4', '5.5', '5.6', '5.7', '5.8')
+$DeclaredEngineVersions = @('5.3', '5.4', '5.5', '5.6', '5.7', '5.8', '5.9')
 
 # Target configurations produced by a single "RunUAT BuildPlugin -Rocket" invocation.
 $TargetConfigurations = @(

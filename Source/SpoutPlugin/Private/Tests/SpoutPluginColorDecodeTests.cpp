@@ -419,7 +419,7 @@ bool FSpoutDecodeRendered::RunTest(const FString&)
 			const FColor& P = Shown.Bytes[Y * Width + X];
 			// sRGB: the source's own display value. Auto reads the codes as linear light, so they show encoded again:
 			// brighter. That is what sRGB exists for; Auto's result is checked here as well.
-			auto Want = [bDecoded](uint32 Code) { return bDecoded ? FMath::RoundToInt(Code * 255.0 / 1023.0) : FMath::RoundToInt(255.0 * Encode(Code / 1023.0)); };
+			auto Want = [bDecoded](uint32 Code) -> int32 { return int32(bDecoded ? FMath::RoundToInt(Code * 255.0 / 1023.0) : FMath::RoundToInt(255.0 * Encode(Code / 1023.0))); };
 			const int32 Diff = FMath::Max3(FMath::Abs(int32(P.R) - Want(C.R)), FMath::Abs(int32(P.G) - Want(C.G)), FMath::Abs(int32(P.B) - Want(C.B)));
 			WorstDiff = FMath::Max(WorstDiff, Diff);
 			if (Diff > 1 && Misses++ == 0)

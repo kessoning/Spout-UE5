@@ -10,7 +10,7 @@ accepted work, not proof that a foreign application displayed a frame.
   sharing are outside this plugin's contract. Multi-GPU selection is controlled by the applications.
 - Device removal requires an application restart. The plugin does not rebuild Unreal's RHI or
   promise automatic recovery from driver resets. Native errors and device reasons appear in logs.
-- Supported source/API range is UE 5.3 through 5.8. Match the plugin binary to the exact engine
+- Supported source/API range is UE 5.3 through 5.9. Match the plugin binary to the exact engine
   build; a declared range is not evidence that every release archive has passed qualification.
 
 ## Interop path

@@ -31,7 +31,7 @@ Set-StrictMode -Version Latest
 
 # The engine matrix the plugin declares support for. Kept identical to build.ps1's
 # $DeclaredEngineVersions; Validate-Documentation.ps1 asserts they have not drifted apart.
-$script:DeclaredEngineVersions = @('5.3', '5.4', '5.5', '5.6', '5.7', '5.8')
+$script:DeclaredEngineVersions = @('5.3', '5.4', '5.5', '5.6', '5.7', '5.8', '5.9')
 
 $script:PluginName = 'SpoutPlugin'
 $script:HostProjectName = 'SpoutHostTest'

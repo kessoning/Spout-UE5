@@ -59,7 +59,7 @@ It does not apply gamma or colour correction when sending.
 ## Requirements
 
 - Windows 64-bit.
-- Unreal Engine 5.3 to 5.8. Each prebuilt archive matches exactly one engine version. On Fab the plugin is listed
+- Unreal Engine 5.3 to 5.9. Each prebuilt archive matches exactly one engine version. On Fab the plugin is listed
   for the engine versions Fab offers.
 - The DirectX 12 RHI. The plugin does not initialize on any other RHI; it logs `SpoutPlugin requires DX12 RHI.`
   and stops.
