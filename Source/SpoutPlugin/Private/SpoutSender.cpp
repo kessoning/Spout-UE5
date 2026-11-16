@@ -467,6 +467,18 @@ namespace
 		return true;
 	}
 
+	/** Render thread. Whether the token's name already publishes through its asynchronous sender. */
+	bool UsesAsyncSend(const FSpoutStreamToken& Token)
+	{
+		bool bAsync = false;
+		FSpoutSession::Get().ExecuteIfCurrent(Token, [&]()
+		{
+			const TSharedPtr<FSpoutSharedSender> Sender = FSpoutSenderRegistry::Get().Find(Token.Name, ESpoutType::Sender);
+			bAsync = Sender && Sender->AsyncSendMode == 1;
+		});
+		return bAsync;
+	}
+
 	void SendTextureOnRenderThread(
 		TConstArrayView<FSpoutStreamToken> Tokens,
 		const FTextureRHIRef& SourceRHI,
@@ -579,14 +591,32 @@ namespace
 			return;
 		}
 
-		// The asynchronous send (r.Spout.Dev.AsyncSend, 1 by default): a render-target send (always one name) may go to the entry's
+		// The asynchronous send (r.Spout.Dev.AsyncSend, 1 by default): a render-target send of one name may go to the entry's
 		// asynchronous sender, which installs the texture and registration on its own worker. With the switch off and no
 		// asynchronous sender alive, nothing of this runs.
-		if (!bIsViewport && SpoutInterop::IsSharedSlot() && LiveTokens.Num() == 1
-			&& (SpoutLimits::DevAsyncSend() || FSpoutAsyncSendStream::GetLiveStreams() > 0)
-			&& SendThroughAsyncStream(LiveTokens[0], SourceRHI, RHICmdList, Format, Origin))
+		if (!bIsViewport && SpoutInterop::IsSharedSlot() && (SpoutLimits::DevAsyncSend() || FSpoutAsyncSendStream::GetLiveStreams() > 0))
 		{
-			return;
+			if (LiveTokens.Num() == 1)
+			{
+				if (SendThroughAsyncStream(LiveTokens[0], SourceRHI, RHICmdList, Format, Origin))
+				{
+					return;
+				}
+			}
+			else
+			{
+				// Several Game Viewport Only names publish the same image. A name that already publishes through its
+				// asynchronous sender (it was sent alone before) stays with it, so it is never refused for the
+				// synchronous send below; the other names share that synchronous send.
+				LiveTokens.RemoveAll([&](const FSpoutStreamToken& Token)
+				{
+					return UsesAsyncSend(Token) && SendThroughAsyncStream(Token, SourceRHI, RHICmdList, Format, Origin);
+				});
+				if (LiveTokens.Num() == 0)
+				{
+					return;
+				}
+			}
 		}
 
 		// Resolve every destination BEFORE anything with a GPU cost. Shared-texture creation and
@@ -1743,6 +1773,37 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 
 	return true;
 }
+
+#if SPOUT_WITH_TESTS
+bool FSpoutSender::SendBatchForTesting(TConstArrayView<FName> SpoutNames, UTextureRenderTarget2D* Source)
+{
+	check(IsInGameThread());
+	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+	if (!FSpoutSession::Get().IsRunning()) return false;
+	Context.InitializeIfNeeded();
+	FSpoutSendSource SendSource;
+	if (!Context.IsSpoutAvailable() || !BuildSendSource(ESpoutSendTextureFrom::TextureRenderTarget2D, Source, SendSource))
+	{
+		return false;
+	}
+	TArray<FSpoutStreamToken> Tokens;
+	for (const FName& SpoutName : SpoutNames)
+	{
+		const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Sender);
+		if (!Token.IsSet()) return false;
+		Tokens.Add(Token);
+	}
+	ENQUEUE_RENDER_COMMAND(SpoutSenderBatchForTesting)(
+		[Tokens = MoveTemp(Tokens), SendSource](FRHICommandListImmediate& RHICmdList)
+		{
+			if (SendSource.Resource)
+			{
+				SendTextureOnRenderThread(Tokens, SendSource.Resource->GetRenderTargetTexture(), false, RHICmdList, nullptr, nullptr, nullptr);
+			}
+		});
+	return true;
+}
+#endif
 
 void FSpoutSender::Close(FName SpoutName)
 {

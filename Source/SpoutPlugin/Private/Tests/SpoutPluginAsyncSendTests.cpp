@@ -14,7 +14,8 @@
 //   resize       a new identity with work outstanding; a budget refusal is retried, not latched
 //   failures     a fill that does not finish, a failed drain signal (access held until the query proves the copy),
 //                a long native copy, a refused installation, a stream that cannot start
-//   streams      two senders with one blocked; Unreal receiving its own asynchronous send
+//   streams      two senders with one blocked; a name sent alone keeps its sender when a second name joins it in one
+//                batch (two Game Viewport Only senders); Unreal receiving its own asynchronous send
 //   frame end    r.Spout.Dev.AsyncSend.DrainAfter 1, with and without a frame end
 //   outcome log  r.Spout.Dev.AsyncSend.OutcomeLog: one row per frame and per refused send, reconciled with the stream's
 //                summary row and its counters; ordered, contiguous and timestamped; its wake event outlives every flush
@@ -30,6 +31,7 @@
 #include "SpoutD3DContext.h"
 #include "SpoutFrameSync.h"
 #include "SpoutLimits.h"
+#include "SpoutSender.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutSharedSlot.h"
 #include "Engine/Texture2D.h"
@@ -889,6 +891,49 @@ bool FSpoutAsyncSendTwoSenders::RunTest(const FString&)
 	R.Close(B);
 	AS::CloseSender(A);
 	AS::CloseSender(B);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendJoinedBatch, "SpoutPlugin.AsyncSend.ANameSentAloneKeepsItsSenderWhenASecondNameJoins", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendJoinedBatch::RunTest(const FString&)
+{
+	// Two Game Viewport Only senders started at different times: the first publishes alone through its asynchronous
+	// sender, then both names are published from one image in each batch. The first name keeps publishing; it is not
+	// refused as a second source of its own name.
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	const FName First = AS::UniqueName(TEXT("First"));
+	const FName Second = AS::UniqueName(TEXT("Second"));
+	TStrongObjectPtr<UTextureRenderTarget2D> Source(AS::MakeSource(64, 32));
+	AS::Upload(Source.Get(), 1);
+	TestTrue(TEXT("the first name, sent alone, is accepted"), AS::Send(First, Source.Get()));
+	const TSharedPtr<FSpoutSharedSender> E = AS::SenderEntry(First);
+	if (!TestTrue(TEXT("and publishes through its asynchronous sender"), E.IsValid() && AS::Stream(First).IsValid()))
+	{
+		AS::CloseSender(First);
+		return false;
+	}
+	TestEqual(TEXT("its first frame is published"), AS::Stats(First).Published(), int64(1));
+
+	const TArray<FName> Both = { First, Second };
+	for (int32 Frame = 2; Frame <= 4; ++Frame)
+	{
+		AS::Upload(Source.Get(), Frame);
+		TestTrue(FString::Printf(TEXT("batch %d is queued"), Frame), FSpoutSender::SendBatchForTesting(Both, Source.Get()));
+		FlushRenderingCommands();
+	}
+	TestEqual(TEXT("no send to the first name was refused"), E->RefusedSynchronousSends.load(), int64(0));
+	TestEqual(TEXT("the first name published every batch through its asynchronous sender"), AS::Stats(First).Published(), int64(4));
+	AS::CheckIdentity(*this, First, TEXT("after the batches"));
+	AS::FReceiver FirstReceiver;
+	TestTrue(TEXT("the first name's image arrives exactly"), FirstReceiver.ReceiveExact(First, Source.Get()));
+	FirstReceiver.Close(First);
+	AS::FReceiver SecondReceiver;
+	TestTrue(TEXT("the second name's image arrives exactly"), SecondReceiver.ReceiveExact(Second, Source.Get()));
+	SecondReceiver.Close(Second);
+	AS::CloseSender(First);
+	AS::CloseSender(Second);
 	return true;
 }
 

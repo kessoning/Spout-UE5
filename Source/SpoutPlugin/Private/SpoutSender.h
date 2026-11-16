@@ -56,4 +56,12 @@ public:
 	 * before it: the wraps are used by commands that may still be queued at detach time.
 	 */
 	static void ReleaseNativeResources();
+
+#if SPOUT_WITH_TESTS
+	/**
+	 * Tests only: publishes one render target to several names in a single batch, the way the Game Viewport Only sender
+	 * publishes its image to every name queued for one present. False when nothing was queued.
+	 */
+	static bool SendBatchForTesting(TConstArrayView<FName> SpoutNames, UTextureRenderTarget2D* Source);
+#endif
 };
