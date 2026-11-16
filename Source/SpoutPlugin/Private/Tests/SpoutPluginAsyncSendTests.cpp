@@ -22,7 +22,7 @@
 //
 // Nothing here is a performance statement.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "Async/Async.h"
 #include "SpoutAsyncSend.h"
 #include "SpoutAsyncReceive.h"
@@ -1724,4 +1724,4 @@ bool FSpoutAsyncSendBetaLateCopy::RunTest(const FString&)
 	return true;
 }
 
-#endif // WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#endif // SPOUT_WITH_TESTS && PLATFORM_WINDOWS

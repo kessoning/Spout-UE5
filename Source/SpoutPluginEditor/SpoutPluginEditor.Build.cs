@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
+using System.IO;
 using UnrealBuildTool;
 
 /**
@@ -26,5 +27,14 @@ public class SpoutPluginEditor : ModuleRules
             "Projects",
             "SpoutPlugin"
         });
+
+        // The editor tests compile only with the plugin's test marker, as in the SpoutPlugin module.
+        string testsMarker = Path.Combine(ModuleDirectory, "..", "..", "SpoutTests.enable");
+        bool bTests = File.Exists(testsMarker);
+        if (bTests)
+        {
+            ExternalDependencies.Add(Path.GetFullPath(testsMarker));
+        }
+        PrivateDefinitions.Add("SPOUT_WITH_TESTS=" + (bTests ? "WITH_DEV_AUTOMATION_TESTS" : "0"));
     }
 }

@@ -23,11 +23,11 @@
  *     calls SetMaxSenders with an accepted value, because that writes a persistent limit to the
  *     machine; only its rejection paths, which return before touching Spout, are exercised.
  *
- * Compiled only when WITH_DEV_AUTOMATION_TESTS is set, so none of this ships in a Shipping build.
+ * Compiled only in the plugin's test builds (SPOUT_WITH_TESTS), so none of this ships.
  */
 #include "Misc/AutomationTest.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutFormatPolicy.h"
@@ -3424,4 +3424,4 @@ bool FSpoutColorSpaceUnsupportedFormatTest::RunTest(const FString& Parameters)
 
 #undef SPOUT_TEST_FLAGS
 
-#endif // WITH_DEV_AUTOMATION_TESTS
+#endif // SPOUT_WITH_TESTS

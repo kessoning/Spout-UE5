@@ -17,7 +17,7 @@
 // Each logs exactly one line "Spout T1 result: check=<name> outcome=<PASS|FAIL> ..." and one "Spout T1 failure:" line
 // per failed condition, for a log analyzer to read; a missing result line is missing evidence.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutD3DContext.h"
 #include "SpoutDebugCapture.h"

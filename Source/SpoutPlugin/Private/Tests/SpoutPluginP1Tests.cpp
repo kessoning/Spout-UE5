@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Giovanni Muzio (Kesson)
 // SPDX-License-Identifier: MIT
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutReceiver.h"
 #include "SpoutReceiverOwnership.h"

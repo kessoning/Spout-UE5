@@ -4,7 +4,7 @@
 function Get-TrackDSourceIdentity {
     param([Parameter(Mandatory)][string]$Root, [ValidateSet('Plugin','Host')][string]$Kind = 'Plugin')
     $rootPath = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\','/')
-    $dirs = if ($Kind -eq 'Plugin') { @('Source','ThirdParty','Content','Config','Shaders','Resources') } else { @('Source','Config') }
+    $dirs = if ($Kind -eq 'Plugin') { @('Source','Content','Config','Shaders','Resources') } else { @('Source','Config') }
     $descriptor = if ($Kind -eq 'Plugin') { 'SpoutPlugin.uplugin' } else { 'SpoutHostTest.uproject' }
     $paths = @($descriptor)
     foreach ($dir in $dirs) {

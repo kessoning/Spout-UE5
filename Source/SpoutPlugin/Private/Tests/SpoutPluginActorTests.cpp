@@ -5,7 +5,7 @@
 // Ownership rules of the placeable Spout Sender / Spout Receiver actors, against the real registry and ownership
 // tracker. Sessions are set up directly (no external sender is needed): the rules under test are the release decisions.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutActorSupport.h"
 #include "SpoutReceiver.h"
 #include "SpoutReceiverActor.h"

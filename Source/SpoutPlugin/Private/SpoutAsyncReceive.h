@@ -111,7 +111,7 @@ public:
 	/** Turns the asynchronous path off for the process (device removed, a failed fence or handle call). */
 	void Disable(const TCHAR* Why, HRESULT Result);
 	bool IsDisabled() const { return bDisabled.load(); }
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	/** Tests only: undoes Disable after an injected failure, while the device itself still exists and is not removed. */
 	void ReenableForTest();
 #endif
@@ -300,7 +300,7 @@ private:
 	std::atomic<double> WorkerSeconds{0.0};
 };
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 /**
  * Failure injection for the automation tests, taken by the asynchronous receive's worker only (the shared-slot hooks of
  * SpoutSharedSlot.h are taken by whichever native wait comes next, which in a test with the plugin's own sender can be

@@ -21,33 +21,57 @@ public class SpoutPlugin : ModuleRules
         get { return Path.GetFullPath(Path.Combine(ModulePath, "Source", "ThirdParty/")); }
     }
 
-    public SpoutPlugin(ReadOnlyTargetRules Target) : base(Target)
+    /**
+     * The digest of every plugin input (sources, SDK, content, configuration, shaders, resources and the descriptor),
+     * in a fixed order, so the test host can tell which files a binary was built from. Each file is registered with
+     * UBT, so a cached makefile cannot keep an older digest after an edit. A file that cannot be read gives
+     * "unidentified" rather than a failed build.
+     */
+    private string ComputeSourceIdentity()
     {
-        PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-        // Every compiled binary carries the digest of its actual staged inputs. Register each
-        // file with UBT so a cached rules/makefile cannot retain an older digest after an edit.
-        var identityFiles = new[] { "Source", "ThirdParty", "Content", "Config", "Shaders", "Resources" }
-            .SelectMany(dir => Directory.Exists(Path.Combine(ModulePath, dir))
-                ? Directory.GetFiles(Path.Combine(ModulePath, dir), "*", SearchOption.AllDirectories) : new string[0])
-            .Concat(new[] { Path.Combine(ModulePath, "SpoutPlugin.uplugin") })
-            .OrderBy(file => Path.GetRelativePath(ModulePath, file).Replace('\\', '/'), StringComparer.Ordinal).ToArray();
-        // UE 5.3 omits Cryptography.Primitives from rules references. Resolve the platform SHA256
-        // static method at runtime, without changing engine assemblies or implementing cryptography.
-
+        try
         {
+            var identityFiles = new[] { "Source", "Content", "Config", "Shaders", "Resources" }
+                .SelectMany(dir => Directory.Exists(Path.Combine(ModulePath, dir))
+                    ? Directory.GetFiles(Path.Combine(ModulePath, dir), "*", SearchOption.AllDirectories) : new string[0])
+                .Concat(new[] { Path.Combine(ModulePath, "SpoutPlugin.uplugin") })
+                .OrderBy(file => Path.GetRelativePath(ModulePath, file).Replace('\\', '/'), StringComparer.Ordinal).ToArray();
+            // UE 5.3 leaves Cryptography.Primitives out of the rules references, so SHA256.HashData is resolved at run time.
             var hashMethod = System.Type.GetType("System.Security.Cryptography.SHA256, System.Security.Cryptography.Algorithms", true)
                 .GetMethod("HashData", new[] { typeof(byte[]) });
-            Func<byte[], byte[]> hash = data => (byte[])hashMethod.Invoke(null, new object[] { data });
+            Func<byte[], string> hash = data => BitConverter.ToString((byte[])hashMethod.Invoke(null, new object[] { data }))
+                .Replace("-", "").ToLowerInvariant();
             var canonical = new StringBuilder();
             foreach (var file in identityFiles)
             {
                 ExternalDependencies.Add(file);
                 canonical.Append(Path.GetRelativePath(ModulePath, file).Replace('\\', '/')).Append('\t')
-                    .Append(BitConverter.ToString(hash(File.ReadAllBytes(file))).Replace("-", "").ToLowerInvariant()).Append('\n');
+                    .Append(hash(File.ReadAllBytes(file))).Append('\n');
             }
-            string digest = BitConverter.ToString(hash(Encoding.UTF8.GetBytes(canonical.ToString()))).Replace("-", "").ToLowerInvariant();
-            PrivateDefinitions.Add("SPOUT_BUILD_SOURCE_ID=\"" + digest + "\"");
+            return hash(Encoding.UTF8.GetBytes(canonical.ToString()));
         }
+        catch (Exception)
+        {
+            return "unidentified";
+        }
+    }
+
+    public SpoutPlugin(ReadOnlyTargetRules Target) : base(Target)
+    {
+        PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+        // The plugin's own test builds only. With the marker file SpoutTests.enable in the plugin's root folder,
+        // editor and development builds compile the automation tests, their hooks and the development console
+        // commands, and every binary records the digest of the plugin files it was built from, which the test host
+        // compares with the files it installed. Without the marker, which is how the plugin ships, none of this is
+        // compiled and the build reads only the files it compiles.
+        string testsMarker = Path.Combine(ModulePath, "SpoutTests.enable");
+        bool bTests = File.Exists(testsMarker);
+        if (bTests)
+        {
+            ExternalDependencies.Add(testsMarker);
+        }
+        PrivateDefinitions.Add("SPOUT_WITH_TESTS=" + (bTests ? "WITH_DEV_AUTOMATION_TESTS" : "0"));
+        PrivateDefinitions.Add("SPOUT_BUILD_SOURCE_ID=\"" + (bTests ? ComputeSourceIdentity() : "unidentified") + "\"");
 
         // Instrumented builds only. The marker file sits in the plugin's root folder, outside every
         // directory hashed above and outside the declared release inputs, so the source identity of
@@ -103,9 +127,9 @@ public class SpoutPlugin : ModuleRules
             // "SpoutPluginShaders" decodes 10-bit frames received with Color Space = sRGB (SpoutColorDecode.h).
             "ApplicationCore", "Slate", "SlateCore", "Projects", "SpoutPluginShaders"
         });
-        if (Target.bBuildEditor)
+        if (Target.bBuildEditor && bTests)
         {
-            // Compile and execute the public Blueprint node in editor automation.
+            // The editor tests compile and execute the public Blueprint nodes.
             PrivateDependencyModuleNames.AddRange(new[] { "UnrealEd", "BlueprintGraph", "KismetCompiler" });
         }
 

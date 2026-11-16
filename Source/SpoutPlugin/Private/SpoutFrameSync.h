@@ -351,7 +351,7 @@ public:
 	 */
 	void GetPredictorReadState(int64& OutReads, double& OutReadIntervalSeconds, int64& OutSuspendedReadsLeft, int64& OutReadsUntilProbe, int64& OutProbes) const;
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	/**
 	 * Tests only: the clock this object reads instead of QPC seconds; an empty function restores QPC.
 	 * The wait's spin reads it on every iteration, so a test clock must move forward on every call
@@ -424,7 +424,7 @@ private:
 	std::atomic<int64> FrameWaitAttempts{0};
 	std::atomic<int64> FrameWaitPublished{0};
 	std::atomic<int64> FrameWaitTimedOut{0};
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	/** Set only by tests, before the object is used; empty means QPC. */
 	TFunction<double()> ClockForTests;
 #endif

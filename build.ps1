@@ -929,7 +929,7 @@ try
         # checkout can copy generated evidence (including output inside the checkout) recursively.
         $cleanBuildSource = Join-Path ([IO.Path]::GetFullPath($OutputRoot)) ('source-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $cleanBuildSource -Force | Out-Null
-        foreach ($item in @('Source','ThirdParty','Content','Config','Shaders','Resources','SpoutPlugin.uplugin','README.md','LICENSE','THIRD_PARTY_NOTICES.md')) {
+        foreach ($item in @('Source','Content','Config','Shaders','Resources','SpoutPlugin.uplugin','README.md','LICENSE','THIRD_PARTY_NOTICES.md')) {
             $sourcePath = Join-Path $PluginRoot $item
             if (Test-Path -LiteralPath $sourcePath) { Copy-Item -LiteralPath $sourcePath -Destination $cleanBuildSource -Recurse -Force }
         }

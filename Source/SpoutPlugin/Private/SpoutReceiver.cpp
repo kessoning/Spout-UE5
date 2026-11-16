@@ -59,7 +59,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	TAtomic<bool> GFailNextCpuReadback{false};
 #endif
 	void CopyReceivedFrame(FRHICommandListImmediate& Cmd, FRHITexture* Source, FRHITexture* Destination, bool bAfterCpuUpload = false)
@@ -1149,7 +1149,7 @@ namespace
 		FScopeLock MapLock(&ContextMutex);
 		D3D11_MAPPED_SUBRESOURCE Mapped = {};
 		HRESULT MapResult;
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 		if (GFailNextCpuReadback.Exchange(false)) MapResult = E_FAIL;
 		else
 #endif
@@ -1206,7 +1206,7 @@ namespace
 	}
 }
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 void SpoutReceiverInternal::FailNextCpuReadbackForTests() { GFailNextCpuReadback.Store(true); }
 #endif
 

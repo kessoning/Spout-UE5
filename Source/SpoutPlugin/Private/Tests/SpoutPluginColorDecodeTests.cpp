@@ -17,7 +17,7 @@
 //   async        Async Receive asked for on a 10-bit sender falls back to the synchronous path and decodes
 //   controls     sRGB on float is refused; sRGB on 8-bit is the sampler's decode
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutColorDecode.h"
 #include "SpoutSenderRegistry.h"

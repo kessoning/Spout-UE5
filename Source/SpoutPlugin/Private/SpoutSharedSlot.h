@@ -158,7 +158,7 @@ public:
 
 	FStats GetStats() const;
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	/** Tests only: drops every record without a proof. Valid only for records holding no object a GPU uses. */
 	void DiscardForTest();
 #endif
@@ -365,7 +365,7 @@ private:
  */
 void SpoutRetireUnprovenTexture(Microsoft::WRL::ComPtr<ID3D11Texture2D>&& Texture, const FString& What);
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 /** Failure injection for the automation tests. Each counter makes that many next events take the failure branch. */
 namespace SpoutSlotTestHooks
 {

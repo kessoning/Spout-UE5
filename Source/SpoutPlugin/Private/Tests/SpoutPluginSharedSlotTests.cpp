@@ -22,7 +22,7 @@
 // switch r.Spout.Dev.AsyncSend to 0 for their duration and check that their sender took the synchronous path, so they
 // mean the same thing whatever the process's setting (the asynchronous sender has its own tests).
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutAsyncReceive.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutD3DContext.h"

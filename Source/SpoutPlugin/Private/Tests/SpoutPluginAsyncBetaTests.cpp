@@ -21,7 +21,7 @@
 //
 // Nothing here is a performance statement.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutAsyncReceive.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutFrameSync.h"

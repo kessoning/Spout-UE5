@@ -25,11 +25,11 @@
  * Everything here runs unattended in a commandlet, needs no external Spout process, and mutates no
  * machine-global state.
  *
- * Compiled only when WITH_DEV_AUTOMATION_TESTS is set, so none of it ships in a Shipping build.
+ * Compiled only in the plugin's test builds (SPOUT_WITH_TESTS), so none of it ships.
  */
 #include "Misc/AutomationTest.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutReceiverOwnership.h"
@@ -443,4 +443,4 @@ bool FSpoutTrackDRepeatedReceiverOwnershipTest::RunTest(const FString& Parameter
 
 #undef SPOUT_TRACKD_TEST_FLAGS
 
-#endif // WITH_DEV_AUTOMATION_TESTS
+#endif // SPOUT_WITH_TESTS

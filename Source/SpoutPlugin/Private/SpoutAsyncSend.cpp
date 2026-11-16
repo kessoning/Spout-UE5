@@ -99,7 +99,7 @@ namespace
 	ComPtr<ID3D12Fence> GFrameEndFence;
 	uint64 GFrameEndSignalled = 0;
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	bool TakeHook(std::atomic<int32>& Counter)
 	{
 		int32 Left = Counter.load();
@@ -145,7 +145,7 @@ namespace
 		}
 	}
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	/** Set by SpoutAsyncSendTestHooks::RequestOutcomeLogFlushHolding for its own request: how long it holds Mutex. */
 	thread_local int32 GHoldThisFlushRequestMs = 0;
 #endif
@@ -215,7 +215,7 @@ namespace
 				if (!Wake)
 				{
 					FEvent* Event = FPlatformProcess::GetSynchEventFromPool(false);
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 					SpoutAsyncSendTestHooks::OutcomeLogEventsTaken.fetch_add(1);
 #endif
 					FScopeLock Lock(&Mutex);
@@ -258,7 +258,7 @@ namespace
 				delete Thread;
 				Thread = nullptr;
 			}
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 			if (SpoutAsyncSendTestHooks::OnOutcomeLogWriterJoined)
 			{
 				SpoutAsyncSendTestHooks::OnOutcomeLogWriterJoined();
@@ -284,7 +284,7 @@ namespace
 			if (Retired)
 			{
 				FPlatformProcess::ReturnSynchEventToPool(Retired);
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 				SpoutAsyncSendTestHooks::OutcomeLogEventsReturned.fetch_add(1);
 #endif
 			}
@@ -298,7 +298,7 @@ namespace
 			{
 				return;
 			}
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 			if (GHoldThisFlushRequestMs > 0)
 			{
 				SpoutAsyncSendTestHooks::FlushRequestsHolding.fetch_add(1);
@@ -307,12 +307,12 @@ namespace
 			}
 #endif
 			Wake->Trigger();
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 			SpoutAsyncSendTestHooks::FlushRequestsTriggered.fetch_add(1);
 #endif
 		}
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 		SpoutAsyncSendTestHooks::FOutcomeLogState GetStateForTest()
 		{
 			check(IsInGameThread());
@@ -506,7 +506,7 @@ bool FSpoutAsyncSendStream::Initialize(FString& OutWhy)
 		OutWhy = TEXT("the shared-slot path or one of its devices is not available");
 		return false;
 	}
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	if (TakeHook(SpoutAsyncSendTestHooks::FailCreations))
 	{
 		OutWhy = TEXT("refused by a test");
@@ -691,7 +691,7 @@ void FSpoutAsyncSendStream::Send(const FSpoutStreamToken& InToken, FRHICommandLi
 	SPOUT_D3D_DIAG_TRANSITION("asyncsend.slot.to-copydest", SlotTexture, ERHIAccess::Unknown, ERHIAccess::CopyDest);
 	RHICmdList.Transition(FRHITransitionInfo(SlotTexture, ERHIAccess::Unknown, ERHIAccess::CopyDest));
 	RHICmdList.CopyTexture(Source, SlotTexture, FRHICopyTextureInfo());
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	SpoutSlotTestHooks::OnSourceCopied(RHICmdList, Source);
 #endif
 	SPOUT_D3D_DIAG_TRANSITION("asyncsend.source.to-after", Source, Bracket.CopyAccess, Bracket.ExitAfter);
@@ -806,7 +806,7 @@ void FSpoutAsyncSendStream::WaitForFill(const FWork& W)
 		const double Elapsed = FPlatformTime::Seconds() - W.Frame.AcceptedAt;
 		const uint32 LeftMs = Elapsed >= Bound ? 0u : static_cast<uint32>(Ms(Bound - Elapsed) + 0.999);
 		Wait = SpoutNativeWork::WaitForQueueFence(W.Set->FilledFence.Get(), W.Frame.FillValue, LeftMs, W.Set->Event);
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 		if (Wait == EWait::Reached && TakeHook(SpoutAsyncSendTestHooks::TimeoutFills))
 		{
 			Wait = EWait::TimedOut;
@@ -926,7 +926,7 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 			return;
 		}
 		double Deadline = AccessDeadlineSeconds;
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 		// Tests that must reach a flush or a stop before a blocked frame's deadline lengthen it (no other effect).
 		if (const int32 TestMs = SpoutAsyncSendTestHooks::AccessDeadlineMs.load(); TestMs > 0) Deadline = TestMs / 1000.0;
 #endif
@@ -950,7 +950,7 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 	bool bInstalled = false;
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncSendInstall);
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 		if (!TakeHook(SpoutAsyncSendTestHooks::FailInstalls))
 #endif
 		{
@@ -1000,7 +1000,7 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 				{
 					Context->CopyResource(Shared.GetReference(), W.Set->NativeSlots[W.Frame.Slot].Get());
 					Value = ++W.Set->DrainedValue;
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 					SignalResult = TakeHook(SpoutAsyncSendTestHooks::FailSignals) ? E_FAIL : SpoutNativeWork::Signal(Context, W.Set->NativeDrainedFence.Get(), Value);
 #else
 					SignalResult = SpoutNativeWork::Signal(Context, W.Set->NativeDrainedFence.Get(), Value);
@@ -1019,7 +1019,7 @@ void FSpoutAsyncSendStream::WorkReady(const FWork& W)
 				// The copy writes the texture peers read, under their access: access is given back only once the copy is
 				// proven finished, or the native device was removed. Never on a wall-clock bound.
 				TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncSendDrainProof);
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 				const int32 NotBeforeMs = SpoutAsyncSendTestHooks::DelayDrainMs.exchange(0);
 #else
 				const int32 NotBeforeMs = 0;
@@ -1516,7 +1516,7 @@ bool SpoutGetAsyncSendStats(const FName& Name, FSpoutAsyncSendStats& Out)
 	return true;
 }
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 namespace SpoutAsyncSendTestHooks
 {
 	std::atomic<int32> TimeoutFills{0};

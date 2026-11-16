@@ -40,6 +40,13 @@ Tests/*/Intermediate/
 Tests/*/Saved/
 Tests/*/DerivedDataCache/
 
+# --- Local build switches --------------------------------------------------------------------------
+# Marker files in the plugin's root that turn on the test suite, the measurement instrumentation or
+# the D3D diagnostics in a local build (SpoutPlugin.Build.cs). They are never part of a release.
+SpoutTests.enable
+SpoutInstrument.enable
+SpoutD3DDiag.enable
+
 # --- Release artefacts -----------------------------------------------------------------------------
 *.zip
 release-manifest-*.json

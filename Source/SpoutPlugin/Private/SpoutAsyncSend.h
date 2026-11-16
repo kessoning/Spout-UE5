@@ -321,7 +321,7 @@ bool SpoutGetAsyncSendStats(const FName& Name, FSpoutAsyncSendStats& Out);
  */
 bool SpoutAsyncSendRefusesSynchronousSend(FSpoutSharedSender& Entry);
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 /** Failure injection for the automation tests. Each counter makes that many next events take the failure branch. */
 namespace SpoutAsyncSendTestHooks
 {

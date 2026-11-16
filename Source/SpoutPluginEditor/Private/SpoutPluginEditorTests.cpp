@@ -3,7 +3,7 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 #include "IPlacementModeModule.h"
 #include "SpoutReceiverActor.h"
 #include "SpoutSenderActor.h"

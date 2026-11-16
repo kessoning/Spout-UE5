@@ -205,7 +205,7 @@ build.bat -TrackD
 :: Boundary validation: UE 5.3 and UE 5.8, packaged hosts included.
 build.bat -TrackD -BoundaryOnly
 
-:: The complete matrix: all six engines, Development and Shipping packaged hosts.
+:: The complete matrix: every declared engine, Development and Shipping packaged hosts.
 build.bat -TrackD -FullMatrix
 
 :: Performance baselines (1080p60, 4K60, multi-stream, CPU fallback, idle, resize and restart churn).
@@ -224,6 +224,13 @@ Individual stages can also be run directly:
 .\Scripts\Invoke-PerformanceBaselines.ps1 -EngineVersion 5.8 -EvidenceRoot .\Artifacts\TrackD\dev
 .\Scripts\New-CleanSourceCopy.ps1        -EvidenceRoot .\Artifacts\TrackD\dev
 ```
+
+The automation tests, their test hooks and the compiled source identity are built only when the
+plugin's root folder holds the marker file `SpoutTests.enable`. The pipeline writes it into every
+plugin it stages for testing. Release archives and Fab packages are built without it, so the tests
+never compile into a user's editor. To run the suite in your own checkout, create the empty file
+`SpoutTests.enable` next to `SpoutPlugin.uplugin` in a fresh build tree, then run
+`Automation RunTests SpoutPlugin`.
 
 Evidence (build logs, staging manifests, smoke-test markers, performance JSON, hashes and Unreal
 Insights traces) is retained under `Artifacts/TrackD/<run-id>/`, which is git-ignored and never

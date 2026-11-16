@@ -7,7 +7,7 @@
 // does not exist; the registered-name check of a release build expects it to be absent.
 #include "Misc/AutomationTest.h"
 #include "SpoutInstrument.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS && SPOUT_WITH_INSTRUMENT
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS && SPOUT_WITH_INSTRUMENT
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutInstrumentColumns, "SpoutPlugin.Instrument.RecordFieldsMatchTheColumnLine",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::EngineFilter)

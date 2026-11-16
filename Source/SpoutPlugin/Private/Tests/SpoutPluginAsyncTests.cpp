@@ -14,7 +14,7 @@
 // What they do not cover: a worker transferring from a sender in another process. Nothing here is a performance
 // statement.
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 
 #include "Misc/AutomationTest.h"
 #include "SpoutAsyncReceive.h"

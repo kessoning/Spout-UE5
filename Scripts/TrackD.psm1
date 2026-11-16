@@ -1047,6 +1047,10 @@ function New-TrackDHostStaging
         }
     }
 
+    # The test marker: the staged plugin compiles its automation tests, test hooks and build identity (Build.cs). It sits
+    # in the plugin's root, outside every input the identity hashes, so the staged identity equals the repository's.
+    Set-Content -LiteralPath (Join-Path $pluginDest 'SpoutTests.enable') -Value '' -NoNewline
+
     return [ordered] @{
         ProjectDir       = $StagingProjectDir
         ProjectFile      = Join-Path $StagingProjectDir ('{0}.uproject' -f $script:HostProjectName)

@@ -6,7 +6,7 @@
 // entry on the render thread, so closed backends are recycled. These tests pin the pool's
 // behaviour and prove that a recycled backend still detects new frames after a same-name restart.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutD3DContext.h"
 #include "SpoutFrameSync.h"

@@ -19,7 +19,7 @@
 #pragma once
 
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "SpoutD3DContext.h"

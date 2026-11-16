@@ -8,7 +8,7 @@
 // timing, release, timeout and abandonment behaviour. Keyed-mutex and cross-process cases are
 // covered by Tests/Native.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutFrameSync.h"
 #include "SpoutLimits.h"
 #include "SpoutModule.h"

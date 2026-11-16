@@ -217,7 +217,7 @@ namespace
 	 */
 	HRESULT SignalNative(ID3D11DeviceContext4* Context, ID3D11Fence* Fence, uint64 Value)
 	{
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 		int32 Left = SpoutSlotTestHooks::FailNativeSignals.load();
 		while (Left > 0)
 		{
@@ -230,7 +230,7 @@ namespace
 		return Context->Signal(Fence, Value);
 	}
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	bool TakeHook(std::atomic<int32>& Counter)
 	{
 		int32 Left = Counter.load();
@@ -270,7 +270,7 @@ namespace
 		FSpoutAsyncDevice& Async = FSpoutAsyncDevice::Get();
 		const double Start = FPlatformTime::Seconds();
 		double NotBefore = Start;
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 		// Tests: a GPU operation that takes this long. Completion is not accepted earlier; the real proof is still needed.
 		// The synchronous slot path's hooks are taken only by its own waits; the workers bring their own (TestNotBeforeMs).
 		const int32 DelayMs = FMath::Max(bSlotTestHooks ? SpoutSlotTestHooks::DelayNativeCompletionMs.exchange(0) : 0, TestNotBeforeMs);
@@ -336,7 +336,7 @@ namespace
 					ID3D11DeviceContext4* Context = Async.GetContext();
 					QueryResult = Context ? Context->GetData(Proof, nullptr, 0, ProofQueryGetDataFlags) : DXGI_ERROR_DEVICE_REMOVED;
 				}
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 				if (QueryResult == S_OK && bSlotTestHooks && TakeHook(SpoutSlotTestHooks::FailProofQueries))
 				{
 					QueryResult = E_FAIL;
@@ -741,7 +741,7 @@ FSpoutGpuRetirement::FStats FSpoutGpuRetirement::GetStats() const
 	return Stats;
 }
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 void FSpoutGpuRetirement::DiscardForTest()
 {
 	FScopeLock Lock(&Mutex);
@@ -976,7 +976,7 @@ ESpoutSlotCopy FSpoutSlotReceive::CopyAndWait(int32 Slot, uint64& OutValue)
 		Fail(TEXT("a fence signal on the native device failed"), SignalResult);
 		return ESpoutSlotCopy::SignalFailed;
 	}
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	if (TakeHook(SpoutSlotTestHooks::TimeoutReceiveWaits))
 	{
 		Proven = ENativeProof::Late;
@@ -1191,7 +1191,7 @@ uint64 FSpoutSlotSend::QueueFill(FRHICommandListImmediate& RHICmdList, FRHITextu
 	SPOUT_D3D_DIAG_TRANSITION("send.slot.to-copydest", Slot, ERHIAccess::Unknown, ERHIAccess::CopyDest);
 	RHICmdList.Transition(FRHITransitionInfo(Slot, ERHIAccess::Unknown, ERHIAccess::CopyDest));
 	RHICmdList.CopyTexture(Source, Slot, FRHICopyTextureInfo());
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	SpoutSlotTestHooks::OnSourceCopied(RHICmdList, Source);
 #endif
 	SPOUT_D3D_DIAG_TRANSITION("send.source.to-after", Source, SourceCopy, SourceAfter);
@@ -1211,7 +1211,7 @@ uint64 FSpoutSlotSend::QueueFill(FRHICommandListImmediate& RHICmdList, FRHITextu
 SpoutSlotRules::EWait FSpoutSlotSend::WaitFilled(uint64 Value)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_SlotSendWaitFilled);
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	if (TakeHook(SpoutSlotTestHooks::TimeoutFilledWaits))
 	{
 		return SpoutSlotRules::EWait::TimedOut;
@@ -1295,7 +1295,7 @@ void FSpoutSlotSend::FlushKeyedRelease()
 // Test hooks
 // ---------------------------------------------------------------------------------------------
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 namespace SpoutSlotTestHooks
 {
 	std::atomic<int32> FailNativeSignals{0};

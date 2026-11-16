@@ -736,7 +736,7 @@ void FSpoutFrameSync::GetPredictorReadState(int64& OutReads, double& OutReadInte
 
 double FSpoutFrameSync::Now() const
 {
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	if (ClockForTests) return ClockForTests();
 #endif
 	return SpoutFrameWait::NowSeconds();
@@ -773,7 +773,7 @@ namespace SpoutFrameWait
 	}
 }
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 void FSpoutFrameSync::SetClockForTests(TFunction<double()> InClock)
 {
 	FScopeLock Lock(&Mutex);

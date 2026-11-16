@@ -30,7 +30,7 @@
 #include "CoreMinimal.h"
 #include "SpoutFrameSync.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 
 /** One named frame-count semaphore as the bundled SDK creates it: raw count 1, plus one per publication. */
 struct FSpoutSemaphoreModel

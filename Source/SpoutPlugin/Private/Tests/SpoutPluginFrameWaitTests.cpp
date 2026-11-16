@@ -30,7 +30,7 @@
 //     already pending, another receiver's read during the wait, the count going away; two timeouts
 //     suspend; the budget is shared, shortens the bound the rule sees, and an empty budget refuses.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutFrameSync.h"
 #include "SpoutFrameWait.h"
 #include "SpoutLimits.h"

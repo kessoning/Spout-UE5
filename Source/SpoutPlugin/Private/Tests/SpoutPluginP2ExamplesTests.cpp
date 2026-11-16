@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Giovanni Muzio (Kesson)
 // SPDX-License-Identifier: MIT
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
+#if SPOUT_WITH_TESTS && WITH_EDITOR
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/TextureRenderTarget2D.h"

@@ -282,7 +282,7 @@ void FSpoutAsyncDevice::Disable(const TCHAR* Why, HRESULT Result)
 	UE_LOG(LogSpoutPlugin, Warning, TEXT("Spout asynchronous receive is off for this process: %s. Streams use the synchronous path."), *DisabledWhy);
 }
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 void FSpoutAsyncDevice::ReenableForTest()
 {
 	FScopeLock Lock(&InitMutex);
@@ -745,7 +745,7 @@ bool FSpoutAsyncStream::TransferOnce()
 			bool bUnused = false;
 			FrameSync.PollNotification(bUnused);
 			bool bInjectedSignalFailure = false;
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 			for (int32 Left = SpoutAsyncReceiveTestHooks::FailSignals.load(); Left > 0;)
 			{
 				if (SpoutAsyncReceiveTestHooks::FailSignals.compare_exchange_weak(Left, Left - 1))
@@ -794,7 +794,7 @@ bool FSpoutAsyncStream::TransferOnce()
 				}
 				SPOUT_INSTRUMENT(if (bInstrument) { Rec.TCopyRec = SpoutInstrument::Now(); Rec.WrittenValue = static_cast<int64>(Value); })
 				int32 TestDelayMs = 0;
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 				TestDelayMs = SpoutAsyncReceiveTestHooks::DelayCompletionMs.exchange(0);
 #endif
 				Proven = SpoutNativeWork::WaitForProof(WrittenFence.Get(), Value, bSignalled, Proof.Get(), CompletionTimeoutMs, FenceEvent,
@@ -911,7 +911,7 @@ bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdLi
 	SpoutAsync::EConsume Result = SpoutAsync::EConsume::Nothing;
 	bool bWaitedForCopy = false;
 	// The render frame's budget for these waits, shared by every asynchronous stream and consumer.
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 	if (SpoutAsyncReceiveTestHooks::ResetInFlightWaitBudget.exchange(false))
 	{
 		GInFlightWaitFrame = MAX_uint64;
@@ -1034,7 +1034,7 @@ FSpoutAsyncStats FSpoutAsyncStream::GetStats() const
 	return Out;
 }
 
-#if WITH_DEV_AUTOMATION_TESTS
+#if SPOUT_WITH_TESTS
 namespace SpoutAsyncReceiveTestHooks
 {
 	std::atomic<int32> DelayCompletionMs{0};

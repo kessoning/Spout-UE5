@@ -19,7 +19,7 @@
 // Expectations are written out by hand per scenario; the frame count is only ever a notification
 // here, and no expectation depends on two counts being equal.
 #include "Misc/AutomationTest.h"
-#if WITH_DEV_AUTOMATION_TESTS && PLATFORM_WINDOWS
+#if SPOUT_WITH_TESTS && PLATFORM_WINDOWS
 #include "SpoutFrameSync.h"
 #include "SpoutFrameWait.h"
 #include "SpoutLimits.h"
