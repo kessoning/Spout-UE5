@@ -47,31 +47,22 @@ In a release archive the runtime library is also staged at
 | Authenticode signature | None (`NotSigned`) |
 | Embedded file/product version | None; the PE version resource is absent |
 
-### Provenance status: partially established
+### Provenance: Spout2 2.007.017
 
-The exact upstream Spout2 release, tag, or commit that produced the bundled binaries
-**cannot be proven from this repository**. The evidence available is:
+The bundled SDK is the official Spout2 **2.007.017** release, published on 2025-10-22 at
+<https://github.com/leadedge/Spout2/releases/tag/2.007.017>:
 
-- The binaries carry no embedded file or product version and are not code-signed, so they
-  identify no upstream release themselves.
-- Both binaries entered this repository in a single commit,
-  `c927d90c7288e50f946c06f8b0b41ebd94077f6d` (2025-12-22), with no recorded upstream
-  reference, so git history does not identify one either.
-- The bundled headers carry copyright notices ranging from `2014-2024` to `2021-2025`. That
-  bounds the headers to no earlier than 2025 but identifies no release.
-- `SpoutUtils.h` mentions `2.007.000` and `2.007.009` in a comment, but only as examples
-  illustrating the SDK's version-number *format*. They are not a version declaration for this
-  header set and do not establish which release it came from. No version number is claimed here
-  on that basis.
-- The `Spout.dll` PE link timestamp is 2025-10-23, which bounds the build date but not the
-  source revision.
+| Bundled file | Release file in `Spout-SDK-binaries_2-007-017_1.zip` | Match |
+|---|---|---|
+| `Spout.dll` | `Libs_2-007-017/MD/bin/Spout.dll` | byte for byte (same SHA-256) |
+| `Spout.lib` | `Libs_2-007-017/MD/lib/Spout.lib` | byte for byte (same SHA-256) |
+| `include/` (36 headers) | `Libs_2-007-017/include/` | identical apart from line endings |
 
-Concluding a specific version number from that evidence would be a guess, so none is
-claimed here. Resolving this requires either rebuilding `Spout.dll` from an identified
-upstream commit and comparing hashes, or obtaining the provenance from whoever produced
-the bundled binary. The hashes recorded above pin exactly what is being redistributed in
-the meantime, and the release process verifies that the `Spout.dll` inside every archive
-matches the `Spout.dll` in this repository.
+The release archive itself has SHA-256
+`695f20e3505fa0da51b2eb959af359f5d9e2c914bb9676e9118d19f6a5424bf4`, as GitHub reports for
+that asset. The binaries carry no version resource or code signature of their own, so the
+hashes above are what ties them to the release. The release process checks that the
+`Spout.dll` inside every archive matches the one in this repository.
 
 ### License text
 
@@ -108,7 +99,9 @@ used here. Some headers additionally credit Malcolm Bechard, as noted above.
 ## Upstream project
 
 This plugin is a fork of <https://github.com/zuyi53/Spout-UE5>, copyright (c) 2023
-RockmanZuyi, MIT licensed. That notice is preserved in [LICENSE](LICENSE). No files from
+RockmanZuyi, MIT licensed. That notice is preserved in [LICENSE](LICENSE). Modifications,
+additions and the current implementation are copyright (c) 2025-2026 Giovanni Muzio (Kesson)
+and are released under the same terms. No files from
 the upstream project are vendored as a separate third-party component; the fork
 relationship is a licensing matter covered by the root license rather than by this file.
 

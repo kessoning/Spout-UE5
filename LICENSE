@@ -3,15 +3,6 @@ MIT License
 Copyright (c) 2023 RockmanZuyi
 Copyright (c) 2025-2026 Giovanni Muzio (Kesson)
 
-This project is a fork of https://github.com/zuyi53/Spout-UE5. The original work is
-copyright (c) 2023 RockmanZuyi and was released under the MIT License; that notice is
-preserved above. Modifications, additions, and the current implementation are
-copyright (c) 2025-2026 Giovanni Muzio (Kesson) and are released under the same terms.
-
-This license covers the contents of this repository except for the bundled third-party
-components listed in THIRD_PARTY_NOTICES.md, which are distributed under their own
-licenses.
-
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
