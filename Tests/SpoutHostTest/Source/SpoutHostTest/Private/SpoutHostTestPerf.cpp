@@ -120,6 +120,12 @@ namespace SpoutHostTest
 		if (Name == TEXT("resizechurn"))     return EPerfScenario::ResizeChurn;
 		if (Name == TEXT("startupshutdown")) return EPerfScenario::StartupShutdown;
 		if (Name == TEXT("restartpaced"))    return EPerfScenario::RestartPaced;
+		if (Name == TEXT("multistream8"))    return EPerfScenario::MultiStream8;
+		if (Name == TEXT("receiver1080p10")) return EPerfScenario::Receiver1080p10;
+		if (Name == TEXT("receiver4k10"))    return EPerfScenario::Receiver4K10;
+		if (Name == TEXT("consumers8"))      return EPerfScenario::Consumers8;
+		if (Name == TEXT("consumers32"))     return EPerfScenario::Consumers32;
+		if (Name == TEXT("unconsumed"))      return EPerfScenario::Unconsumed;
 
 		// Deliberately not None: an unrecognised name must fail the run rather than quietly turn
 		// into "no performance test requested" and let the matrix report a pass.
@@ -185,13 +191,15 @@ namespace SpoutHostTest
 		Instance->SourceRenderTargets.Empty();
 		Instance->ReceivedTextures.Empty();
 		Instance->ReceivedMaterials.Empty();
+		Instance->ConsumerTextures.Empty();
+		Instance->ConsumerMaterials.Empty();
 		Instance->PixelProbes.Empty();
 	}
 
 	UTextureRenderTarget2D* FPerfHarness::MakeRenderTarget(int32 InWidth, int32 InHeight) const
 	{
 		return USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(
-			InWidth, InHeight, PF_B8G8R8A8, /*bForceLinearGamma*/ true);
+			InWidth, InHeight, SourceFormat, /*bForceLinearGamma*/ true);
 	}
 
 	void FPerfHarness::FailAndFinish(const FString& Reason)
@@ -239,6 +247,23 @@ namespace SpoutHostTest
 		case EPerfScenario::StartupShutdown:
 		case EPerfScenario::RestartPaced:
 			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;  break;
+		case EPerfScenario::MultiStream8:
+			Width = 1920; Height = 1080; StreamCount = 8; bUsesSender = true; bUsesReceiver = true;  break;
+		case EPerfScenario::Receiver1080p10:
+			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;
+			SourceFormat = PF_A2B10G10R10; break;
+		case EPerfScenario::Receiver4K10:
+			Width = 3840; Height = 2160; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;
+			SourceFormat = PF_A2B10G10R10; break;
+		case EPerfScenario::Consumers8:
+			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;
+			ConsumerCount = 8; break;
+		case EPerfScenario::Consumers32:
+			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;
+			ConsumerCount = 32; break;
+		case EPerfScenario::Unconsumed:
+			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;
+			bUnconsumed = true; break;
 		default:
 			return false;
 		}
@@ -255,6 +280,22 @@ namespace SpoutHostTest
 			else
 			{
 				FailAndFinish(TEXT("r.Spout.GPUReceiver does not exist, so the CPU fallback cannot be forced"));
+				return false;
+			}
+		}
+
+		if (ConsumerCount > 1)
+		{
+			// Each receive call queues one command for its stream, and r.Spout.MaxPendingPerStream (default 4) refuses
+			// the calls beyond that limit within a frame. These scenarios measure the per-call cost of many consumers,
+			// so they raise the limit; the value used is written to the result file.
+			if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.MaxPendingPerStream")))
+			{
+				CVar->Set(64, ECVF_SetByCode);
+			}
+			else
+			{
+				FailAndFinish(TEXT("r.Spout.MaxPendingPerStream does not exist, so the consumer scenarios cannot run"));
 				return false;
 			}
 		}
@@ -276,12 +317,18 @@ namespace SpoutHostTest
 			PublishedSequences.Add(0); ObservedSequences.Add(0);
 			PreviousReceiverSubmissions.Add(0);
 			LastProgressTimes.Add(FPlatformTime::Seconds());
-			if (!bUsesReceiver)
+			if (!bUsesReceiver || bUnconsumed)
 			{
 				auto Probe=MakeUnique<FViewportSenderProbe>(); FString Error;
 				if (!Probe->Initialize(Error)) { FailAndFinish(Error); return false; }
 				PixelProbes.Add(MoveTemp(Probe));
 			}
+		}
+
+		for (int32 Consumer = 1; Consumer < ConsumerCount; ++Consumer)
+		{
+			ConsumerTextures.Emplace();
+			ConsumerMaterials.Emplace();
 		}
 
 		return true;
@@ -353,10 +400,23 @@ namespace SpoutHostTest
 						continue;
 					}
 					PublishedSequences[Index]=InFrameIndex;
-					const FColor Pixel(InFrameIndex&255,(InFrameIndex>>8)&255,(InFrameIndex>>16)&255,0xa7);
+					uint32 Raw = 0;
+					if (SourceFormat == PF_A2B10G10R10)
+					{
+						// R10G10B10A2_UNORM: each sequence byte maps to the nearest 10-bit code, which reads
+						// back as the same byte after the engine's 10-to-8-bit requantize; alpha 3 reads as 255.
+						const auto To10 = [](uint32 Byte) { return (Byte * 1023u + 127u) / 255u; };
+						Raw = To10(InFrameIndex & 255) | (To10((InFrameIndex >> 8) & 255) << 10)
+							| (To10((InFrameIndex >> 16) & 255) << 20) | (3u << 30);
+					}
+					else
+					{
+						const FColor Pixel(InFrameIndex&255,(InFrameIndex>>8)&255,(InFrameIndex>>16)&255,0xa7);
+						FMemory::Memcpy(&Raw, &Pixel, sizeof(Raw));
+					}
 					auto* Resource=SourceRenderTargets[Index]->GameThread_GetRenderTargetResource();
-					ENQUEUE_RENDER_COMMAND(SpoutPerfSequence)([Resource,Pixel](FRHICommandListImmediate& Cmd)
-					{ Cmd.UpdateTexture2D(Resource->GetTextureRHI(),0,FUpdateTextureRegion2D(0,0,0,0,1,1),4,reinterpret_cast<const uint8*>(&Pixel)); });
+					ENQUEUE_RENDER_COMMAND(SpoutPerfSequence)([Resource,Raw](FRHICommandListImmediate& Cmd)
+					{ Cmd.UpdateTexture2D(Resource->GetTextureRHI(),0,FUpdateTextureRegion2D(0,0,0,0,1,1),4,reinterpret_cast<const uint8*>(&Raw)); });
 					const double SendCallStart=FPlatformTime::Seconds();
 					const bool bAccepted = USpoutBPFunctionLibrary::SpoutSender(
 						SenderNames[Index], ESpoutSendTextureFrom::TextureRenderTarget2D,
@@ -367,7 +427,7 @@ namespace SpoutHostTest
 			}
 		}
 
-		if (bUsesReceiver)
+		if (bUsesReceiver && !(bUnconsumed && bMeasuring))
 		{
 			UMaterial* ParentMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
 			for (int32 Index = 0; Index < StreamCount; ++Index)
@@ -391,6 +451,25 @@ namespace SpoutHostTest
 				{
 					++RejectedReceives;
 				}
+
+				// Further consumers of the same stream, each with its own material instance.
+				for (int32 Consumer = 1; Consumer < ConsumerCount; ++Consumer)
+				{
+					UMaterialInstanceDynamic* ConsumerMaterial = ConsumerMaterials[Consumer - 1].Get();
+					UTexture2D* ConsumerTexture = ConsumerTextures[Consumer - 1].Get();
+					if (USpoutBPFunctionLibrary::SpoutReceiver(
+						SenderNames[Index], ParentMaterial, FName(TEXT("SpoutTexture")),
+						ConsumerMaterial, ConsumerTexture, nullptr, ESpoutColorSpace::Auto))
+					{
+						++ConsumerAcceptedReceives;
+						ConsumerMaterials[Consumer - 1].Reset(ConsumerMaterial);
+						ConsumerTextures[Consumer - 1].Reset(ConsumerTexture);
+					}
+					else
+					{
+						++ConsumerRejectedReceives;
+					}
+				}
 			}
 		}
 	}
@@ -405,7 +484,7 @@ namespace SpoutHostTest
 		for (int32 Index=0; Index<StreamCount; ++Index)
 		{
 			FColor Pixel(0,0,0,0); bool Have=false;
-			if (bUsesReceiver && ReceivedTextures[Index].IsValid())
+			if (bUsesReceiver && !bUnconsumed && ReceivedTextures[Index].IsValid())
 			{
 				// Status is cumulative for the session, including outputs replaced on resize.
 				// Validate only an actual new submission; a cleared replacement awaiting its
@@ -415,10 +494,11 @@ namespace SpoutHostTest
 				const auto Pixels=ReadPixels(ReceivedTextures[Index]->GetResource(),1,1);
 				if (Pixels.Num()==1) { Pixel=Pixels[0]; Have=true; }
 			}
-			else if (!bUsesReceiver) Have=PixelProbes[Index]->ReadFirstPixel(SenderNames[Index].ToString(),Pixel);
+			else if (!bUsesReceiver || bUnconsumed) Have=PixelProbes[Index]->ReadFirstPixel(SenderNames[Index].ToString(),Pixel);
 			if (!Have) continue;
 			const int32 Sequence=Pixel.R | (Pixel.G<<8) | (Pixel.B<<16);
-			if (Pixel.A!=0xa7 || Sequence>PublishedSequences[Index]) { if(bMeasuring) ++PixelMismatches; continue; }
+			const uint8 ExpectedAlpha = SourceFormat == PF_A2B10G10R10 ? 0xff : 0xa7;
+			if (Pixel.A!=ExpectedAlpha || Sequence>PublishedSequences[Index]) { if(bMeasuring) ++PixelMismatches; continue; }
 			if (Sequence<=ObservedSequences[Index]) { if(bMeasuring) ++StaleObservations; continue; }
 			ObservedSequences[Index]=Sequence;
 			LastProgressTimes[Index]=FPlatformTime::Seconds();
@@ -533,6 +613,7 @@ namespace SpoutHostTest
 
 			// Warm-up counters are not part of the baseline.
 			AcceptedSends = RejectedSends = AcceptedReceives = RejectedReceives = 0;
+			ConsumerAcceptedReceives = ConsumerRejectedReceives = 0;
 			return true;
 		}
 
@@ -545,6 +626,11 @@ namespace SpoutHostTest
 			for (double LastProgress : LastProgressTimes)
 			{
 				if (Now-LastProgress>MaxSilence) { FailAndFinish(TEXT("measured stream stopped making pixel progress before the run ended")); return true; }
+			}
+			if (ConsumerRejectedReceives > 0)
+			{
+				FailAndFinish(FString::Printf(TEXT("%d receive calls of additional consumers were refused during the measured window"), ConsumerRejectedReceives));
+				return true;
 			}
 			if (Scenario!=EPerfScenario::Baseline && (ExpectedDeliveries<=0 || ObservedDeliveries<ExpectedDeliveries*0.9 ||
 				ObservedDeliveries<TargetDeliveries*0.9 || PixelMismatches>0))
@@ -634,7 +720,9 @@ namespace SpoutHostTest
 		Json += TEXT("  \"configuration\": {\n");
 		Json += FString::Printf(TEXT("    \"width\": %d,\n"), Width);
 		Json += FString::Printf(TEXT("    \"height\": %d,\n"), Height);
-		Json += TEXT("    \"pixelFormat\": \"PF_B8G8R8A8\",\n");
+		Json += FString::Printf(TEXT("    \"pixelFormat\": \"%s\",\n"), GetPixelFormatString(SourceFormat));
+		Json += FString::Printf(TEXT("    \"consumersPerStream\": %d,\n"), ConsumerCount);
+		Json += FString::Printf(TEXT("    \"receiverCalledWhileMeasuring\": %s,\n"), (bUsesReceiver && !bUnconsumed) ? TEXT("true") : TEXT("false"));
 		Json += FString::Printf(TEXT("    \"streamCount\": %d,\n"), StreamCount);
 		Json += FString::Printf(TEXT("    \"usesSender\": %s,\n"), bUsesSender ? TEXT("true") : TEXT("false"));
 		Json += FString::Printf(TEXT("    \"usesReceiver\": %s,\n"), bUsesReceiver ? TEXT("true") : TEXT("false"));
@@ -657,6 +745,7 @@ namespace SpoutHostTest
 		Json += TEXT("],\n");
 		Json += TEXT("    \"cvars\": {\n");
 		Json += FString::Printf(TEXT("      \"r.Spout.GPUReceiver\": %d,\n"), bGpuReceiverPath ? 1 : 0);
+		Json += FString::Printf(TEXT("      \"r.Spout.MaxPendingPerStream\": %d,\n"), IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.MaxPendingPerStream"))->GetInt());
 		Json += FString::Printf(TEXT("      \"r.Spout.MaxRetainedMiB\": %d\n"), IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.MaxRetainedMiB"))->GetInt());
 		Json += TEXT("    },\n");
 		Json += FString::Printf(TEXT("    \"warmupSeconds\": %.1f,\n"), WarmupSeconds);
@@ -686,6 +775,7 @@ namespace SpoutHostTest
 		Json += FString::Printf(TEXT("    \"acceptedReceives\": %d,\n"), AcceptedReceives);
 		Json += FString::Printf(TEXT("    \"rejectedReceives\": %d,\n"), RejectedReceives);
 		Json += FString::Printf(TEXT("    \"resizeEvents\": %d,\n"), ResizeEvents);
+		Json += FString::Printf(TEXT("    \"consumerAcceptedReceives\": %d, \"consumerRejectedReceives\": %d,\n"), ConsumerAcceptedReceives, ConsumerRejectedReceives);
 		Json += FString::Printf(TEXT("    \"peakCloseReceiverMs\": %.6f, \"peakCloseSenderMs\": %.6f, \"peakSendCallMs\": %.6f, \"peakReceiveCallMs\": %.6f, \"peakObserverMs\": %.6f,\n"),PeakCloseReceiverMs,PeakCloseSenderMs,PeakSendCallMs,PeakReceiveCallMs,PeakObserverMs);
 		Json += FString::Printf(TEXT("    \"closeReceiverSeconds\": %.6f, \"closeSenderSeconds\": %.6f,\n"),CloseReceiverSeconds,CloseSenderSeconds);
 		Json += FString::Printf(TEXT("    \"streamRestartEvents\": %d\n"), StreamRestartEvents);

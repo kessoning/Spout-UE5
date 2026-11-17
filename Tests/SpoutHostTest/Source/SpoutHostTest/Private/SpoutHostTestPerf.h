@@ -41,7 +41,13 @@ namespace SpoutHostTest
 		IdleReceiver,
 		ResizeChurn,
 		StartupShutdown,
-		RestartPaced
+		RestartPaced,
+		MultiStream8,      // 8 streams, sender and receiver each
+		Receiver1080p10,   // 1080p RGB10A2 source
+		Receiver4K10,      // 4K RGB10A2 source
+		Consumers8,        // one 1080p stream read by 8 consumers, each with its own material instance
+		Consumers32,       // one 1080p stream read by 32 consumers
+		Unconsumed         // receiver opened during warm-up, then not called while the sender keeps publishing
 	};
 
 	class FPerfHarness
@@ -97,6 +103,14 @@ namespace SpoutHostTest
 		bool bUsesSender = false;
 		bool bUsesReceiver = false;
 		bool bGpuReceiverPath = true;
+		/** Source render-target format. RGB10A2 sources store each byte of the pixel sequence as its nearest 10-bit value. */
+		EPixelFormat SourceFormat = PF_B8G8R8A8;
+		/** Receive calls per stream and frame; consumers beyond the first use their own material instance. */
+		int32 ConsumerCount = 1;
+		/** The receiver is not called during the measured window; delivery is observed at the sender instead. */
+		bool bUnconsumed = false;
+		int32 ConsumerAcceptedReceives = 0;
+		int32 ConsumerRejectedReceives = 0;
 
 		double WarmupSeconds = 5.0;
 		double MeasureSeconds = 60.0;
@@ -144,6 +158,8 @@ namespace SpoutHostTest
 		TArray<TStrongObjectPtr<UTextureRenderTarget2D>> SourceRenderTargets;
 		TArray<TStrongObjectPtr<UTexture2D>> ReceivedTextures;
 		TArray<TStrongObjectPtr<UMaterialInstanceDynamic>> ReceivedMaterials;
+		TArray<TStrongObjectPtr<UTexture2D>> ConsumerTextures;
+		TArray<TStrongObjectPtr<UMaterialInstanceDynamic>> ConsumerMaterials;
 		TArray<FName> SenderNames;
 	};
 }

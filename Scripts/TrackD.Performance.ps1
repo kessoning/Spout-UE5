@@ -59,7 +59,7 @@ function Test-TrackDPerformanceResult {
             if ($expected -ne 0 -or $observed -ne 0) { $problems.Add('Idle control unexpectedly reports transfers') }
         } else {
             $streamCount = Get-TrackDPerformanceNumber $Result.configuration.streamCount 'streamCount' -Integer
-            $wantedStreams = if ($Scenario -eq 'multistream') { $Streams } else { 1 }
+            $wantedStreams = if ($Scenario -eq 'multistream') { $Streams } elseif ($Scenario -eq 'multistream8') { 8 } else { 1 }
             if ($streamCount -ne $wantedStreams) { $problems.Add('Measured stream count differs from the requested workload') }
             if ($expected -gt $frames * $wantedStreams) { $problems.Add('Published opportunities exceed the measured work frames and streams') }
             # targetHz describes the host's polling/work cadence. The idle receiver

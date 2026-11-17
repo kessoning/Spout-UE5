@@ -72,6 +72,17 @@ param(
     [int] $PackageTimeoutSeconds = 5400,
     [int] $ScenarioTimeoutMarginSeconds = 300,
 
+    # Runs every selected scenario this many times, in passes (all scenarios, then all again), so a repeat is
+    # never adjacent to its first run. Evidence folders are then named <scenario>-p<pass>.
+    [ValidateRange(1,10)][int] $Repeat = 1,
+
+    # Reuses an existing packaged no-plugin control host (as -ExistingExecutable does for the Spout host).
+    [string] $ExistingControlExecutable = '',
+
+    # Records the machine's other load during the run (CPU per process, GPU engine use per process, dedicated GPU
+    # memory per process) to machine-load.jsonl in the run folder, and keeps the PC and display awake meanwhile.
+    [switch] $RecordMachineLoad,
+
     # Extra arguments appended to every scenario launch. Empty by default. Development coverage only (for example
     # '-ini:Engine:[ConsoleVariables]:r.Spout.Dev.AsyncSend=0', the synchronous render-target send; the asynchronous send
     # is the default); the summary records them.
@@ -105,6 +116,12 @@ $AllScenarios = @(
     @{ Name = 'resizechurn';     Title = 'Repeated resize and reconnect'; Covers = 'Resize/reconnect spikes' }
     @{ Name = 'startupshutdown'; Title = 'Repeated stream start/stop';   Covers = 'Startup and shutdown spikes' }
     @{ Name = 'restartpaced';    Title = 'Paced stream start/stop (2 s)'; Covers = 'Qualified close/reopen workload at the default retention budget' }
+    @{ Name = 'multistream8';    Title = 'Eight simultaneous streams';   Covers = 'Render cost of each added stream' }
+    @{ Name = 'receiver1080p10'; Title = '1080p60 RGB10A2 receiver';     Covers = '10-bit receive cost at 1080p' }
+    @{ Name = 'receiver4k10';    Title = '4K60 RGB10A2 receiver';        Covers = '10-bit receive cost at 4K' }
+    @{ Name = 'consumers8';      Title = 'One stream, 8 consumers';      Covers = 'Per-call receive cost with several consumers' }
+    @{ Name = 'consumers32';     Title = 'One stream, 32 consumers';     Covers = 'Per-call receive cost with many consumers' }
+    @{ Name = 'unconsumed';      Title = 'Receiver nobody reads';        Covers = 'Receive work done while no consumer reads the stream' }
 )
 
 if ($Scenarios.Count -gt 0)
@@ -251,21 +268,44 @@ Write-TrackDGood "host: $executable"
 
 $control = $null
 if (@($AllScenarios | Where-Object { $_.Name -eq 'noplugin' }).Count -gt 0) {
-    Write-TrackDStep 'Packaging independent no-plugin control'
-    $control = Build-TrackDControlHost -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory -Engine $engine -Configuration $Configuration -TimeoutSeconds $PackageTimeoutSeconds
+    if (-not [string]::IsNullOrWhiteSpace($ExistingControlExecutable)) {
+        if (-not (Test-Path -LiteralPath $ExistingControlExecutable -PathType Leaf)) { throw "Control host executable not found: $ExistingControlExecutable" }
+        $control = [ordered]@{ Executable=(Resolve-Path -LiteralPath $ExistingControlExecutable).Path; BuildIdentity=(Read-TrackDArtifactIdentity -Artifact $ExistingControlExecutable); BuildProcess=$null }
+        if ($control.BuildIdentity.Engine.Version -ne $EngineVersion -or $control.BuildIdentity.Configuration -ne $Configuration) { throw 'Requested engine/configuration differs from the control host build' }
+        Write-TrackDGood "control: $($control.Executable)"
+    } else {
+        Write-TrackDStep 'Packaging independent no-plugin control'
+        $control = Build-TrackDControlHost -RepoRoot $RepoRoot -WorkRoot $WorkRoot -EvidenceRoot $invocation.Directory -Engine $engine -Configuration $Configuration -TimeoutSeconds $PackageTimeoutSeconds
+    }
+}
+
+$loadRecorder = $null
+$machineLoadPath = $null
+if ($RecordMachineLoad) {
+    $machineLoadPath = Join-Path $invocation.Directory 'machine-load.jsonl'
+    $machineLoadStop = Join-Path $invocation.Directory 'machine-load.stop'
+    $loadRecorder = Start-Process -FilePath (Get-Process -Id $PID).Path -PassThru -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-File', (Join-Path $PSScriptRoot 'Record-SpoutMachineLoad.ps1'),
+        '-OutPath', $machineLoadPath, '-StopFile', $machineLoadStop)
+    Write-TrackDStep "Recording machine load to $machineLoadPath (process $($loadRecorder.Id))"
+    Start-Sleep -Seconds 5
 }
 
 # --- Run each scenario ---------------------------------------------------------------------------
 $rows = New-Object System.Collections.ArrayList
 
-foreach ($scenario in $AllScenarios)
+$scenarioPasses = @(for ($pass = 1; $pass -le $Repeat; $pass++) { foreach ($selected in $AllScenarios) { [ordered]@{ Scenario=$selected; Pass=$pass } } })
+foreach ($scenarioPass in $scenarioPasses)
 {
+    $scenario = $scenarioPass.Scenario
+    $pass = $scenarioPass.Pass
     $name = $scenario.Name
+    $evidenceName = if ($Repeat -gt 1) { "$name-p$pass" } else { $name }
     $scenarioExecutable = if ($name -eq 'noplugin') { $control.Executable } else { $executable }
     $scenarioIdentity = if ($name -eq 'noplugin') { $control.BuildIdentity } else { $artifactIdentity }
-    Write-TrackDSection "Scenario: $name - $($scenario.Title)"
+    Write-TrackDSection "Scenario: $evidenceName - $($scenario.Title)"
 
-    $scenarioEvidence = Join-Path $invocation.Directory $name
+    $scenarioEvidence = Join-Path $invocation.Directory $evidenceName
     New-Item -ItemType Directory -Path $scenarioEvidence -Force | Out-Null
 
     $stdOutLog = Join-Path $scenarioEvidence 'stdout.log'
@@ -300,13 +340,19 @@ foreach ($scenario in $AllScenarios)
     $identity = New-TrackDLaunchIdentity -Directory $scenarioEvidence -Executable $scenarioExecutable -ArtifactIdentity $scenarioIdentity
     $launchArgs += Get-TrackDIdentityArguments $identity
 
+    $startedUtc = (Get-Date).ToUniversalTime().ToString('o')
     $launchResult = Invoke-TrackDProcess -FilePath $scenarioExecutable -ArgumentList $launchArgs `
         -StdOutPath $stdOutLog -TimeoutSeconds $timeout -WorkingDirectory (Split-Path -Parent $scenarioExecutable)
+    $endedUtc = (Get-Date).ToUniversalTime().ToString('o')
 
     $resultFile = Join-Path $scenarioEvidence ("perf-{0}.json" -f $name)
 
     $row = [ordered] @{
         Scenario        = $name
+        Pass            = $pass
+        EvidenceName    = $evidenceName
+        StartedUtc      = $startedUtc
+        EndedUtc        = $endedUtc
         Title           = $scenario.Title
         Covers          = $scenario.Covers
         EngineVersion   = $EngineVersion
@@ -378,10 +424,15 @@ foreach ($scenario in $AllScenarios)
     else
     {
         foreach ($problem in $problems) { Write-TrackDBad $problem }
-        [void] $failures.Add("$name : $($problems -join '; ')")
+        [void] $failures.Add("$evidenceName : $($problems -join '; ')")
     }
 
     [void] $rows.Add($row)
+}
+
+if ($loadRecorder) {
+    New-Item -ItemType File -Path $machineLoadStop -Force | Out-Null
+    if (-not $loadRecorder.WaitForExit(30000)) { Write-TrackDWarn 'machine-load recorder did not stop within 30 s; stopping it'; Stop-Process -Id $loadRecorder.Id -Force }
 }
 
 # --- Aggregate -----------------------------------------------------------------------------------
@@ -402,6 +453,8 @@ $aggregate = [ordered] @{
     MeasuredSeconds = $Seconds
     WarmupSeconds = $WarmupSeconds
     StreamCount   = $Streams
+    Repeat        = $Repeat
+    MachineLoadPath = $machineLoadPath
     TraceEnabled  = [bool] $Trace
     RhiValidation = [bool] $RhiValidation
     D3DDebug      = [bool] $D3DDebug
@@ -446,7 +499,7 @@ foreach ($row in $rows)
 {
     if ($row.Status -ne 'Passed' -or -not $row.Results)
     {
-        [void] $summary.AppendLine("| $($row.Scenario) | - | - | - | - | - | - | - | - | - | - | - | - | **FAILED**: $($row.Problems -join '; ') |")
+        [void] $summary.AppendLine("| $($row.EvidenceName) | - | - | - | - | - | - | - | - | - | - | - | - | **FAILED**: $($row.Problems -join '; ') |")
         continue
     }
 
@@ -457,7 +510,7 @@ foreach ($row in $rows)
 
     [void] $summary.AppendLine(
         ("| {0} | {1}x{2} | {3} | {4} | {5} | {6:N3} | {7:N3} | {8:N3} | {9:N3} | {10:N3} | {11:N3} | {12} | {13} | pass |" -f `
-            $row.Scenario, $c.width, $c.height, $c.streamCount, $c.receiverMode,
+            $row.EvidenceName, $c.width, $c.height, $c.streamCount, $c.receiverMode,
             $r.frameCount, $r.frameTimeMeanMs, $r.frameTimeP95Ms, $r.frameTimeP99Ms, $r.frameTimePeakMs,
             $r.gameThreadMeanMs, $r.renderThreadMeanMs, $gpuText, $peakWs))
 }
