@@ -17,19 +17,19 @@ components below are covered by their own licenses, reproduced in full.
 **License:** BSD 2-Clause "Simplified" License
 
 Additional credit recorded in the bundled headers: thanks and credit to Malcolm Bechard
-(<https://github.com/mbechard>) for modifications to the `spoutSenderNames` class.
+(<https://github.com/mbechard>), the author of `SpoutCommon.h` and of modifications to the
+`spoutSenderNames` class.
 
 ### Bundled files
 
 | Path | Description |
 |---|---|
-| `Source/ThirdParty/Spout/include/SpoutDX/` | DirectX 11 SDK headers (used by this plugin) |
-| `Source/ThirdParty/Spout/include/SpoutDX12/` | DirectX 12 SDK headers |
-| `Source/ThirdParty/Spout/include/SpoutDX9/` | DirectX 9 SDK headers |
-| `Source/ThirdParty/Spout/include/SpoutGL/` | OpenGL SDK headers |
-| `Source/ThirdParty/Spout/include/SpoutLibrary/` | C-style library interface header |
+| `Source/ThirdParty/Spout/include/SpoutDX/` | DirectX 11 SDK headers, the only ones the plugin uses |
 | `Source/ThirdParty/Spout/lib/amd64/Spout.lib` | x64 import library |
 | `Source/ThirdParty/Spout/lib/amd64/Spout.dll` | x64 runtime library, redistributed in release archives |
+
+The SDK release also has DirectX 9, DirectX 12, OpenGL and C-style library headers. The plugin
+never includes them, so they are not bundled.
 
 In a release archive the runtime library is also staged at
 `SpoutPlugin/Binaries/Win64/Spout.dll`, which is the copy the plugin loads at startup.
@@ -38,28 +38,28 @@ In a release archive the runtime library is also staged at
 
 | Property | Value |
 |---|---|
-| `Spout.dll` SHA-256 | `4c505aa59ce56d41135e3eb67fd9c4b30a2817ff1e14edca11abcb4b9148941e` |
-| `Spout.dll` size | 284,160 bytes |
+| `Spout.dll` SHA-256 | `0f8cec5c95ab1fcb3c1a06c945e0586df32b6e9d3151eed630f2a5eb32de5933` |
+| `Spout.dll` size | 280,576 bytes |
 | `Spout.dll` PE machine | `0x8664` (x64) |
-| `Spout.dll` PE link timestamp | 2025-10-23 00:44:33 UTC |
-| `Spout.lib` SHA-256 | `23258fc2d31dbdb0fe2eae3f9abc638c561bb9d352e7179b6c8faaecc110ee6e` |
-| `Spout.lib` size | 207,656 bytes |
+| `Spout.dll` PE link timestamp | 2026-10-10 00:28:30 UTC |
+| `Spout.lib` SHA-256 | `f15539f5bb99ec7efede665e3bbc1a0a75dfc2f6e1f2678840579b70bc802810` |
+| `Spout.lib` size | 210,734 bytes |
 | Authenticode signature | None (`NotSigned`) |
 | Embedded file/product version | None; the PE version resource is absent |
 
-### Provenance: Spout2 2.007.017
+### Provenance: Spout2 2.007.018
 
-The bundled SDK is the official Spout2 **2.007.017** release, published on 2025-10-22 at
-<https://github.com/leadedge/Spout2/releases/tag/2.007.017>:
+The bundled SDK is the official Spout2 **2.007.018** release, published on 2026-10-10 at
+<https://github.com/leadedge/Spout2/releases/tag/2.007.018>:
 
-| Bundled file | Release file in `Spout-SDK-binaries_2-007-017_1.zip` | Match |
+| Bundled file | Release file in `Spout-SDK-binaries_2-007-018.zip` | Match |
 |---|---|---|
-| `Spout.dll` | `Libs_2-007-017/MD/bin/Spout.dll` | byte for byte (same SHA-256) |
-| `Spout.lib` | `Libs_2-007-017/MD/lib/Spout.lib` | byte for byte (same SHA-256) |
-| `include/` (36 headers) | `Libs_2-007-017/include/` | identical apart from line endings |
+| `Spout.dll` | `Libs_2-007-018/MD/bin/Spout.dll` | byte for byte (same SHA-256) |
+| `Spout.lib` | `Libs_2-007-018/MD/lib/Spout.lib` | byte for byte (same SHA-256) |
+| `include/SpoutDX/` (8 headers) | `Libs_2-007-018/include/SpoutDX/` | identical apart from line endings |
 
 The release archive itself has SHA-256
-`695f20e3505fa0da51b2eb959af359f5d9e2c914bb9676e9118d19f6a5424bf4`, as GitHub reports for
+`6b6101ad860b7c42128d715a6d8f2dfdfcc1df2a64dde7c04317c11d059d27ea`, as GitHub reports for
 that asset. The binaries carry no version resource or code signature of their own, so the
 hashes above are what ties them to the release. The release process checks that the
 `Spout.dll` inside every archive matches the one in this repository.
@@ -67,7 +67,7 @@ hashes above are what ties them to the release. The release process checks that 
 ### License text
 
 ```
-Copyright (c) 2014-2025, Lynn Jarvis. All rights reserved.
+Copyright (c) 2014-2026, Lynn Jarvis. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification,
 are permitted provided that the following conditions are met:
@@ -91,7 +91,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 The notice above is reproduced from the bundled headers. Individual headers carry the same
-BSD 2-Clause terms with copyright year ranges between 2014 and 2025; the widest range is
+BSD 2-Clause terms with copyright year ranges between 2014 and 2026; the widest range is
 used here. Some headers additionally credit Malcolm Bechard, as noted above.
 
 ---

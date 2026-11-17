@@ -8,7 +8,7 @@
 // object (its generation) and the process's count of live worker objects, and every texel of the received image.
 //
 //   default     both receive nodes and the C++ call use Async Receive unless synchronous is asked for; the retired
-//               r.Spout.AsyncReceive set to 1 changes nothing
+//               process-wide r.Spout.AsyncReceive no longer exists
 //   names       two names at once, one asynchronous and one synchronous; closing one leaves the other, its entry
 //               and its slots exactly as they were; the closed name reopens in the other mode
 //   same name   matching consumers share one session; a conflicting consumer is refused in either order and leaves
@@ -302,13 +302,8 @@ bool FSpoutAsyncBetaDefault::RunTest(const FString&)
 	}
 #endif
 
-	// The retired process-wide setting is set to 1 for the whole test: it changes nothing, in either mode.
-	IConsoleVariable* Retired = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive"));
-	if (!TestNotNull(TEXT("the retired setting is still registered"), Retired)) return false;
-	const FString RetiredBefore = Retired->GetString();
-	const EConsoleVariableFlags RetiredPriority = static_cast<EConsoleVariableFlags>(Retired->GetFlags() & ECVF_SetByMask);
-	AddExpectedMessage(TEXT("r.Spout.AsyncReceive is retired and ignored"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
-	Retired->Set(TEXT("1"), ECVF_SetByCode);
+	// Only the receive input chooses the mode: the retired process-wide setting is gone.
+	TestNull(TEXT("r.Spout.AsyncReceive is no longer registered"), IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive")));
 
 	const int32 WorkersBefore = FSpoutAsyncStream::GetLiveStreams();
 	struct FCase { const TCHAR* What; AB::FConsumer::ENode Node; };
@@ -378,9 +373,6 @@ bool FSpoutAsyncBetaDefault::RunTest(const FString&)
 		TestEqual(FString::Printf(TEXT("%s: no worker left"), Case.What), FSpoutAsyncStream::GetLiveStreams(), WorkersBefore);
 	}
 
-	Retired->Set(*RetiredBefore, ECVF_SetByCode);
-	Retired->ClearFlags(ECVF_SetByMask);
-	Retired->SetFlags(RetiredPriority);
 	return true;
 }
 

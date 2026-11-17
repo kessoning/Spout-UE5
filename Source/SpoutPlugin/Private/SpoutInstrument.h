@@ -40,7 +40,7 @@
  * Generation is unique within its path; joins MUST include completionPath, especially during mode switches.
  * Old version 7 shared-slot R rows cannot establish comparable final-copy completion.
  *
- * Version 7 adds the asynchronous receive (r.Spout.AsyncReceive) and seven columns for it:
+ * Version 7 adds the asynchronous receive and seven columns for it:
  *   kind W     one row per worker transfer attempt, on the worker thread: tDetect the start of the attempt,
  *              tAccess0/tAcquire/acquired the Spout access, tCopyRec after the copy and the written-fence signal
  *              were recorded, tGpuDone when the copy was seen complete (or given up), tRelease after access was

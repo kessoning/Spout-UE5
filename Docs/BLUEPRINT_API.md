@@ -183,8 +183,8 @@ limits, are in [limitations](LIMITATIONS.md#async-receive-the-default). Until th
   checkbox under **Spout**, on by default; a value that differs from that default is saved with the
   actor. It is wired to this input. Two example actors with the same Spout Name must use the same
   value. Its variable keeps its earlier name, `AsyncReceiveBeta`, so that saved values stay attached.
-- **Console variables:** `r.Spout.AsyncReceive` is retired. It is still registered so old command
-  lines do not fail, it logs a warning when set to anything but 0, and it selects nothing.
+- **Console variables:** no console variable selects the receive mode; the old
+  `r.Spout.AsyncReceive` has been removed.
   `r.Spout.AsyncReceive.GpuPriority` (default 0) remains a diagnostic for Async Receive sessions.
   `r.Spout.FrameWaitMs` applies to the synchronous path only.
 

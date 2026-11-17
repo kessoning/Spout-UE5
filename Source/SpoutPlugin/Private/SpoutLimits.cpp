@@ -37,24 +37,6 @@ namespace
 		TEXT("Experimental. 1: the sender's frame notification is read again while the texture access lock is held, and a receive call that found nothing new still copies ")
 		TEXT("when the sender published since the previous call. 0 (default): off. Always on while r.Spout.FrameWaitMs is above 0."),
 		ECVF_RenderThreadSafe);
-	// Retired and ignored. The receive mode is a per-receiver setting (Async Receive, on by default) and nothing reads
-	// this variable to choose a path. It stays registered so that old command lines and configuration files do not fail,
-	// and it says so when set.
-	void WarnRetiredAsyncReceive(IConsoleVariable* Variable)
-	{
-		if (Variable && Variable->GetInt() != 0)
-		{
-			UE_LOG(LogSpoutPlugin, Warning,
-				TEXT("r.Spout.AsyncReceive is retired and ignored: it no longer selects the receive path of any stream. ")
-				TEXT("Async Receive is chosen per receiver (the Async Receive input of Spout Receiver and Spout Receiver With Material, on by default, ")
-				TEXT("or the example receiver actor's Details), and a receiver that does not ask for it stays synchronous."));
-		}
-	}
-	TAutoConsoleVariable<int32> GSpoutAsyncReceive(TEXT("r.Spout.AsyncReceive"), 0,
-		TEXT("Retired and ignored. It no longer selects the receive path of any stream: Async Receive is a per-receiver setting ")
-		TEXT("(the Async Receive input of Spout Receiver and Spout Receiver With Material, on by default). Setting it to anything but 0 only logs this warning."),
-		FConsoleVariableDelegate::CreateStatic(&WarnRetiredAsyncReceive),
-		ECVF_Default);
 	TAutoConsoleVariable<int32> GSpoutAsyncReceiveGpuPriority(TEXT("r.Spout.AsyncReceive.GpuPriority"), 0,
 		TEXT("Internal diagnostic of Async Receive, for receivers that use it. 0 (default): the GPU scheduling priority of the worker's device is left alone. ")
 		TEXT("Otherwise, clamped to -7..7, the priority asked for that device relative to the process's other devices. Read once, when the worker's device is created."),
@@ -63,6 +45,7 @@ namespace
 		TEXT("1 (default): the sender and the synchronous receiver move pixels through plugin-owned shared textures on a native D3D11 device and never wrap Unreal's resources for D3D11. ")
 		TEXT("0: they wrap Unreal's resources with D3D11-on-12, as before. Read once per process, at the first Spout initialization: a later change takes effect at the next start."),
 		ECVF_Default);
+#if SPOUT_WITH_DEV_SETTINGS
 	// Development switches (SpoutLimits.h). The console help says they are not supported settings.
 	TAutoConsoleVariable<int32> GSpoutDevAsyncSend(TEXT("r.Spout.Dev.AsyncSend"), 1,
 		TEXT("Development switch, not a supported setting. 1 (default): render-target senders opened afterwards use the asynchronous sender (a worker takes the access lock and copies; ")
@@ -72,6 +55,7 @@ namespace
 		TEXT("Development switch, not a supported setting. With r.Spout.Dev.AsyncSend 1: 0 (default) the worker copies a frame once its fill finished; ")
 		TEXT("1 also waits for the end of Unreal's frame on its GPU queue, at most 100 ms."),
 		ECVF_Default);
+#endif
 	FCriticalSection GSpoutLimitBudgetMutex;
 	int64 GSpoutLimitReserved = 0, GSpoutLimitPeak = 0, GSpoutLimitRejected = 0;
 }
@@ -97,11 +81,15 @@ double SpoutLimits::FrameWaitSeconds() { const float V = GSpoutFrameWaitMs.GetVa
 double SpoutLimits::FrameWaitBudgetSeconds() { const float V = GSpoutFrameWaitBudgetMs.GetValueOnAnyThread(); return FMath::IsFinite(V) ? double(FMath::Clamp(V,0.0f,MaxFrameWaitMs))/1000.0 : 0.0; }
 double SpoutLimits::FrameWaitPollSeconds() { return double(FMath::Clamp(GSpoutFrameWaitPollUs.GetValueOnAnyThread(),MinFrameWaitPollUs,MaxFrameWaitPollUs))/1000000.0; }
 bool SpoutLimits::FrameCountRecheck() { return GSpoutFrameCountRecheck.GetValueOnAnyThread() != 0 || FrameWaitSeconds() > 0.0; }
-void SpoutLimits::WarnIfRetiredSettingsSet() { WarnRetiredAsyncReceive(GSpoutAsyncReceive.AsVariable()); }
 int32 SpoutLimits::AsyncReceiveGpuPriority() { return FMath::Clamp(GSpoutAsyncReceiveGpuPriority.GetValueOnAnyThread(),-7,7); }
 bool SpoutLimits::SharedSlotInteropRequested() { return GSpoutSharedSlotInterop.GetValueOnAnyThread() != 0; }
+#if SPOUT_WITH_DEV_SETTINGS
 bool SpoutLimits::DevAsyncSend() { return GSpoutDevAsyncSend.GetValueOnAnyThread() != 0; }
 int32 SpoutLimits::DevAsyncSendDrainAfter() { return GSpoutDevAsyncSendDrainAfter.GetValueOnAnyThread() != 0 ? 1 : 0; }
+#else
+bool SpoutLimits::DevAsyncSend() { return true; }
+int32 SpoutLimits::DevAsyncSendDrainAfter() { return 0; }
+#endif
 int64 SpoutLimits::RetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitReserved; }
 int64 SpoutLimits::PeakRetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitPeak; }
 int64 SpoutLimits::RejectedAllocations() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitRejected; }

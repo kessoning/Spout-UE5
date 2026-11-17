@@ -200,8 +200,8 @@ the end of October 2026 it was an opt-in beta, off by default.
   for example) is expected and logged as information; the other causes are warnings. The Spout
   Receiver actor shows the receive path in use in its Applied Settings. A later sender size, format
   or handle is tried again.
-- **Console variables.** `r.Spout.AsyncReceive` is retired: still registered, ignored, and it logs a
-  warning when set to anything but 0. It selects nothing for any receiver.
+- **Console variables.** No console variable selects the receive mode; the old
+  `r.Spout.AsyncReceive` has been removed.
   `r.Spout.AsyncReceive.GpuPriority` (default 0) is a diagnostic for Async Receive sessions.
   `r.Spout.FrameWaitMs` and the frame-count recheck apply to the synchronous path only.
 - **Measured against the synchronous receive.** On the RTX 2060 laptop, UE 5.8 packaged, in a

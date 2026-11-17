@@ -2,10 +2,10 @@
  "absent": [],
  "basis": "generated",
  "inputs": {
-  "Docs/BLUEPRINT_API.md": "923d3d83a173a2c2dd61bf74269de8aaf7014c0696bf7fd76deee3b8ea52586f",
+  "Docs/BLUEPRINT_API.md": "3f709009da0115782e7fa93825fc00ccebf44dd8662f8eda08dd2cddb2373b5d",
   "Docs/CPP_API.md": "025e7dceeae237b56ec902778beecbe520cb58f4a74c3533bfc1bdf14f5aaca1",
   "Docs/INSTALLATION.md": "42e7aa8304d56a8f9d141818c7ab793c6ed4721d774ad59e6c67ae3a449f2869",
-  "Docs/LIMITATIONS.md": "5d9fd53a6af443ca6b77c48112e1670bd15c88c7091b3d0eaa86d81c7c06bb0a",
+  "Docs/LIMITATIONS.md": "ee0215c1510690a1dcea3b34a33d59f728dd1a26534a4f50fbcaedad85edcd59",
   "Docs/PACKAGING_AND_DISTRIBUTION.md": "7216aae0d56856813d129a5a6245c3e0487d7246caebca5d430182aa36325f5f",
   "Docs/QUICK_START.md": "1993329472d810003b557105f731a47ee53f5a748c9a0cba766fa3d3e2deef70",
   "Docs/RECEIVER.md": "8073b0b6476e563d4277540f553b517ed6e7ee5be79b018c83202906a0b47b54",
@@ -20,7 +20,7 @@
  },
  "pdf": {
   "path": "Docs/Manual/SpoutPlugin_User_Manual.pdf",
-  "sha256": "abf6a035efa52d112aa5fdcb743ccd39503e90832c898189ffdf71f1faddb505"
+  "sha256": "62f4ad18c9920b70a809653c8bd9c6fad8f9dbd95b1e991cc1ce6b0e2273ffaa"
  },
  "what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them"
 }

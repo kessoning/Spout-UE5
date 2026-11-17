@@ -6,7 +6,7 @@
 // per-session contract (default, independent names, same-name conflicts, close and reopen, fallback) is tested with
 // real transfers in SpoutPluginAsyncBetaTests.cpp.
 //
-// What these tests cover: the retired process-wide setting; the worker's poll of the notification and that it
+// What these tests cover: that no process-wide setting chooses the mode; the worker's poll of the notification and that it
 // leaves the pending-frame state alone; the slot bookkeeping compiled with Unreal's own toolchain (its full
 // test is native, Tests/Native/SpoutSlotPoolTests.cpp); and that a stream which cannot be made is refused
 // with a reason, takes no Spout access and leaves nothing behind.
@@ -27,37 +27,14 @@
 
 #define SPOUT_ASYNC_FLAGS (EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext | EAutomationTestFlags::EngineFilter)
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncOffByDefault, "SpoutPlugin.Async.OffByDefault", SPOUT_ASYNC_FLAGS)
-bool FSpoutAsyncOffByDefault::RunTest(const FString&)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncNoProcessWideSwitch, "SpoutPlugin.Async.NoProcessWideSwitch", SPOUT_ASYNC_FLAGS)
+bool FSpoutAsyncNoProcessWideSwitch::RunTest(const FString&)
 {
-	// r.Spout.AsyncReceive is retired: still registered so old command lines do not fail, 0 by default, and
-	// setting it only logs that it is ignored. That it selects nothing is tested with real transfers in
+	// No process-wide setting chooses Async Receive. The old r.Spout.AsyncReceive switch has been removed: a value an old
+	// ini file or command line still sets only leaves Unreal's unregistered placeholder, which nothing reads. That each
+	// receiver's own input decides is tested with real transfers in
 	// SpoutPlugin.AsyncBeta.DefaultIsAsyncReceiveAndSynchronousIsSelectable.
-	IConsoleVariable* Variable = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive"));
-	if (!Variable)
-	{
-		AddError(TEXT("r.Spout.AsyncReceive is not registered: old command lines that set it would fail"));
-		return false;
-	}
-	const FString Before = Variable->GetString();
-	const EConsoleVariableFlags BeforePriority = static_cast<EConsoleVariableFlags>(Variable->GetFlags() & ECVF_SetByMask);
-	if ((Variable->GetFlags() & ECVF_SetByMask) == ECVF_SetByConstructor)
-	{
-		TestEqual(TEXT("untouched, the retired setting is 0"), Variable->GetInt(), 0);
-	}
-	else
-	{
-		AddInfo(TEXT("r.Spout.AsyncReceive was set before this test; its default is checked in the source."));
-	}
-	TestTrue(TEXT("its help says it is retired and ignored"), FString(Variable->GetHelp()).Contains(TEXT("Retired and ignored")));
-	// One warning for the 1 below, and one more when restoring a value that was not 0.
-	AddExpectedMessage(TEXT("r.Spout.AsyncReceive is retired and ignored"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains,
-		FCString::Atoi(*Before) != 0 ? 2 : 1);
-	Variable->Set(TEXT("1"), ECVF_SetByCode);
-	Variable->Set(TEXT("0"), ECVF_SetByCode);
-	Variable->Set(*Before, ECVF_SetByCode);
-	Variable->ClearFlags(ECVF_SetByMask);
-	Variable->SetFlags(BeforePriority);
+	TestNull(TEXT("r.Spout.AsyncReceive is not registered"), IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive")));
 
 	// The diagnostic beside it: 0 unless set, and never outside what DXGI accepts.
 	IConsoleVariable* Priority = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AsyncReceive.GpuPriority"));

@@ -15,16 +15,11 @@ FString FSpoutModule::GetBuildSourceIdentity()
 }
 #include "SpoutAsyncSend.h"
 #include "SpoutBPFunctionLibrary.h"
-#include "SpoutLimits.h"
 
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
-
-#if WITH_EDITOR
-#include "Engine/World.h"
-#endif
 
 DEFINE_LOG_CATEGORY(LogSpoutPlugin);
 
@@ -130,7 +125,6 @@ void FSpoutModule::StartupModule()
 {
 	// Nothing to initialize eagerly; D3D/Spout resources are created on first use.
 	UE_LOG(LogSpoutPlugin, Log, TEXT("Spout Plugin Loaded"));
-	SpoutLimits::WarnIfRetiredSettingsSet();
 
 #if PLATFORM_WINDOWS
 	// Explicitly load Spout.dll so its delay-loaded imports bind on first Spout call
@@ -140,36 +134,11 @@ void FSpoutModule::StartupModule()
 	// while no asynchronous sender exists.
 	FSpoutAsyncSendStream::RegisterHooks();
 #endif
-
-#if WITH_EDITOR
-	WorldCleanupHandle = FWorldDelegates::OnWorldCleanup.AddRaw(this, &FSpoutModule::OnWorldCleanup);
-#endif
+	// The end of a Play In Editor session closes that session's streams: see USpoutSubsystem.
 }
-
-#if WITH_EDITOR
-void FSpoutModule::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
-{
-	// Only PIE. A packaged game's world is EWorldType::Game and tears down on every level
-	// transition — closing streams there would kill senders that are meant to survive a
-	// travel. Editor worlds never carry Spout streams.
-	if (!World || World->WorldType != EWorldType::PIE)
-	{
-		return;
-	}
-
-	// Release the streams but keep the interop device: rebuilding it on every PIE run would
-	// cost far more than it saves.
-	USpoutBPFunctionLibrary::CloseAllStreams();
-}
-#endif
 
 void FSpoutModule::ShutdownModule()
 {
-#if WITH_EDITOR
-	FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
-	WorldCleanupHandle.Reset();
-#endif
-
 	// Ensure all DX/Spout resources are properly released before module teardown.
 	USpoutBPFunctionLibrary::GlobalShutdown();
 

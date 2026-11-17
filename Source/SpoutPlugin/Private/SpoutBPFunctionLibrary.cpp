@@ -18,6 +18,7 @@
 #include "SpoutSender.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutSession.h"
+#include "SpoutSubsystem.h"
 #include "SpoutTextureUtils.h"
 #include "SpoutValidation.h"
 #include "SpoutLimits.h"
@@ -105,6 +106,7 @@ void USpoutBPFunctionLibrary::CloseAllStreams()
 	// relying on. The order is fixed and enforced in one place.
 	FSpoutShutdownSteps Steps;
 	SpoutLifecycle::RunOrderedShutdown(Steps);
+	USpoutSubsystem::NoteAllStreamsClosed();
 }
 
 void USpoutBPFunctionLibrary::GlobalShutdown()
@@ -112,6 +114,7 @@ void USpoutBPFunctionLibrary::GlobalShutdown()
 	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return;
 	FSpoutShutdownSteps Steps(false);
 	SpoutLifecycle::RunOrderedShutdown(Steps);
+	USpoutSubsystem::NoteAllStreamsClosed();
 	FSpoutD3DContext::Get().Shutdown();
 
 	// After the context is gone nothing else will use the tracker, and the UObject system is still

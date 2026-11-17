@@ -32,6 +32,7 @@
 #include "SpoutRHIState.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutSession.h"
+#include "SpoutSubsystem.h"
 #include "SpoutTextureUtils.h"
 #include "SpoutModule.h"
 #include "SpoutValidation.h"
@@ -1275,6 +1276,9 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 		}
 		return Refuse(ESpoutReceiveResult::InvalidName);
 	}
+	// The world this receiver belongs to (the actor's when an actor asks), so the end of Play closes only its own
+	// world's streams.
+	USpoutSubsystem::NoteStreamUse(SpoutName, ESpoutType::Receiver, ManagedConsumer);
 
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
 	if (!FSpoutSession::Get().IsRunning()) return Refuse(ESpoutReceiveResult::Unavailable);
@@ -1674,6 +1678,7 @@ void FSpoutReceiver::Close(const FName SpoutName)
 	// the texture after the caller has been told the receiver is closed. Scoped to the Receiver
 	// role: a Sender with the same FName keeps running.
 	FSpoutSession::Get().CancelStream(SpoutName, ESpoutType::Receiver);
+	USpoutSubsystem::NoteStreamClosed(SpoutName, ESpoutType::Receiver);
 
 	// Registry is keyed by (Name, Type); scope removal to the Receiver entry only, leaving any
 	// Sender entry with the same FName untouched. Dropping the entry releases the opened shared

@@ -150,6 +150,7 @@ namespace
 	thread_local int32 GHoldThisFlushRequestMs = 0;
 #endif
 
+#if SPOUT_WITH_DEV_SETTINGS
 	/**
 	 * The development outcome log (r.Spout.Dev.AsyncSend.OutcomeLog). The render thread and the workers queue rows under
 	 * Mutex, a leaf held only to append one row or to swap the queue out (no other allocation under it); the log's own
@@ -402,6 +403,25 @@ namespace
 		TEXT("Development switch, not a supported setting. A file path: the asynchronous sender appends one CSV row per frame (and per send it did not accept, ")
 		TEXT("per stream start and stop) to it. Empty (default): off."),
 		FConsoleVariableDelegate::CreateStatic(&OnOutcomeLogChanged), ECVF_Default);
+#else
+	/** Shipping builds have no outcome log: nothing is queued, written or registered, and the rows are never built. */
+	class FSpoutSendOutcomeLog final
+	{
+	public:
+		static FSpoutSendOutcomeLog& Get()
+		{
+			static FSpoutSendOutcomeLog Instance;
+			return Instance;
+		}
+		static constexpr bool IsOn() { return false; }
+		void Open() {}
+		void SetPath(const FString&) {}
+		void Push(FString&&) {}
+		void Flush() {}
+		void RequestFlush() {}
+		void Shutdown() {}
+	};
+#endif
 
 	/** Quoted for a CSV field. */
 	FString Quoted(const FString& Text)
@@ -1454,8 +1474,10 @@ void FSpoutAsyncSendStream::RegisterHooks()
 		GEndFrameHandle = FCoreDelegates::OnEndFrame.AddStatic(&FSpoutAsyncSendStream::QueueFrameEndSignal);
 	}
 	// A path set before the module registered the variable (an ini file, the command line) does not call its delegate.
+#if SPOUT_WITH_DEV_SETTINGS
 	FSpoutSendOutcomeLog::Get().Open();
 	FSpoutSendOutcomeLog::Get().SetPath(GSpoutDevAsyncSendOutcomeLog.GetValueOnGameThread());
+#endif
 }
 
 void FSpoutAsyncSendStream::FlushOutcomeLog()

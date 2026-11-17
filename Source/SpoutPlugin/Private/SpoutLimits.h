@@ -4,6 +4,10 @@
 #include "CoreMinimal.h"
 #include "PixelFormat.h"
 
+// The development switches (r.Spout.Dev.*) and the asynchronous sender's outcome log exist outside Shipping builds
+// only. A Shipping build behaves as with their defaults.
+#define SPOUT_WITH_DEV_SETTINGS (!UE_BUILD_SHIPPING)
+
 namespace SpoutLimits
 {
 	int32 MaxActiveStreams();
@@ -64,16 +68,9 @@ namespace SpoutLimits
 	 */
 	bool FrameCountRecheck();
 
-	// There is no process-wide switch for the asynchronous receive. r.Spout.AsyncReceive is retired: still
-	// registered, ignored, and it logs a warning when set. Async Receive is chosen per receiver session
+	// There is no process-wide switch for the asynchronous receive. Async Receive is chosen per receiver session
 	// (FSpoutReceiver::Receive, bAsyncReceive) and decided once per session; see FSpoutSharedSender. A stream on the
 	// asynchronous path makes no publication wait: r.Spout.FrameWaitMs applies to the synchronous path only.
-
-	/**
-	 * Logs the retirement warning when r.Spout.AsyncReceive already holds a value other than 0 at module startup (set
-	 * by an ini file or the command line before the plugin registered it, which its change callback does not see).
-	 */
-	void WarnIfRetiredSettingsSet();
 
 	/**
 	 * r.Spout.AsyncReceive.GpuPriority, clamped to -7..7. A diagnostic of Async Receive, 0 by default:
@@ -91,7 +88,8 @@ namespace SpoutLimits
 	bool SharedSlotInteropRequested();
 
 	// ---- Development switches (not supported settings). The asynchronous render-target send is the default;
-	// r.Spout.Dev.AsyncSend 0 selects the synchronous shared-slot send for diagnosis. ----
+	// r.Spout.Dev.AsyncSend 0 selects the synchronous shared-slot send for diagnosis. Shipping builds do not register
+	// these variables (SPOUT_WITH_DEV_SETTINGS) and use their defaults. ----
 
 	/**
 	 * r.Spout.Dev.AsyncSend != 0 (default 1): render-target senders on the shared-slot path use the asynchronous sender

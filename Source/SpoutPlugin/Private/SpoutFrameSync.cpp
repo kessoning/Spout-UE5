@@ -114,7 +114,6 @@ namespace
 
 TUniquePtr<ISpoutFrameSyncBackend> MakeSpoutSdkFrameSyncBackend()
 {
-#if PLATFORM_WINDOWS
 	// Constructing spoutFrameCount is the first touch of a Spout symbol on this path, which is what
 	// triggers the delay-load bind of Spout.dll. Binding a DLL that never loaded terminates the
 	// process with 0xC06D007E. A null backend refuses access as well as Open.
@@ -135,9 +134,6 @@ TUniquePtr<ISpoutFrameSyncBackend> MakeSpoutSdkFrameSyncBackend()
 
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ConstructSdkFrameCount);
 	return MakeUnique<FSpoutSdkFrameSyncBackend>();
-#else
-	return nullptr;
-#endif
 }
 
 void RecycleSpoutSdkFrameSyncBackend(TUniquePtr<ISpoutFrameSyncBackend> Backend)
@@ -172,21 +168,13 @@ void DrainSpoutSdkFrameSyncBackendPool()
 
 int32 NumPooledSpoutSdkFrameSyncBackends()
 {
-#if PLATFORM_WINDOWS
 	FScopeLock Lock(&GFrameSyncBackendPoolMutex);
 	return GFrameSyncBackendPool.Num();
-#else
-	return 0;
-#endif
 }
 
 int32 MaxPooledSpoutSdkFrameSyncBackends()
 {
-#if PLATFORM_WINDOWS
 	return GFrameSyncBackendPoolCapacity;
-#else
-	return 0;
-#endif
 }
 
 FSpoutFrameSync::FSpoutFrameSync(TUniquePtr<ISpoutFrameSyncBackend> InBackend)

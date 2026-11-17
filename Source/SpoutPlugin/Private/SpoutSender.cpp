@@ -19,6 +19,7 @@
 #include "SpoutSenderRegistry.h"
 #include "SpoutModule.h"
 #include "SpoutSession.h"
+#include "SpoutSubsystem.h"
 #include "SpoutValidation.h"
 #include "SpoutLimits.h"
 #include "SpoutInstrument.h"
@@ -1706,6 +1707,8 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 		}
 		return false;
 	}
+	// The world this sender belongs to, so the end of Play closes only its own world's streams.
+	USpoutSubsystem::NoteStreamUse(SpoutName, ESpoutType::Sender);
 
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
 	if (!FSpoutSession::Get().IsRunning()) return false;
@@ -1813,6 +1816,7 @@ void FSpoutSender::Close(FName SpoutName)
 	// stops work that is queued but has not run from re-creating any of it. Scoped to the Sender
 	// role, so a Receiver with the same FName is untouched.
 	FSpoutSession::Get().CancelStream(SpoutName, ESpoutType::Sender);
+	USpoutSubsystem::NoteStreamClosed(SpoutName, ESpoutType::Sender);
 
 	// Drop the name from the viewport queue, so a closed viewport sender is not published again at
 	// the next present.

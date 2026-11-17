@@ -179,77 +179,45 @@ void FSpoutD3DContext::Shutdown()
 
 bool FSpoutD3DContext::IsInitialized() const
 {
-#if PLATFORM_WINDOWS
 	// InitMutex also guards Shutdown(), so a concurrent teardown cannot race with this read.
 	FScopeLock Lock(&InitMutex);
 	return D3D11Device != nullptr;
-#else
-	return false;
-#endif
 }
 
 bool FSpoutD3DContext::IsSpoutAvailable() const
 {
-#if PLATFORM_WINDOWS
 	FScopeLock Lock(&InitMutex);
 	return D3D11Device && D3D11On12Device && SpoutSenderNames && SpoutDirectX;
-#else
-	return false;
-#endif
 }
 
 ID3D11Device* FSpoutD3DContext::GetD3D11Device() const
 {
-#if PLATFORM_WINDOWS
 	return D3D11Device.Get();
-#else
-	return nullptr;
-#endif
 }
 
 ID3D11DeviceContext* FSpoutD3DContext::GetImmediateContext() const
 {
-#if PLATFORM_WINDOWS
 	return ImmediateContext.Get();
-#else
-	return nullptr;
-#endif
 }
 
 ID3D11On12Device* FSpoutD3DContext::GetD3D11On12Device() const
 {
-#if PLATFORM_WINDOWS
 	return D3D11On12Device.Get();
-#else
-	return nullptr;
-#endif
 }
 
 ID3D12CommandQueue* FSpoutD3DContext::GetD3D12CommandQueue() const
 {
-#if PLATFORM_WINDOWS
 	return D3D12CommandQueue.Get();
-#else
-	return nullptr;
-#endif
 }
 
 FSpoutSafeSenderNames* FSpoutD3DContext::GetSenderNames() const
 {
-#if PLATFORM_WINDOWS
 	return SpoutSenderNames.Get();
-#else
-	return nullptr;
-#endif
 }
 
 spoutDirectX* FSpoutD3DContext::GetSpoutDirectX() const
 {
-#if PLATFORM_WINDOWS
 	return SpoutDirectX.Get();
-#else
-	return nullptr;
-#endif
 }
 
 FCriticalSection& FSpoutD3DContext::GetD3D11ContextMutex()

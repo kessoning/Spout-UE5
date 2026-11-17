@@ -117,7 +117,7 @@ public:
 	 * texture: the first accepted call on an entry fixes it for the entry's life (until Close or global cleanup),
 	 * and a later call asking for the other mode is refused before anything is reserved or queued, with a
 	 * throttled warning, leaving the session and its other consumers as they were. Nothing else selects the
-	 * asynchronous path: the retired r.Spout.AsyncReceive variable is ignored.
+	 * asynchronous path.
 	 *
 	 * ManagedConsumer: null for the Blueprint/C++ entry points, which mark the session as used by an unmanaged caller
 	 * once a receive is ACCEPTED (a refused call marks nothing). A placeable receiver actor passes itself; it is then

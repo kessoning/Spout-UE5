@@ -5,8 +5,7 @@
 /**
  * The asynchronous receive path: Async Receive, the default. A receiver session uses it unless the Async Receive
  * input of the receive functions (FSpoutReceiver::Receive, bAsyncReceive) is off; the session's first
- * accepted call fixes the request for the session's life. No process-wide setting enables it (r.Spout.AsyncReceive
- * is retired and ignored).
+ * accepted call fixes the request for the session's life. No process-wide setting enables it.
  *
  * The synchronous receive (SpoutReceiver.cpp) takes Spout access, copies and waits for the copy on
  * the render thread, on a D3D11-on-12 device that shares Unreal's graphics queue. Under GPU load
