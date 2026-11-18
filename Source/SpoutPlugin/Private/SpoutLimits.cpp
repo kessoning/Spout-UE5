@@ -7,13 +7,13 @@
 
 namespace
 {
-	TAutoConsoleVariable<int32> GSpoutLimitActive(TEXT("r.Spout.MaxActiveStreams"),32,TEXT("Maximum active sender/receiver roles combined. Close unused names before opening more."),ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutLimitPending(TEXT("r.Spout.MaxPendingCommands"),128,TEXT("Maximum queued non-viewport Spout commands, including cancelled work awaiting drain."),ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutLimitPerStream(TEXT("r.Spout.MaxPendingPerStream"),4,TEXT("Maximum queued commands per stream; excess requests return false."),ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutLimitConsumers(TEXT("r.Spout.MaxConsumersPerReceiver"),32,TEXT("Maximum material bindings and optional output targets per receiver (each independently bounded)."),ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutLimitDimension(TEXT("r.Spout.MaxTextureDimension"),8192,TEXT("Operational dimension limit, clamped to 1..16384."),ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutLimitFrameMB(TEXT("r.Spout.MaxFrameMiB"),128,TEXT("Maximum uncompressed pixel bytes per frame in MiB."),ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutLimitRetainedMB(TEXT("r.Spout.MaxRetainedMiB"),1024,TEXT("Aggregate conservative reservation budget for plugin-retained images. Caller/driver allocations are additional."),ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutLimitActive(TEXT("r.Spout.MaxActiveStreams"),SpoutLimits::DefaultMaxActiveStreams,TEXT("Maximum active sender/receiver roles combined. Close unused names before opening more."),ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutLimitPending(TEXT("r.Spout.MaxPendingCommands"),SpoutLimits::DefaultMaxPendingCommands,TEXT("Maximum queued non-viewport Spout commands, including cancelled work awaiting drain."),ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutLimitPerStream(TEXT("r.Spout.MaxPendingPerStream"),SpoutLimits::DefaultMaxPendingPerStream,TEXT("Maximum queued commands per stream; excess requests return false."),ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutLimitConsumers(TEXT("r.Spout.MaxConsumersPerReceiver"),SpoutLimits::DefaultMaxConsumersPerReceiver,TEXT("Maximum material bindings and optional output targets per receiver (each independently bounded)."),ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutLimitDimension(TEXT("r.Spout.MaxTextureDimension"),SpoutLimits::DefaultMaxTextureDimension,TEXT("Operational dimension limit, clamped to 1..16384."),ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutLimitFrameMB(TEXT("r.Spout.MaxFrameMiB"),SpoutLimits::DefaultMaxFrameMiB,TEXT("Maximum uncompressed pixel bytes per frame in MiB."),ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutLimitRetainedMB(TEXT("r.Spout.MaxRetainedMiB"),SpoutLimits::DefaultMaxRetainedMiB,TEXT("Aggregate conservative reservation budget for plugin-retained images. Caller/driver allocations are additional."),ECVF_Default);
 	// Read on the render thread, so it must be render-thread safe (a shadow copy updated in order
 	// with rendering commands) rather than read from the game thread's value.
 	TAutoConsoleVariable<int32> GSpoutAccessWaitMs(TEXT("r.Spout.AccessWaitMs"),SpoutLimits::DefaultAccessWaitMs,

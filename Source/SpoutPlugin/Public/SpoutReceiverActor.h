@@ -73,6 +73,14 @@ public:
 #endif
 
 	/**
+	 * Also receive while the level is edited, not only while the game plays, and show the stream on the screen in the
+	 * level viewport (set the viewport to Realtime to see it move). Needs Project Settings > Plugins > Spout > Startup
+	 * Policy set to Editor and Play. While Play runs, Play's copy of this actor shares the same stream.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Spout", meta = (DisplayName = "Receive In Editor"))
+	bool bReceiveInEditor = false;
+
+	/**
 	 * How the received colors are read. Auto: 8-bit streams are sRGB, 10-bit and float streams linear (right for most
 	 * applications and render targets). For a stream from an Unreal viewport (10-bit display values), choose sRGB.
 	 * All consumers of one sender share one setting: if another consumer opened it first with a different setting,
@@ -177,9 +185,13 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+	virtual bool ShouldTickIfViewportsOnly() const override;
+	virtual void Destroyed() override;
 
 private:
 	void UpdateReceiving();
+	/** Whether this actor may receive in the level editor now; otherwise Reason says why not. */
+	bool MayReceiveInEditor(FString& Reason) const;
 	/** Releases this actor's use of the connected stream (idempotent). */
 	void Release(bool bKeepConnectedName);
 	void EnsureMaterialInstance();

@@ -20,6 +20,40 @@ FString FSpoutModule::GetBuildSourceIdentity()
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "Widgets/SWidget.h"
+
+namespace
+{
+	/** Registered by the plugin's editor module (FSpoutModule::SetLevelViewportProvider); game thread only. */
+	TFunction<TSharedPtr<SWidget>(bool&)> GLevelViewportProvider;
+}
+
+void FSpoutModule::SetLevelViewportProvider(TFunction<TSharedPtr<SWidget>(bool& bOutRealtime)> Provider)
+{
+	check(IsInGameThread());
+	GLevelViewportProvider = MoveTemp(Provider);
+}
+
+TSharedPtr<SWidget> FSpoutModule::GetLevelViewport(bool& bOutRealtime)
+{
+	check(IsInGameThread());
+	bOutRealtime = false;
+	return GLevelViewportProvider ? GLevelViewportProvider(bOutRealtime) : nullptr;
+}
+
+#if SPOUT_WITH_TESTS
+namespace SpoutModuleTestHooks
+{
+	/** Tests only: replaces the level viewport provider and returns the previous one, to be put back afterwards. */
+	TFunction<TSharedPtr<SWidget>(bool&)> ExchangeLevelViewportProvider(TFunction<TSharedPtr<SWidget>(bool&)> Provider)
+	{
+		check(IsInGameThread());
+		TFunction<TSharedPtr<SWidget>(bool&)> Previous = MoveTemp(GLevelViewportProvider);
+		GLevelViewportProvider = MoveTemp(Provider);
+		return Previous;
+	}
+}
+#endif
 
 DEFINE_LOG_CATEGORY(LogSpoutPlugin);
 

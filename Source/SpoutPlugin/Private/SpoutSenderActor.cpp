@@ -10,6 +10,8 @@
 #include "EngineUtils.h"
 #include "SpoutActorSupport.h"
 #include "SpoutModule.h"
+#include "SpoutSender.h"
+#include "SpoutSettings.h"
 #include "UObject/ConstructorHelpers.h"
 
 #if WITH_EDITOR
@@ -74,6 +76,40 @@ void ASpoutSenderActor::Tick(float DeltaSeconds)
 	UpdateSending();
 }
 
+bool ASpoutSenderActor::ShouldTickIfViewportsOnly() const
+{
+	// In the level editor: while Send In Editor is on, and until a stream it still holds is closed.
+	return bSendInEditor || bClaimed;
+}
+
+void ASpoutSenderActor::Destroyed()
+{
+	// The level editor's actors get no EndPlay: deleting one must close its stream too.
+	StopSending(TEXT("Stopped"));
+	Super::Destroyed();
+}
+
+bool ASpoutSenderActor::MaySendInEditor(FString& Reason) const
+{
+	if (!bSendInEditor)
+	{
+		Reason = TEXT("Not sending in the editor: Send In Editor is off");
+		return false;
+	}
+	if (USpoutSettings::Get().StartupPolicy != ESpoutStartupPolicy::EditorAndPlay)
+	{
+		Reason = TEXT("Not sending in the editor: Project Settings > Plugins > Spout > Startup Policy is Play only");
+		return false;
+	}
+	return true;
+}
+
+void ASpoutSenderActor::YieldToPlay()
+{
+	StopSending(TEXT("Paused while Play runs: Play's copy of this sender sends the name"));
+	bYieldedToPlay = true;
+}
+
 void ASpoutSenderActor::SetEnabled(bool bNewEnabled)
 {
 	bEnabled = bNewEnabled;
@@ -126,7 +162,8 @@ void ASpoutSenderActor::StopSending(const TCHAR* Reason)
 void ASpoutSenderActor::UpdateSending()
 {
 	UWorld* World = GetWorld();
-	if (!World || !World->IsGameWorld() || GetNetMode() == NM_DedicatedServer)
+	const bool bInEditor = SpoutActorSupport::IsInLevelEditorWorld(this);
+	if (!World || (!World->IsGameWorld() && !bInEditor) || GetNetMode() == NM_DedicatedServer)
 	{
 		return;
 	}
@@ -137,6 +174,29 @@ void ASpoutSenderActor::UpdateSending()
 		return;
 	}
 	const double Now = FPlatformTime::Seconds();
+	if (bInEditor)
+	{
+		FString Reason;
+		if (!MaySendInEditor(Reason))
+		{
+			if (bClaimed || Status != Reason) StopSending(*Reason);
+			bYieldedToPlay = false;
+			return;
+		}
+		if (bYieldedToPlay)
+		{
+			if (SpoutActorSupport::IsPlaySessionRunning())
+			{
+				return;
+			}
+			// Play has ended and closed the name. It may still be listed for a moment, while its unregistration
+			// completes on the render thread: treated as just closed by this actor, not as another sender.
+			bYieldedToPlay = false;
+			RecentlyClosedName = SpoutName;
+			RecentlyClosedTime = Now;
+			NextOwnershipCheckTime = 0.0;
+		}
+	}
 	UTextureRenderTarget2D* Target = SendFrom == ESpoutSendTextureFrom::TextureRenderTarget2D ? TextureRenderTarget.Get() : nullptr;
 
 	// A different name releases the old one first; a different source under the same name restarts the stream so two
@@ -171,12 +231,31 @@ void ASpoutSenderActor::UpdateSending()
 		if (Now < NextOwnershipCheckTime) return;
 		NextOwnershipCheckTime = Now + OwnershipRetrySeconds;
 		const AActor* Holder = nullptr;
+		bool bTakenFromEditor = false;
 		if (!SpoutActorSupport::ClaimSenderName(SpoutName, this, Holder))
 		{
-			SetProblem(FString::Printf(TEXT("Not sending: the name '%s' is already used by the Spout Sender actor '%s'."), *SpoutName.ToString(), Holder ? *Holder->GetActorNameOrLabel() : TEXT("?")));
-			return;
+			// While Play runs, Play's sender takes a name the level editor's sender holds; that one resumes after Play.
+			ASpoutSenderActor* EditorHolder = const_cast<ASpoutSenderActor*>(Cast<ASpoutSenderActor>(Holder));
+			if (!bInEditor && EditorHolder && SpoutActorSupport::IsInLevelEditorWorld(EditorHolder))
+			{
+				EditorHolder->YieldToPlay();
+				bTakenFromEditor = SpoutActorSupport::ClaimSenderName(SpoutName, this, Holder);
+			}
+			else if (bInEditor && Holder && !SpoutActorSupport::IsInLevelEditorWorld(Holder))
+			{
+				// The other way round: Play already sends this name; this one waits for Play to end.
+				YieldToPlay();
+				return;
+			}
+			if (!bTakenFromEditor)
+			{
+				SetProblem(FString::Printf(TEXT("Not sending: the name '%s' is already used by the Spout Sender actor '%s'."), *SpoutName.ToString(), Holder ? *Holder->GetActorNameOrLabel() : TEXT("?")));
+				return;
+			}
 		}
-		const bool bJustClosedByUs = SpoutName == RecentlyClosedName && Now - RecentlyClosedTime < RecentlyClosedGraceSeconds;
+		// A name just closed by this actor, or by the level editor's sender that handed it over, may still be listed
+		// while its unregistration completes: it is not another sender.
+		const bool bJustClosedByUs = bTakenFromEditor || (SpoutName == RecentlyClosedName && Now - RecentlyClosedTime < RecentlyClosedGraceSeconds);
 		if (!bJustClosedByUs)
 		{
 			if (SpoutActorSupport::IsPublishedByThisProcess(SpoutName))
@@ -201,7 +280,10 @@ void ASpoutSenderActor::UpdateSending()
 		LastProblem.Reset();
 	}
 
-	const bool bAccepted = USpoutBPFunctionLibrary::SpoutSender(AppliedName, AppliedSendFrom, Target);
+	// In the level editor the viewport sources send the level editor's viewport or window. The stream belongs to this
+	// actor's world: the end of Play closes Play's senders and leaves the level editor's running.
+	const bool bAccepted = FSpoutSender::Send(AppliedName, AppliedSendFrom, Target,
+		bInEditor ? ESpoutViewportTarget::LevelEditor : ESpoutViewportTarget::Game, this);
 	if (!bAccepted)
 	{
 		bPublishing = false;
@@ -212,7 +294,7 @@ void ASpoutSenderActor::UpdateSending()
 		else
 		{
 			// Ordinary and quiet: for example the first frames of Play, before the game viewport exists.
-			Status = TEXT("Waiting for the game viewport");
+			Status = bInEditor ? TEXT("Waiting for a level viewport") : TEXT("Waiting for the game viewport");
 		}
 		return;
 	}
@@ -224,6 +306,11 @@ void ASpoutSenderActor::UpdateSending()
 		bPublishing = true;
 		LastProblem.Reset();
 		Status = FString::Printf(TEXT("Sending '%s'"), *AppliedName.ToString());
+		bool bRealtime = true;
+		if (bInEditor && AppliedSendFrom != ESpoutSendTextureFrom::TextureRenderTarget2D && FSpoutModule::GetLevelViewport(bRealtime).IsValid() && !bRealtime)
+		{
+			Status += TEXT(" (the level viewport is not Realtime: the image changes only when the viewport redraws)");
+		}
 	}
 	else if (Now - LastFrameAdvanceTime > NoFrameNoticeSeconds)
 	{
@@ -266,17 +353,22 @@ void ASpoutSenderActor::CheckForErrors()
 	}
 }
 
-void ASpoutSenderActor::MakeNameUniqueInEditor()
+void ASpoutSenderActor::MakeNameUniqueInEditor(bool bNewlyPlaced)
 {
 	UWorld* World = GetWorld();
 	if (!World || World->IsGameWorld()) return;
+	// The project's default name (Project Settings > Plugins > Spout) is the base of every name made here.
+	const FString Base = USpoutSettings::Get().GetDefaultSenderName();
+	if (bNewlyPlaced && SpoutName == GetDefault<ASpoutSenderActor>()->SpoutName)
+	{
+		SpoutName = FName(*Base);
+	}
 	TSet<FName> Used;
 	for (TActorIterator<ASpoutSenderActor> It(World); It; ++It)
 	{
 		if (*It != this) Used.Add(It->SpoutName);
 	}
 	if (!SpoutName.IsNone() && !Used.Contains(SpoutName)) return;
-	const FString Base = TEXT("UE Spout Sender");
 	FName Candidate(*Base);
 	for (int32 Index = 2; Used.Contains(Candidate); ++Index)
 	{
@@ -288,19 +380,19 @@ void ASpoutSenderActor::MakeNameUniqueInEditor()
 void ASpoutSenderActor::PostActorCreated()
 {
 	Super::PostActorCreated();
-	MakeNameUniqueInEditor();
+	MakeNameUniqueInEditor(true);
 }
 
 void ASpoutSenderActor::PostEditImport()
 {
 	Super::PostEditImport();
-	MakeNameUniqueInEditor();
+	MakeNameUniqueInEditor(false);
 }
 
 void ASpoutSenderActor::PostDuplicate(bool bDuplicateForPIE)
 {
 	Super::PostDuplicate(bDuplicateForPIE);
-	if (!bDuplicateForPIE) MakeNameUniqueInEditor();
+	if (!bDuplicateForPIE) MakeNameUniqueInEditor(false);
 }
 #endif
 

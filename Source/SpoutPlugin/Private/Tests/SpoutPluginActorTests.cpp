@@ -131,7 +131,7 @@ bool FSpoutActorsCloseReceiverUnchanged::RunTest(const FString&)
 	CloseForTest(Name);
 	TestFalse(TEXT("Close Receiver closes a session actors use, as before"), EntryExists(Name));
 	TestFalse(TEXT("the actor's later release is a harmless no-op"), FSpoutReceiver::ReleaseManagedConsumer(Name, A.Get(), nullptr, NAME_None, nullptr));
-	const FSpoutReceiverSessionInfo Info = FSpoutReceiver::GetSessionInfo(Name);
+	const FSpoutReceiverSessionState Info = FSpoutReceiver::GetSessionState(Name);
 	TestFalse(TEXT("no session reported after close"), Info.bExists);
 	return true;
 }
@@ -197,16 +197,16 @@ bool FSpoutActorsSessionMembershipAndIdentity::RunTest(const FString&)
 	TStrongObjectPtr<UTexture2D> Holder(NewObject<UTexture2D>()), Refused(NewObject<UTexture2D>());
 	TSharedPtr<FSpoutSharedSender> Entry = OpenEntry(Name);
 	Entry->ManagedConsumers.Add(FObjectKey(Holder.Get()));
-	const FSpoutReceiverSessionInfo ForHolder = FSpoutReceiver::GetSessionInfo(Name, Holder.Get());
-	const FSpoutReceiverSessionInfo ForRefused = FSpoutReceiver::GetSessionInfo(Name, Refused.Get());
+	const FSpoutReceiverSessionState ForHolder = FSpoutReceiver::GetSessionState(Name, Holder.Get());
+	const FSpoutReceiverSessionState ForRefused = FSpoutReceiver::GetSessionState(Name, Refused.Get());
 	TestTrue(TEXT("the leaseholder is a member of the session"), ForHolder.bIsManagedConsumer);
 	TestFalse(TEXT("an actor without an accepted receive is not, although the session has a consumer"), ForRefused.bIsManagedConsumer);
 	TestEqual(TEXT("both see one consumer"), ForRefused.ManagedConsumers, 1);
 	TestTrue(TEXT("the session has an identity"), ForHolder.SessionId != 0);
-	TestEqual(TEXT("the identity is stable while the session lives"), FSpoutReceiver::GetSessionInfo(Name).SessionId, ForHolder.SessionId);
+	TestEqual(TEXT("the identity is stable while the session lives"), FSpoutReceiver::GetSessionState(Name).SessionId, ForHolder.SessionId);
 	CloseForTest(Name); // a Blueprint Close Receiver
 	OpenEntry(Name);    // reopened by the next receive
-	const FSpoutReceiverSessionInfo Reopened = FSpoutReceiver::GetSessionInfo(Name, Holder.Get());
+	const FSpoutReceiverSessionState Reopened = FSpoutReceiver::GetSessionState(Name, Holder.Get());
 	TestTrue(TEXT("a reopened session has a new identity"), Reopened.SessionId != 0 && Reopened.SessionId != ForHolder.SessionId);
 	TestFalse(TEXT("membership does not carry over to the reopened session"), Reopened.bIsManagedConsumer);
 	CloseForTest(Name);

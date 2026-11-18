@@ -837,27 +837,16 @@ namespace
 	}
 
 	/**
-	 * The game viewport's rectangle inside its window's back buffer, in pixels, resolved on the game thread
+	 * A viewport widget's rectangle inside its window's back buffer, in pixels, resolved on the game thread
 	 * (Game Viewport Only). Slate's tick-space geometry is in desktop pixels, DPI scale included, and so is the
-	 * window's geometry in screen; their difference is the viewport's offset in the window's back buffer. In Play
-	 * In Editor this is the PIE viewport inside the level editor; in a standalone or packaged game it is the
-	 * whole client area. Returns false when there is no game viewport widget (no game running).
+	 * window's geometry in screen; their difference is the viewport's offset in the window's back buffer. For the
+	 * game viewport in Play In Editor this is the PIE viewport inside the level editor; in a standalone or packaged
+	 * game it is the whole client area. Returns false for an empty rectangle.
 	 */
-	bool ResolveGameViewportRect(FIntRect& OutRect)
+	bool ComputeViewportRectInWindow(const SWindow& Window, const SWidget& ViewportWidget, FIntRect& OutRect)
 	{
-		UGameViewportClient* GameViewportClient = GEngine ? GEngine->GameViewport : nullptr;
-		if (!GameViewportClient || !GameViewportClient->Viewport)
-		{
-			return false;
-		}
-		const TSharedPtr<SWindow> Window = GameViewportClient->GetWindow();
-		const TSharedPtr<SViewport> ViewportWidget = GameViewportClient->GetGameViewportWidget();
-		if (!Window.IsValid() || !ViewportWidget.IsValid())
-		{
-			return false;
-		}
-		const FGeometry WidgetGeometry = ViewportWidget->GetTickSpaceGeometry();
-		const FGeometry WindowGeometry = Window->GetWindowGeometryInScreen();
+		const FGeometry WidgetGeometry = ViewportWidget.GetTickSpaceGeometry();
+		const FGeometry WindowGeometry = Window.GetWindowGeometryInScreen();
 		const FVector2D WidgetPosition(WidgetGeometry.GetAbsolutePosition());
 		const FVector2D WindowPosition(WindowGeometry.GetAbsolutePosition());
 		const FVector2D WidgetSize(WidgetGeometry.GetAbsoluteSize());
@@ -871,13 +860,48 @@ namespace
 		return true;
 	}
 
+	/** The game viewport's rectangle (Game Viewport Only). False when there is no game viewport widget (no game running). */
+	bool ResolveGameViewportRect(FIntRect& OutRect)
+	{
+		UGameViewportClient* GameViewportClient = GEngine ? GEngine->GameViewport : nullptr;
+		if (!GameViewportClient || !GameViewportClient->Viewport)
+		{
+			return false;
+		}
+		const TSharedPtr<SWindow> Window = GameViewportClient->GetWindow();
+		const TSharedPtr<SViewport> ViewportWidget = GameViewportClient->GetGameViewportWidget();
+		return Window.IsValid() && ViewportWidget.IsValid() && ComputeViewportRectInWindow(*Window, *ViewportWidget, OutRect);
+	}
+
+	/**
+	 * The level editor's active viewport, for a Spout Sender actor sending in the editor: its window (compared with the
+	 * window each back buffer belongs to) and its rectangle in that window's back buffer, worked out as for the game
+	 * viewport. False outside the editor, or when there is no level viewport.
+	 */
+	bool ResolveLevelEditorViewport(const SWindow*& OutWindow, FIntRect& OutRect)
+	{
+		bool bRealtime = false;
+		const TSharedPtr<SWidget> ViewportWidget = FSpoutModule::GetLevelViewport(bRealtime);
+		if (!ViewportWidget.IsValid() || !FSlateApplication::IsInitialized())
+		{
+			return false;
+		}
+		const TSharedPtr<SWindow> Window = FSlateApplication::Get().FindWidgetWindow(ViewportWidget.ToSharedRef());
+		if (!Window.IsValid() || !ComputeViewportRectInWindow(*Window, *ViewportWidget, OutRect))
+		{
+			return false;
+		}
+		OutWindow = Window.Get();
+		return true;
+	}
+
 	class FSpoutViewportSender
 	{
 	public:
 		// ESpoutSendTextureFrom::GameViewport: the whole back buffer of the game viewport's window.
 		static FSpoutViewportSender& Get()
 		{
-			static FSpoutViewportSender Instance(false);
+			static FSpoutViewportSender Instance(false, ESpoutViewportTarget::Game);
 			return Instance;
 		}
 
@@ -886,12 +910,44 @@ namespace
 		// two modes keep separate queues, slots and subscriptions.
 		static FSpoutViewportSender& GetGameViewportOnly()
 		{
-			static FSpoutViewportSender Instance(true);
+			static FSpoutViewportSender Instance(true, ESpoutViewportTarget::Game);
 			return Instance;
 		}
 
-		explicit FSpoutViewportSender(bool bInCropToGameViewport)
-			: bCropToGameViewport(bInCropToGameViewport)
+		// The same two modes for a Spout Sender actor sending in the editor: the level editor's window, or its active
+		// viewport's rectangle. Instances of their own, so editor and Play streams never share a queue or a crop.
+		static FSpoutViewportSender& GetLevelEditorWindow()
+		{
+			static FSpoutViewportSender Instance(false, ESpoutViewportTarget::LevelEditor);
+			return Instance;
+		}
+
+		static FSpoutViewportSender& GetLevelEditorViewport()
+		{
+			static FSpoutViewportSender Instance(true, ESpoutViewportTarget::LevelEditor);
+			return Instance;
+		}
+
+		static FSpoutViewportSender& For(ESpoutViewportTarget InTarget, bool bInCropToViewport)
+		{
+			if (InTarget == ESpoutViewportTarget::LevelEditor)
+			{
+				return bInCropToViewport ? GetLevelEditorViewport() : GetLevelEditorWindow();
+			}
+			return bInCropToViewport ? GetGameViewportOnly() : Get();
+		}
+
+		static void ForEach(TFunctionRef<void(FSpoutViewportSender&)> Callback)
+		{
+			Callback(Get());
+			Callback(GetGameViewportOnly());
+			Callback(GetLevelEditorWindow());
+			Callback(GetLevelEditorViewport());
+		}
+
+		FSpoutViewportSender(bool bInCropToViewport, ESpoutViewportTarget InTarget)
+			: bCropToViewport(bInCropToViewport)
+			, Target(InTarget)
 		{
 		}
 
@@ -902,10 +958,19 @@ namespace
 				return false;
 			}
 
-			// Game Viewport Only: the rectangle is resolved before anything is subscribed or queued, so a send with no
-			// game viewport widget is refused outright and nothing outside Play can be captured.
-			FIntRect GameViewportRect;
-			if (bCropToGameViewport && !ResolveGameViewportRect(GameViewportRect))
+			// The viewport's rectangle is resolved before anything is subscribed or queued. Game Viewport Only with no
+			// game viewport widget is refused outright, so nothing outside Play can be captured from the game; the level
+			// editor's producers are refused without a level viewport.
+			FIntRect ViewportRect;
+			const SWindow* WindowPtr = nullptr;
+			if (Target == ESpoutViewportTarget::LevelEditor)
+			{
+				if (!ResolveLevelEditorViewport(WindowPtr, ViewportRect))
+				{
+					return false;
+				}
+			}
+			else if (bCropToViewport && !ResolveGameViewportRect(ViewportRect))
 			{
 				return false;
 			}
@@ -918,8 +983,7 @@ namespace
 			// Resolve the viewport's window here, on the game thread. GEngine->GameViewport and its
 			// window are game-thread state; the back-buffer delegate runs on the render thread and
 			// must not read them.
-			const SWindow* WindowPtr = nullptr;
-			if (GEngine && GEngine->GameViewport)
+			if (Target == ESpoutViewportTarget::Game && GEngine && GEngine->GameViewport)
 			{
 				if (const TSharedPtr<SWindow> Window = GEngine->GameViewport->GetWindow())
 				{
@@ -933,7 +997,7 @@ namespace
 				// delegate passes in. It is never dereferenced, so a destroyed window cannot be touched
 				// through it.
 				TargetWindow = WindowPtr;
-				CropRect = GameViewportRect;
+				CropRect = ViewportRect;
 			}
 
 			PendingSenders.Add(Token);
@@ -1084,7 +1148,8 @@ namespace
 			{
 				// Render-targetable like the render-target sources the send path transitions: a shader-resource-only
 				// texture is not state-tracked on UE 5.3's D3D12 RHI, and the send's copy transitions then assert.
-				const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create2D(TEXT("SpoutGameViewportOnly"), Rect.Width(), Rect.Height(), Format)
+				const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create2D(
+					Target == ESpoutViewportTarget::LevelEditor ? TEXT("SpoutLevelEditorViewport") : TEXT("SpoutGameViewportOnly"), Rect.Width(), Rect.Height(), Format)
 					.SetFlags(ETextureCreateFlags::ShaderResource | ETextureCreateFlags::RenderTargetable)
 					.SetInitialState(ERHIAccess::SRVMask);
 #if UE_VERSION_OLDER_THAN(5, 4, 0)
@@ -1101,7 +1166,8 @@ namespace
 			{
 				// Once per size: the start of sending and every resize are visible in the log.
 				CropLoggedSize = Rect.Size();
-				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: Game Viewport Only sends %dx%d at (%d, %d) of a %dx%d back buffer (%s)."),
+				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: %s sends %dx%d at (%d, %d) of a %dx%d back buffer (%s)."),
+					Target == ESpoutViewportTarget::LevelEditor ? TEXT("the level editor's viewport") : TEXT("Game Viewport Only"),
 					Rect.Width(), Rect.Height(), Rect.Min.X, Rect.Min.Y, Extent.X, Extent.Y, GetPixelFormatString(Format));
 			}
 			const SpoutRHIState::FCopyBracket Bracket = SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::ViewportBackBuffer);
@@ -1211,7 +1277,8 @@ namespace
 				return true;
 			}
 
-			if (!GEngine || !GEngine->GameViewport)
+			const bool bGame = Target == ESpoutViewportTarget::Game;
+			if (bGame && (!GEngine || !GEngine->GameViewport))
 			{
 				return false;
 			}
@@ -1227,7 +1294,7 @@ namespace
 				return false;
 			}
 
-			if (!GEngine->GameViewport->GetWindow().IsValid())
+			if (bGame && !GEngine->GameViewport->GetWindow().IsValid())
 			{
 				return false;
 			}
@@ -1278,8 +1345,8 @@ namespace
 					FIntRect RectToSend;
 					{
 						// The delegate fires for every window; only consume the queue for the one the
-						// game viewport last reported. Pure pointer identity, resolved on the game
-						// thread in QueueSend.
+						// viewport last reported. Pure pointer identity, resolved on the game thread in
+						// QueueSend.
 						FScopeLock Lock(&WindowMutex);
 						if (TargetWindow != &SlateWindow)
 						{
@@ -1308,11 +1375,11 @@ namespace
 								const bool bInstrumentViewport = SpoutInstrument::IsEnabled();
 								const uint64 TViewport0 = bInstrumentViewport ? SpoutInstrument::Now() : 0;
 							)
-							if (bCropToGameViewport)
+							if (bCropToViewport)
 							{
-								// Game Viewport Only: copy the game viewport's rectangle out of the back buffer on the
-								// GPU, then publish that copy like a render target (it is plugin-owned and holds no
-								// back buffer, so a window resize is never blocked by it).
+								// Game Viewport Only (or the level editor's viewport): copy the viewport's rectangle out
+								// of the back buffer on the GPU, then publish that copy like a render target (it is
+								// plugin-owned and holds no back buffer, so a window resize is never blocked by it).
 								FScopeLock SlotLock(&ViewportSlotMutex);
 								const FTextureRHIRef Cropped = CropBackBufferOnRenderThread(RHICmdList, BackBufferCopy, RectToSend);
 								if (Cropped.IsValid())
@@ -1468,9 +1535,12 @@ namespace
 		TUniquePtr<FSpoutSlotSend> ViewportSlot;
 		FSpoutSlotSend::FIdentity ViewportSlotRefusedFor;
 
-		// Game Viewport Only (ESpoutSendTextureFrom::GameViewportOnly). Fixed per instance.
-		const bool bCropToGameViewport;
-		// The game viewport's rectangle in the window's back buffer, resolved with TargetWindow. Guarded by WindowMutex.
+		// Game Viewport Only (ESpoutSendTextureFrom::GameViewportOnly): send the viewport's rectangle, not the whole window.
+		// Fixed per instance.
+		const bool bCropToViewport;
+		// The game's viewport or the level editor's. Fixed per instance.
+		const ESpoutViewportTarget Target;
+		// The viewport's rectangle in the window's back buffer, resolved with TargetWindow. Guarded by WindowMutex.
 		FIntRect CropRect;
 		// The GPU copy of that rectangle, and the size last logged. Render thread, under ViewportSlotMutex.
 		FTextureRHIRef CropTexture;
@@ -1686,7 +1756,8 @@ namespace
 	}
 }
 
-bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, UTextureRenderTarget2D* TextureRenderTarget2D)
+bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, UTextureRenderTarget2D* TextureRenderTarget2D,
+	ESpoutViewportTarget ViewportTarget, const UObject* WorldContext)
 {
 	check(IsInGameThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_Send);
@@ -1708,7 +1779,7 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 		return false;
 	}
 	// The world this sender belongs to, so the end of Play closes only its own world's streams.
-	USpoutSubsystem::NoteStreamUse(SpoutName, ESpoutType::Sender);
+	USpoutSubsystem::NoteStreamUse(SpoutName, ESpoutType::Sender, WorldContext);
 
 	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
 	if (!FSpoutSession::Get().IsRunning()) return false;
@@ -1721,16 +1792,14 @@ bool FSpoutSender::Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, 
 
 	if (SendTextureFrom == ESpoutSendTextureFrom::GameViewport || SendTextureFrom == ESpoutSendTextureFrom::GameViewportOnly)
 	{
-		if (!GEngine || !GEngine->GameViewport || !GEngine->GameViewport->Viewport)
+		if (ViewportTarget == ESpoutViewportTarget::Game && (!GEngine || !GEngine->GameViewport || !GEngine->GameViewport->Viewport))
 		{
 			return false;
 		}
 
 		// Queue the request; capture happens when the backbuffer is ready to present. Game Viewport Only uses its
-		// own producer, which copies only the game viewport's rectangle (see FSpoutViewportSender).
-		FSpoutViewportSender& Producer = SendTextureFrom == ESpoutSendTextureFrom::GameViewportOnly
-			? FSpoutViewportSender::GetGameViewportOnly()
-			: FSpoutViewportSender::Get();
+		// own producer, which copies only the viewport's rectangle (see FSpoutViewportSender).
+		FSpoutViewportSender& Producer = FSpoutViewportSender::For(ViewportTarget, SendTextureFrom == ESpoutSendTextureFrom::GameViewportOnly);
 		const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Sender);
 		return Token.IsSet() && Producer.QueueSend(Token);
 	}
@@ -1820,9 +1889,8 @@ void FSpoutSender::Close(FName SpoutName)
 
 	// Drop the name from the viewport queue, so a closed viewport sender is not published again at
 	// the next present.
-	const bool bWasPendingWholeWindow = FSpoutViewportSender::Get().RemovePending(SpoutName);
-	const bool bWasPendingGameViewportOnly = FSpoutViewportSender::GetGameViewportOnly().RemovePending(SpoutName);
-	const bool bWasPending = bWasPendingWholeWindow || bWasPendingGameViewportOnly;
+	bool bWasPending = false;
+	FSpoutViewportSender::ForEach([&bWasPending, SpoutName](FSpoutViewportSender& Producer) { bWasPending |= Producer.RemovePending(SpoutName); });
 
 	// Registry is keyed by (Name, Type); Close must scope to the Sender entry only,
 	// leaving any Receiver entry with the same FName untouched.
@@ -1840,18 +1908,15 @@ void FSpoutSender::Close(FName SpoutName)
 
 void FSpoutSender::DetachProducers()
 {
-	FSpoutViewportSender::Get().DetachProducer();
-	FSpoutViewportSender::GetGameViewportOnly().DetachProducer();
+	FSpoutViewportSender::ForEach([](FSpoutViewportSender& Producer) { Producer.DetachProducer(); });
 }
 
 void FSpoutSender::ClearPendingWork()
 {
-	FSpoutViewportSender::Get().ClearPending();
-	FSpoutViewportSender::GetGameViewportOnly().ClearPending();
+	FSpoutViewportSender::ForEach([](FSpoutViewportSender& Producer) { Producer.ClearPending(); });
 }
 
 void FSpoutSender::ReleaseNativeResources()
 {
-	FSpoutViewportSender::Get().ReleaseNativeResources();
-	FSpoutViewportSender::GetGameViewportOnly().ReleaseNativeResources();
+	FSpoutViewportSender::ForEach([](FSpoutViewportSender& Producer) { Producer.ReleaseNativeResources(); });
 }

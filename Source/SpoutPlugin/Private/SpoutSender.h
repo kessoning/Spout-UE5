@@ -12,6 +12,15 @@
 #include "CoreMinimal.h"
 #include "SpoutBPFunctionLibrary.h"
 
+/** Which viewport the two viewport sources (Game Viewport Only, Game Viewport (Whole Window)) send. */
+enum class ESpoutViewportTarget : uint8
+{
+	/** The game's viewport: Play In Editor, standalone or packaged. */
+	Game,
+	/** The level editor's active viewport, for a Spout Sender actor sending while the level is edited. */
+	LevelEditor
+};
+
 class FSpoutSender
 {
 public:
@@ -26,8 +35,15 @@ public:
 	 * false means the request was rejected outright on the game thread: an invalid name, an
 	 * unavailable interop context, a missing viewport, or a render target with invalid dimensions
 	 * or an unsupported pixel format. Nothing was queued.
+	 *
+	 * ViewportTarget applies to the viewport sources only. The Blueprint and C++ entry points send the game's viewport;
+	 * the Spout Sender actor sends the level editor's viewport while it sends in the editor.
+	 *
+	 * WorldContext: the object whose world the stream belongs to (the Spout Sender actor passes itself); without one the
+	 * calling world is worked out (USpoutSubsystem).
 	 */
-	static bool Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, UTextureRenderTarget2D* TextureRenderTarget2D);
+	static bool Send(FName SpoutName, ESpoutSendTextureFrom SendTextureFrom, UTextureRenderTarget2D* TextureRenderTarget2D,
+		ESpoutViewportTarget ViewportTarget = ESpoutViewportTarget::Game, const UObject* WorldContext = nullptr);
 
 	/**
 	 * Closes one sender.

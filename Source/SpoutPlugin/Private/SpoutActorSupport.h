@@ -26,8 +26,6 @@ namespace SpoutActorSupport
 	 */
 	bool ChooseExternalSender(FName& OutName);
 
-	/** Sender names currently advertised on this machine, for the editor's Details dropdown. */
-	TArray<FString> ListAdvertisedSenderNames();
 
 	/**
 	 * Process-wide claims of sender names by sender actors (game thread). Claim fails when another live actor holds
@@ -36,4 +34,8 @@ namespace SpoutActorSupport
 	 */
 	bool ClaimSenderName(FName Name, const AActor* Actor, const AActor*& OutHolder);
 	void ReleaseSenderName(FName Name, const AActor* Actor);
+	/** True while a Play In Editor or Simulate session runs (any PIE world exists). False outside the editor. */
+	bool IsPlaySessionRunning();
+	/** True when the actor is in the level editor's world: not Play, and not a Blueprint editor's preview. */
+	bool IsInLevelEditorWorld(const AActor* Actor);
 }

@@ -28,6 +28,14 @@ public:
 	// delay-load helper raises 0xC06D007E (ERROR_MOD_NOT_FOUND).
 	static bool IsSpoutDllLoaded() { return SpoutDllHandle != nullptr; }
 
+	/**
+	 * Set by the plugin's editor module: returns the level editor's active viewport widget, which a Spout Sender actor
+	 * sends while it sends in the editor, and whether that viewport redraws continuously (Realtime). Null outside the
+	 * editor or when there is no level viewport.
+	 */
+	static SPOUTPLUGIN_API void SetLevelViewportProvider(TFunction<TSharedPtr<class SWidget>(bool& bOutRealtime)> Provider);
+	static TSharedPtr<class SWidget> GetLevelViewport(bool& bOutRealtime);
+
 private:
 	// Handle to the explicitly loaded Spout.dll. Loading it by full path at startup
 	// puts the module in the process so its delay-loaded imports resolve by name.

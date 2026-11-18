@@ -22,6 +22,9 @@ functions and are not callable from Blueprints.
 | Get Sender Info | `bool` | Spout |
 | Set Max Senders | `int32` | Spout |
 | Get Max Senders | `void` | Spout |
+| Get Max Spout Senders | `int32` (pure) | Spout |
+| List Spout Senders | `bool` | Spout |
+| Get Spout Receiver Session Info | `FSpoutReceiverSessionInfo` (pure) | Spout |
 | Create Texture Render Target 2D | `UTextureRenderTarget2D*` | Spout |
 
 ---
@@ -262,6 +265,54 @@ static void GetMaxSenders(int32& Max);
 ```
 
 Reads the current maximum sender count into `Max`.
+
+## Get Max Spout Senders
+
+```cpp
+static int32 GetMaxSpoutSenders();
+```
+
+The same limit as Get Max Senders, as a pure node that returns it: no execution pins are needed. `0` when Spout
+is unavailable.
+
+## List Spout Senders
+
+```cpp
+static bool ListSpoutSenders(TArray<FSpoutSenderInfo>& Senders);
+```
+
+Lists the Spout senders running on this machine, with what is known about each (`FSpoutSenderInfo`):
+
+- `Name`, `Width`, `Height`.
+- `Format` (`BGRA8`, `RGBA8`, `RGB10A2`, `RGBA16F`, `RGBA16`, `RGBA32F`, or the DirectX name of another
+  format) and `BitsPerChannel` (8, 10, 16, 32, or 0 for another format).
+- `SourceApplication`: the executable file name of the application that publishes it, as Spout records it.
+- `bFromThisGame`: this game publishes it.
+- `Gpu`: `SameAsUnreal`, `Other` (with `OtherGpuName`), or `Unknown`. A sender whose texture is on another
+  graphics card cannot be received by Unreal: Spout shares textures on one GPU only.
+
+`Senders` is emptied first; entries that vanish while the list is read are skipped. Returns `false` when the list
+could not be read. Spout records no frame rate for a sender; for a sender this game receives, the frames that
+arrive are counted in `GetSpoutStreamStatus`.
+
+## Get Spout Receiver Session Info
+
+```cpp
+static FSpoutReceiverSessionInfo GetSpoutReceiverSessionInfo(FName SpoutName);
+```
+
+A pure node describing the receiver session of a name and the outcome of the last receive call for it, from any
+caller (Spout Receiver, Spout Receiver With Material, a Spout Receiver actor). Use it to show why a receiver stays
+black.
+
+- `bSessionOpen`, and the session's `ReceiveMode` and `ColorSpace` (fixed by its first accepted receive).
+- `ReceiverActors` (Spout Receiver actors using it) and `bUsedByBlueprintOrCode`.
+- `bHasLastResult`, `LastResult` (`ESpoutReceiveResult`) and `LastResultText`, the outcome in words naming the
+  setting to change. Among the outcomes:
+  - `StreamQueueFull`: the stream already has `r.Spout.MaxPendingPerStream` receive calls this frame (4 by
+    default). Each consumer makes one, so a fifth consumer of one stream is refused until the limit is raised
+    (Project Settings > Plugins > Spout). It is also logged once in a while.
+  - `OtherGpu`: the sender's texture is on another graphics card than Unreal's.
 
 ## Create Texture Render Target 2D
 

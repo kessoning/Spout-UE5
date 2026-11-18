@@ -4,7 +4,8 @@
 
 /**
  * Records which world uses each Spout stream, so that the end of a Play In Editor session closes that session's
- * streams and leaves the others running (an editor tool's stream, or another Play world's).
+ * streams and leaves the others running (an editor tool's stream, a Spout actor sending or receiving in the editor, or
+ * another Play world's). Closing a level in the editor closes the streams of that level's world the same way.
  *
  * Streams are opened through static functions that take no world, so the world is worked out at each call: the
  * context object's world when there is one (the placeable actors pass themselves), else the innermost Blueprint frame

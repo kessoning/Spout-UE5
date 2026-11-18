@@ -4,6 +4,8 @@
 
 #include "SpoutActorSupport.h"
 
+#include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutD3DContext.h"
@@ -79,21 +81,6 @@ namespace SpoutActorSupport
 		return false;
 	}
 
-	TArray<FString> ListAdvertisedSenderNames()
-	{
-		TArray<FString> Result;
-		TArray<FSenderStruct> Senders;
-		if (USpoutBPFunctionLibrary::SpoutInfo(Senders))
-		{
-			for (const FSenderStruct& Sender : Senders)
-			{
-				Result.Add(Sender.Name.ToString());
-			}
-		}
-		Result.Sort();
-		return Result;
-	}
-
 	bool ClaimSenderName(FName Name, const AActor* Actor, const AActor*& OutHolder)
 	{
 		check(IsInGameThread());
@@ -106,6 +93,28 @@ namespace SpoutActorSupport
 		}
 		Holder = Actor;
 		return true;
+	}
+
+	bool IsPlaySessionRunning()
+	{
+		if (!GEngine)
+		{
+			return false;
+		}
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::PIE && Context.World())
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool IsInLevelEditorWorld(const AActor* Actor)
+	{
+		const UWorld* World = Actor ? Actor->GetWorld() : nullptr;
+		return World && World->WorldType == EWorldType::Editor;
 	}
 
 	void ReleaseSenderName(FName Name, const AActor* Actor)

@@ -167,6 +167,12 @@ TSharedPtr<FSpoutSession::FQueuedWork, ESPMode::ThreadSafe> FSpoutSession::TryQu
 	return MakeShareable(new FQueuedWork{this, Token});
 }
 
+bool FSpoutSession::IsStreamQueueFull(const FSpoutStreamToken& Token) const
+{
+	FScopeLock Lock(&Mutex);
+	return PendingByGeneration.FindRef(Token.Stream) >= SpoutLimits::MaxPendingPerStream();
+}
+
 void FSpoutSession::MarkQueued(const FSpoutStreamToken& Token)
 {
 	FScopeLock Lock(&Mutex);

@@ -10,6 +10,15 @@
 
 namespace SpoutLimits
 {
+	/** Defaults of the limit console variables, shared with the Project Settings page (USpoutSettings). */
+	constexpr int32 DefaultMaxActiveStreams = 32;
+	constexpr int32 DefaultMaxPendingCommands = 128;
+	constexpr int32 DefaultMaxPendingPerStream = 4;
+	constexpr int32 DefaultMaxConsumersPerReceiver = 32;
+	constexpr int32 DefaultMaxTextureDimension = 8192;
+	constexpr int32 DefaultMaxFrameMiB = 128;
+	constexpr int32 DefaultMaxRetainedMiB = 1024;
+
 	int32 MaxActiveStreams();
 	int32 MaxPendingCommands();
 	int32 MaxPendingPerStream();

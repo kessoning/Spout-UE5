@@ -31,6 +31,7 @@
 #include "SpoutReceiverOwnership.h"
 #include "SpoutRHIState.h"
 #include "SpoutSenderRegistry.h"
+#include "SpoutGpu.h"
 #include "SpoutSession.h"
 #include "SpoutSubsystem.h"
 #include "SpoutTextureUtils.h"
@@ -1253,13 +1254,16 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 {
 	check(IsInGameThread());
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_Receive);
-	// Every refusal below reports its reason to a caller that asked for it (the placeable receiver actor's status).
-	const auto Refuse = [OutResult](ESpoutReceiveResult Result)
+	// Every refusal below reports its reason to a caller that asked for it (the placeable receiver actor's status), and
+	// is kept as the name's last result for Get Spout Receiver Session Info. Accepted unless a refusal follows.
+	const auto Refuse = [OutResult, SpoutName](ESpoutReceiveResult Result)
 	{
 		if (OutResult) *OutResult = Result;
+		NoteLastResult(SpoutName, Result);
 		return false;
 	};
 	if (OutResult) *OutResult = ESpoutReceiveResult::Accepted;
+	NoteLastResult(SpoutName, ESpoutReceiveResult::Accepted);
 	// Validate the requested name before touching the interop context. An invalid name can never
 	// resolve to a sender, so there is nothing to initialize for it.
 	TArray<ANSICHAR> Utf8Name;
@@ -1369,10 +1373,41 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 
 	// Discovery failures above retain no stream/native records. Once metadata is valid,
 	// the explicit close/session lifecycle owns this connected name.
+	// A texture on another graphics card cannot be opened here and would only ever show black: say so instead.
+	const SpoutGpu::FSenderGpu SenderGpu = SpoutGpu::Locate(SpoutName, SharedHandle);
+	if (SenderGpu.Where == ESpoutSenderGpu::Other)
+	{
+		static FSpoutLogThrottle OtherGpuLogThrottle(10.0);
+		if (OtherGpuLogThrottle.ShouldLog())
+		{
+			UE_LOG(LogSpoutPlugin, Warning,
+				TEXT("Spout receiver '%s': the sender's texture is on another graphics card (%s), and Unreal renders on %s. Spout shares textures on one GPU only: ")
+				TEXT("run the sending application on the same GPU (Windows Settings > System > Display > Graphics), or connect the displays to it."),
+				*SpoutName.ToString(), *SenderGpu.AdapterName, *SpoutGpu::UnrealAdapterName());
+		}
+		return Refuse(ESpoutReceiveResult::OtherGpu);
+	}
+
 	const FSpoutStreamToken Token = FSpoutSession::Get().OpenStream(SpoutName, ESpoutType::Receiver);
 	if (!Token.IsSet()) return Refuse(ESpoutReceiveResult::Busy);
 	const auto QueuedWork = FSpoutSession::Get().TryQueue(Token);
-	if (!QueuedWork) return Refuse(ESpoutReceiveResult::Busy);
+	if (!QueuedWork)
+	{
+		if (FSpoutSession::Get().IsStreamQueueFull(Token))
+		{
+			// Each consumer of a stream queues one receive per frame, so this is the limit on consumers of one stream.
+			static FSpoutLogThrottle QueueFullLogThrottle(10.0);
+			if (QueueFullLogThrottle.ShouldLog())
+			{
+				UE_LOG(LogSpoutPlugin, Log,
+					TEXT("Spout receiver '%s': a receive call was refused because %d calls on this stream are already queued in this frame (r.Spout.MaxPendingPerStream). ")
+					TEXT("Each consumer of a stream makes one call: raise the limit for more consumers (Project Settings > Plugins > Spout)."),
+					*SpoutName.ToString(), SpoutLimits::MaxPendingPerStream());
+			}
+			return Refuse(ESpoutReceiveResult::StreamQueueFull);
+		}
+		return Refuse(ESpoutReceiveResult::Busy);
+	}
 	TSharedPtr<FSpoutSharedSender> Receiver;
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(Spout_ReceiveFindOrAddEntry);
@@ -1670,6 +1705,57 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	return true;
 }
 
+namespace
+{
+	/** The outcome of the most recent receive call per name. Game thread. */
+	TMap<FName, ESpoutReceiveResult>& LastResults()
+	{
+		static TMap<FName, ESpoutReceiveResult> Results;
+		return Results;
+	}
+}
+
+void FSpoutReceiver::NoteLastResult(const FName SpoutName, ESpoutReceiveResult Result)
+{
+	if (!SpoutName.IsNone())
+	{
+		LastResults().Add(SpoutName, Result);
+	}
+}
+
+bool FSpoutReceiver::GetLastResult(const FName SpoutName, ESpoutReceiveResult& OutResult)
+{
+	check(IsInGameThread());
+	if (const ESpoutReceiveResult* Found = LastResults().Find(SpoutName))
+	{
+		OutResult = *Found;
+		return true;
+	}
+	return false;
+}
+
+FString FSpoutReceiver::DescribeResult(ESpoutReceiveResult Result)
+{
+	switch (Result)
+	{
+	case ESpoutReceiveResult::Accepted: return TEXT("Accepted.");
+	case ESpoutReceiveResult::InvalidName: return TEXT("Refused: the name is empty or longer than Spout allows (256 bytes in UTF-8).");
+	case ESpoutReceiveResult::Unavailable: return TEXT("Refused: Spout is unavailable (the plugin needs Direct3D 12 on Windows), or streams are being closed.");
+	case ESpoutReceiveResult::NoSender: return TEXT("Waiting: no sender of that name is running.");
+	case ESpoutReceiveResult::BadMetadata: return TEXT("Refused: the sender's size, texture handle or pixel format is not supported (RGBA8, BGRA8, RGB10A2, RGBA16F).");
+	case ESpoutReceiveResult::FrameTooLarge: return TEXT("Refused: the sender's frame is larger than the plugin's limits (r.Spout.MaxFrameMiB, r.Spout.MaxTextureDimension).");
+	case ESpoutReceiveResult::ColorSpaceUnsupported: return TEXT("Refused: this Color Space cannot be used with the sender's format (16-bit float streams are linear): choose Auto or Linear.");
+	case ESpoutReceiveResult::Busy: return TEXT("Refused for now: the plugin's limits on open streams or queued commands are reached (r.Spout.MaxActiveStreams, r.Spout.MaxPendingCommands).");
+	case ESpoutReceiveResult::ModeConflict: return TEXT("Refused: this receiver session uses the other Async Receive setting, fixed by its first accepted receive until Close Receiver.");
+	case ESpoutReceiveResult::ColorConflict: return TEXT("Refused: this receiver session reads the sender's format with another Color Space, fixed until Close Receiver.");
+	case ESpoutReceiveResult::ConsumerLimit: return TEXT("Refused: too many material bindings or output render targets on this receiver, or no memory budget left (r.Spout.MaxConsumersPerReceiver, r.Spout.MaxRetainedMiB).");
+	case ESpoutReceiveResult::TextureFailed: return TEXT("Refused: the texture the stream is received into could not be created (see the Output Log).");
+	case ESpoutReceiveResult::StreamQueueFull: return TEXT("Refused: this stream already has r.Spout.MaxPendingPerStream receive calls queued in this frame. Each consumer makes one call: raise the limit for more consumers of one stream.");
+	case ESpoutReceiveResult::OtherGpu: return TEXT("Refused: the sender's texture is on another graphics card than Unreal's. Spout shares textures on one GPU only: run the sending application on the same GPU.");
+	default: return FString();
+	}
+}
+
 void FSpoutReceiver::Close(const FName SpoutName)
 {
 	check(IsInGameThread());
@@ -1690,10 +1776,10 @@ void FSpoutReceiver::Close(const FName SpoutName)
 	}
 }
 
-FSpoutReceiverSessionInfo FSpoutReceiver::GetSessionInfo(const FName SpoutName, const UObject* Consumer)
+FSpoutReceiverSessionState FSpoutReceiver::GetSessionState(const FName SpoutName, const UObject* Consumer)
 {
 	check(IsInGameThread());
-	FSpoutReceiverSessionInfo Info;
+	FSpoutReceiverSessionState Info;
 	if (const TSharedPtr<FSpoutSharedSender> Entry = FSpoutSenderRegistry::Get().Find(SpoutName, ESpoutType::Receiver))
 	{
 		// Process-unique identity, assigned on first query; a reopened session is a new entry with a new identity.

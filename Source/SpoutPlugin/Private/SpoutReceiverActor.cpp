@@ -15,6 +15,7 @@
 #include "SpoutActorSupport.h"
 #include "SpoutModule.h"
 #include "SpoutReceiver.h"
+#include "SpoutSettings.h"
 #include "UObject/ConstructorHelpers.h"
 
 namespace
@@ -146,6 +147,34 @@ void ASpoutReceiverActor::Tick(float DeltaSeconds)
 	UpdateReceiving();
 }
 
+bool ASpoutReceiverActor::ShouldTickIfViewportsOnly() const
+{
+	// In the level editor: while Receive In Editor is on, and until a stream it still uses is released.
+	return bReceiveInEditor || bConnected;
+}
+
+void ASpoutReceiverActor::Destroyed()
+{
+	// The level editor's actors get no EndPlay: deleting one must release its stream too.
+	Release(false);
+	Super::Destroyed();
+}
+
+bool ASpoutReceiverActor::MayReceiveInEditor(FString& Reason) const
+{
+	if (!bReceiveInEditor)
+	{
+		Reason = TEXT("Not receiving in the editor: Receive In Editor is off");
+		return false;
+	}
+	if (USpoutSettings::Get().StartupPolicy != ESpoutStartupPolicy::EditorAndPlay)
+	{
+		Reason = TEXT("Not receiving in the editor: Project Settings > Plugins > Spout > Startup Policy is Play only");
+		return false;
+	}
+	return true;
+}
+
 void ASpoutReceiverActor::SetEnabled(bool bNewEnabled)
 {
 	bEnabled = bNewEnabled;
@@ -201,6 +230,11 @@ void ASpoutReceiverActor::EnsureMaterialInstance()
 		USpoutBPFunctionLibrary::ReleaseReceiverMaterialBinding(ConnectedSenderName, DisplayMID, MIDParameter);
 	}
 	DisplayMID = DisplayMaterial ? UMaterialInstanceDynamic::Create(DisplayMaterial, this) : nullptr;
+	if (DisplayMID)
+	{
+		// Made while receiving, also in the level editor, and never saved with the level.
+		DisplayMID->SetFlags(RF_Transient);
+	}
 	MIDSource = DisplayMaterial;
 	MIDParameter = Parameter;
 	if (Display) Display->SetMaterial(0, DisplayMID ? static_cast<UMaterialInterface*>(DisplayMID) : DisplayMaterial.Get());
@@ -259,8 +293,22 @@ void ASpoutReceiverActor::Release(bool bKeepConnectedName)
 void ASpoutReceiverActor::UpdateReceiving()
 {
 	UWorld* World = GetWorld();
-	if (!World || !World->IsGameWorld() || GetNetMode() == NM_DedicatedServer) return;
+	const bool bInEditor = SpoutActorSupport::IsInLevelEditorWorld(this);
+	if (!World || (!World->IsGameWorld() && !bInEditor) || GetNetMode() == NM_DedicatedServer) return;
 	const double Now = FPlatformTime::Seconds();
+	if (bInEditor)
+	{
+		FString Reason;
+		if (!MayReceiveInEditor(Reason))
+		{
+			if (bConnected || State != ESpoutReceiverActorState::Disabled || Status != Reason)
+			{
+				Release(false);
+				SetState(ESpoutReceiverActorState::Disabled, Reason);
+			}
+			return;
+		}
+	}
 
 	if (!bEnabled)
 	{
@@ -320,7 +368,7 @@ void ASpoutReceiverActor::UpdateReceiving()
 	{
 		// Membership of THIS session, not a count: an actor whose attempts were refused holds no lease, and the
 		// consumers counted may all be other actors.
-		const FSpoutReceiverSessionInfo Info = FSpoutReceiver::GetSessionInfo(Name, this);
+		const FSpoutReceiverSessionState Info = FSpoutReceiver::GetSessionState(Name, this);
 		const bool bHeldByMe = Info.bIsManagedConsumer;
 		const int32 Others = Info.ManagedConsumers - (bHeldByMe ? 1 : 0);
 		const bool bShared = Info.bExists && (Others > 0 || Info.bUnmanagedConsumer);
@@ -402,7 +450,7 @@ void ASpoutReceiverActor::UpdateReceiving()
 		// The frame count is per session. A session closed elsewhere (a Blueprint Close Receiver) and reopened by this
 		// receive starts counting again, and its texture starts empty: take a new baseline and show No-Signal until the
 		// reopened session's first frame.
-		const uint64 SessionId = FSpoutReceiver::GetSessionInfo(Name, this).SessionId;
+		const uint64 SessionId = FSpoutReceiver::GetSessionState(Name, this).SessionId;
 		if (SessionId != AppliedSessionId)
 		{
 			if (AppliedSessionId != 0) SetSignal(false);
@@ -425,6 +473,11 @@ void ASpoutReceiverActor::UpdateReceiving()
 			if (UseColorSpace == ESpoutColorSpace::Auto && OutTexture && OutTexture->GetPixelFormat() == PF_A2B10G10R10)
 			{
 				Text += TEXT(" 10-bit stream read as linear (Auto); if it comes from an Unreal viewport, choose Color Space sRGB.");
+			}
+			bool bRealtime = true;
+			if (bInEditor && FSpoutModule::GetLevelViewport(bRealtime).IsValid() && !bRealtime)
+			{
+				Text += TEXT(" The level viewport is not Realtime: the screen changes only when the viewport redraws.");
 			}
 			SetState(ESpoutReceiverActorState::Receiving, Text + SettingsNote + OutputNote);
 		}
@@ -464,6 +517,12 @@ void ASpoutReceiverActor::UpdateReceiving()
 		return;
 	case ESpoutReceiveResult::Busy:
 		return; // transient admission limit; quietly retried
+	case ESpoutReceiveResult::StreamQueueFull:
+		SetState(ESpoutReceiverActorState::Refused, TEXT("Refused: this sender already has as many consumers this frame as r.Spout.MaxPendingPerStream allows (4 by default); raise it in Project Settings > Plugins > Spout."), true);
+		break;
+	case ESpoutReceiveResult::OtherGpu:
+		SetState(ESpoutReceiverActorState::Refused, TEXT("Refused: the sender's texture is on another graphics card than Unreal's, and Spout shares textures on one GPU only. Run the sending application on the same GPU (see the Output Log)."), true);
+		break;
 	case ESpoutReceiveResult::Unavailable:
 		SetState(ESpoutReceiverActorState::Waiting, TEXT("Spout is unavailable: the plugin needs Direct3D 12 on Windows (see the Output Log)."), true);
 		return;
@@ -495,9 +554,47 @@ void ASpoutReceiverActor::UpdateReceiving()
 }
 
 #if WITH_EDITOR
+namespace
+{
+	// "Name  (1920x1080 BGRA8)": the dropdown shows each running sender's size and format next to its name.
+	FString SenderOption(const FSpoutSenderInfo& Sender)
+	{
+		return FString::Printf(TEXT("%s  (%dx%d %s%s)"), *Sender.Name.ToString(), Sender.Width, Sender.Height, *Sender.Format,
+			Sender.Gpu == ESpoutSenderGpu::Other ? TEXT(", on another GPU") : TEXT(""));
+	}
+
+	// The sender name of a dropdown entry: matched against the senders running now, else the text before the details.
+	FName SenderNameFromOption(const FString& Option)
+	{
+		TArray<FSpoutSenderInfo> Senders;
+		if (USpoutBPFunctionLibrary::ListSpoutSenders(Senders))
+		{
+			for (const FSpoutSenderInfo& Sender : Senders)
+			{
+				if (SenderOption(Sender) == Option)
+				{
+					return Sender.Name;
+				}
+			}
+		}
+		const int32 Details = Option.Find(TEXT("  ("), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+		return FName(*(Details == INDEX_NONE ? Option : Option.Left(Details)));
+	}
+}
+
 TArray<FString> ASpoutReceiverActor::GetRunningSenderOptions()
 {
-	return SpoutActorSupport::ListAdvertisedSenderNames();
+	// Read each time the dropdown opens, so the list is always current.
+	TArray<FString> Options;
+	TArray<FSpoutSenderInfo> Senders;
+	if (USpoutBPFunctionLibrary::ListSpoutSenders(Senders))
+	{
+		for (const FSpoutSenderInfo& Sender : Senders)
+		{
+			Options.Add(SenderOption(Sender));
+		}
+	}
+	return Options;
 }
 
 void ASpoutReceiverActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
@@ -505,7 +602,7 @@ void ASpoutReceiverActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 	if (PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(ASpoutReceiverActor, ChooseRunningSender) && !ChooseRunningSender.IsEmpty())
 	{
-		SenderName = FName(*ChooseRunningSender);
+		SenderName = SenderNameFromOption(ChooseRunningSender);
 	}
 	ApplyDisplay();
 }

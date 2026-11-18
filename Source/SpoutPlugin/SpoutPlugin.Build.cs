@@ -116,6 +116,8 @@ public class SpoutPlugin : ModuleRules
         {
             "Core",
             "CoreUObject",
+            // The Project Settings page (USpoutSettings, a UDeveloperSettings).
+            "DeveloperSettings",
             "Engine",
             "RHI",
             "RenderCore"

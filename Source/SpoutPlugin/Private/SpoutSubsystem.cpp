@@ -183,9 +183,10 @@ bool USpoutSubsystem::GetStreamWorlds(FName Name, ESpoutType Type, TArray<const 
 #if WITH_EDITOR
 void USpoutSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
 {
-	// Play In Editor worlds only. A game world is cleaned up at every level travel, and closing streams there would
-	// stop senders that are meant to survive it.
-	if (!World || World->WorldType != EWorldType::PIE)
+	// Play In Editor worlds, and the level editor's world when the editor opens another level or quits (its actors that
+	// send or receive in the editor get no EndPlay). A game world is cleaned up at every level travel, and closing
+	// streams there would stop senders that are meant to survive it.
+	if (!World || (World->WorldType != EWorldType::PIE && World->WorldType != EWorldType::Editor))
 	{
 		return;
 	}
@@ -241,7 +242,7 @@ void USpoutSubsystem::OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCl
 		Streams.Remove(Stream);
 	}
 	UE_LOG(LogSpoutPlugin, Log,
-		TEXT("End of Play in '%s': closed %d stream(s) this world used; %d stream(s) of other worlds stay open."),
-		*World->GetName(), ToClose.Num(), Streams.Num());
+		TEXT("%s '%s' ended: closed %d stream(s) this world used; %d stream(s) of other worlds stay open."),
+		World->WorldType == EWorldType::PIE ? TEXT("Play world") : TEXT("Editor level"), *World->GetName(), ToClose.Num(), Streams.Num());
 }
 #endif

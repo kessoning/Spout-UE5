@@ -281,6 +281,40 @@ namespace SpoutFormatPolicy
 		return false;
 	}
 
+	FString ShortDxgiFormatName(uint32 DxgiFormat, int32& OutBitsPerChannel)
+	{
+		OutBitsPerChannel = 0;
+		switch (static_cast<DXGI_FORMAT>(DxgiFormat))
+		{
+		case DXGI_FORMAT_B8G8R8A8_UNORM:
+		case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+		case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+			OutBitsPerChannel = 8;
+			return TEXT("BGRA8");
+		case DXGI_FORMAT_R8G8B8A8_UNORM:
+		case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+		case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+			OutBitsPerChannel = 8;
+			return TEXT("RGBA8");
+		case DXGI_FORMAT_R10G10B10A2_UNORM:
+		case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+			OutBitsPerChannel = 10;
+			return TEXT("RGB10A2");
+		case DXGI_FORMAT_R16G16B16A16_FLOAT:
+			OutBitsPerChannel = 16;
+			return TEXT("RGBA16F");
+		case DXGI_FORMAT_R16G16B16A16_UNORM:
+		case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+			OutBitsPerChannel = 16;
+			return TEXT("RGBA16");
+		case DXGI_FORMAT_R32G32B32A32_FLOAT:
+			OutBitsPerChannel = 32;
+			return TEXT("RGBA32F");
+		default:
+			return DescribeDxgiFormat(DxgiFormat);
+		}
+	}
+
 	FString DescribeDxgiFormat(uint32 DxgiFormat)
 	{
 		const TCHAR* Name = nullptr;

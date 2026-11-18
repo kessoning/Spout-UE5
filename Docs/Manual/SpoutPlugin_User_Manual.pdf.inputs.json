@@ -2,7 +2,7 @@
  "absent": [],
  "basis": "generated",
  "inputs": {
-  "Docs/BLUEPRINT_API.md": "3f709009da0115782e7fa93825fc00ccebf44dd8662f8eda08dd2cddb2373b5d",
+  "Docs/BLUEPRINT_API.md": "9a459065e7702e24a790c77aceba8085f5690d23bd2ad03486de3919c5db542d",
   "Docs/CPP_API.md": "025e7dceeae237b56ec902778beecbe520cb58f4a74c3533bfc1bdf14f5aaca1",
   "Docs/INSTALLATION.md": "42e7aa8304d56a8f9d141818c7ab793c6ed4721d774ad59e6c67ae3a449f2869",
   "Docs/LIMITATIONS.md": "ee0215c1510690a1dcea3b34a33d59f728dd1a26534a4f50fbcaedad85edcd59",
@@ -20,7 +20,7 @@
  },
  "pdf": {
   "path": "Docs/Manual/SpoutPlugin_User_Manual.pdf",
-  "sha256": "62f4ad18c9920b70a809653c8bd9c6fad8f9dbd95b1e991cc1ce6b0e2273ffaa"
+  "sha256": "25d159681fe37d28bb1f7b77107fb6d63e579325234ccdc8e0a261beeb7b30ae"
  },
  "what": "inputs of the generated user manual (Docs/build_user_manual.py); Scripts/Validate-Documentation.ps1 checks them"
 }

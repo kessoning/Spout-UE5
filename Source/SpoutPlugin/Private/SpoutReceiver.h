@@ -47,25 +47,8 @@ namespace SpoutReceiverInternal
 		bool& bOutPluginCreated);
 }
 
-/** Why a receive was or was not accepted. Internal; used by the placeable receiver actor for its status. */
-enum class ESpoutReceiveResult : uint8
-{
-	Accepted,
-	InvalidName,
-	Unavailable,        // interop context unavailable or session stopping
-	NoSender,           // no sender of that name is advertised
-	BadMetadata,        // the sender's advertised size, handle or format failed validation
-	FrameTooLarge,      // over r.Spout.MaxFrameMiB / r.Spout.MaxTextureDimension
-	ColorSpaceUnsupported, // the requested Color Space cannot be applied to the sender's format
-	Busy,               // stream or queue admission limits (r.Spout.MaxActiveStreams, MaxPendingCommands, ...)
-	ModeConflict,       // the open session uses the other Async Receive setting
-	ColorConflict,      // the open session reads this format with another Color Space
-	ConsumerLimit,      // r.Spout.MaxConsumersPerReceiver or the output reservation budget
-	TextureFailed       // the destination texture could not be created
-};
-
 /** The session-wide settings of an open receiver, for a consumer that wants to join it without being refused. */
-struct FSpoutReceiverSessionInfo
+struct FSpoutReceiverSessionState
 {
 	bool bExists = false;
 	bool bReceiveModeEstablished = false;
@@ -74,7 +57,7 @@ struct FSpoutReceiverSessionInfo
 	ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto;
 	int32 ManagedConsumers = 0;
 	bool bUnmanagedConsumer = false;
-	/** Whether the consumer passed to GetSessionInfo is itself a registered (accepted) managed consumer of this session. */
+	/** Whether the consumer passed to GetSessionState is itself a registered (accepted) managed consumer of this session. */
 	bool bIsManagedConsumer = false;
 	/** Identity of this session; changes when the name's session is closed and reopened. 0 when none exists. */
 	uint64 SessionId = 0;
@@ -132,7 +115,17 @@ public:
 	 * Settings, consumers and identity of the open receiver session for a name (bExists false when none). With a
 	 * Consumer, bIsManagedConsumer says whether that consumer holds a lease on THIS session. Game thread.
 	 */
-	static FSpoutReceiverSessionInfo GetSessionInfo(const FName SpoutName, const UObject* Consumer = nullptr);
+	static FSpoutReceiverSessionState GetSessionState(const FName SpoutName, const UObject* Consumer = nullptr);
+
+	/** The outcome of the most recent receive call for a name, from any caller. False when none was made. Game thread. */
+	static bool GetLastResult(const FName SpoutName, ESpoutReceiveResult& OutResult);
+
+	/** An outcome in words, naming the setting to change when there is one. */
+	static FString DescribeResult(ESpoutReceiveResult Result);
+
+private:
+	static void NoteLastResult(const FName SpoutName, ESpoutReceiveResult Result);
+public:
 
 	/**
 	 * Releases one managed consumer (a placeable receiver actor). Idempotent; safe when the session was already closed

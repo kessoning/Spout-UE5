@@ -3,8 +3,9 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * Adds a "Spout" category to the Place Actors panel holding the Spout Sender and Spout Receiver actors, and gives both
- * classes the plugin's icon. Editor only; nothing here is part of a packaged game.
+ * Adds a "Spout" category to the Place Actors panel holding the Spout Sender and Spout Receiver actors, gives both
+ * classes the plugin's icon, and tells the runtime module which level viewport a Spout Sender actor sends while it
+ * sends in the editor. Editor only; nothing here is part of a packaged game.
  */
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
@@ -16,7 +17,11 @@
 #include "Styling/SlateStyleRegistry.h"
 #include "Brushes/SlateImageBrush.h"
 #include "Editor.h"
+#include "LevelEditorViewport.h"
 #include "Misc/EngineVersionComparison.h"
+#include "Slate/SceneViewport.h"
+#include "Widgets/SViewport.h"
+#include "SpoutModule.h"
 #include "SpoutSenderActor.h"
 #include "SpoutReceiverActor.h"
 
@@ -28,6 +33,7 @@ public:
 	virtual void StartupModule() override
 	{
 		RegisterStyle();
+		FSpoutModule::SetLevelViewportProvider(&ActiveLevelViewport);
 		if (GEngine && GEngine->IsInitialized())
 		{
 			RegisterPlacement();
@@ -40,6 +46,7 @@ public:
 
 	virtual void ShutdownModule() override
 	{
+		FSpoutModule::SetLevelViewportProvider(nullptr);
 		PostEngineInit().Remove(PostEngineInitHandle);
 		if (IPlacementModeModule::IsAvailable())
 		{
@@ -59,6 +66,22 @@ public:
 	}
 
 private:
+	/**
+	 * The level viewport a Spout Sender actor sends while it sends in the editor: the one in use (the last one clicked,
+	 * as Unreal's own level editing commands choose it), and whether it redraws continuously (Realtime).
+	 */
+	static TSharedPtr<SWidget> ActiveLevelViewport(bool& bOutRealtime)
+	{
+		FLevelEditorViewportClient* Client = GCurrentLevelEditingViewportClient ? GCurrentLevelEditingViewportClient : GLastKeyLevelEditingViewportClient;
+		if (!Client || !Client->Viewport)
+		{
+			return nullptr;
+		}
+		bOutRealtime = Client->IsRealtime();
+		// A level editor viewport is always a scene viewport (SLevelViewport creates one).
+		return static_cast<FSceneViewport*>(Client->Viewport)->GetViewportWidget().Pin();
+	}
+
 	// UE 5.8 replaced the delegate member with an accessor; UE 5.3-5.7 only have the member.
 	static auto& PostEngineInit()
 	{

@@ -142,6 +142,12 @@ namespace SpoutFormatPolicy
 	/** Diagnostic name for a DXGI format value, including the numeric value for unknown ones. */
 	FString DescribeDxgiFormat(uint32 DxgiFormat);
 
+	/**
+	 * Short name of a sender's format, as listed to users: BGRA8, RGBA8, RGB10A2, RGBA16F, RGBA16 or RGBA32F, and the
+	 * DirectX name of any other. OutBitsPerChannel is 8, 10, 16 or 32, or 0 for another format.
+	 */
+	FString ShortDxgiFormatName(uint32 DxgiFormat, int32& OutBitsPerChannel);
+
 	/** Outcome of resolving a receiver's requested colour space against an advertised format. */
 	enum class EColorSpaceResult : uint8
 	{

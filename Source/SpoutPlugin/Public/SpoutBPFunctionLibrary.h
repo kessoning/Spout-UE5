@@ -104,6 +104,56 @@ enum class ESpoutReceiveMode : uint8
 	AsyncBeta   UMETA(DisplayName = "Async Receive")
 };
 
+/** The outcome of a receive call: accepted, or why it was refused (Get Spout Receiver Session Info). */
+UENUM(BlueprintType)
+enum class ESpoutReceiveResult : uint8
+{
+	/** The receive was accepted. */
+	Accepted,
+	/** The name is empty, or longer than Spout allows. */
+	InvalidName UMETA(DisplayName = "Invalid Name"),
+	/** Spout is unavailable (the plugin needs Direct3D 12 on Windows), or streams are being closed. */
+	Unavailable,
+	/** No sender of that name is running. */
+	NoSender UMETA(DisplayName = "No Sender"),
+	/** The sender's size, texture handle or pixel format is not supported (RGBA8, BGRA8, RGB10A2, RGBA16F). */
+	BadMetadata UMETA(DisplayName = "Unsupported Sender"),
+	/** The sender's frame is larger than the plugin's limits (r.Spout.MaxFrameMiB, r.Spout.MaxTextureDimension). */
+	FrameTooLarge UMETA(DisplayName = "Frame Too Large"),
+	/** The Color Space asked for cannot be used with the sender's format (16-bit float streams are linear). */
+	ColorSpaceUnsupported UMETA(DisplayName = "Color Space Unsupported"),
+	/** The plugin's limits on open streams or queued commands are reached (r.Spout.MaxActiveStreams, r.Spout.MaxPendingCommands). */
+	Busy,
+	/** The receiver session uses the other Async Receive setting, fixed by its first accepted receive until Close Receiver. */
+	ModeConflict UMETA(DisplayName = "Async Receive Conflict"),
+	/** The receiver session reads this sender's format with another Color Space. */
+	ColorConflict UMETA(DisplayName = "Color Space Conflict"),
+	/** Too many material bindings or output render targets on this receiver, or no memory budget left (r.Spout.MaxConsumersPerReceiver, r.Spout.MaxRetainedMiB). */
+	ConsumerLimit UMETA(DisplayName = "Consumer Limit"),
+	/** The texture the stream is received into could not be created. */
+	TextureFailed UMETA(DisplayName = "Texture Failed"),
+	/**
+	 * This stream already has as many receive calls queued in this frame as r.Spout.MaxPendingPerStream allows (4 by
+	 * default). Each consumer of a stream makes one call, so a fifth consumer of one stream is refused unless the limit
+	 * is raised.
+	 */
+	StreamQueueFull UMETA(DisplayName = "Stream Queue Full"),
+	/** The sender's texture is on another graphics card than the one Unreal renders on: Spout shares textures on one GPU only. */
+	OtherGpu UMETA(DisplayName = "Sender On Another GPU")
+};
+
+/** Where a sender's texture is, compared with the graphics card Unreal renders on. */
+UENUM(BlueprintType)
+enum class ESpoutSenderGpu : uint8
+{
+	/** Not known: the texture could not be opened on any graphics card (the sender may be closing). */
+	Unknown,
+	/** On the graphics card Unreal renders on, so it can be received. */
+	SameAsUnreal UMETA(DisplayName = "Same As Unreal"),
+	/** On another graphics card: Spout cannot share it with Unreal. */
+	Other
+};
+
 /**
  * Lightweight struct for Blueprint interaction.
  * Heavy D3D resources are managed internally by the CPP file.
@@ -201,6 +251,56 @@ struct FSpoutRuntimeStatus
 	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 EstimatedRetainedBytes = 0;
 	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 PeakEstimatedRetainedBytes = 0;
 	UPROPERTY(BlueprintReadOnly, Category="Spout") int64 RejectedAllocations = 0;
+};
+
+/** One Spout sender running on this machine (List Spout Senders). */
+USTRUCT(BlueprintType)
+struct FSpoutSenderInfo
+{
+	GENERATED_BODY()
+
+	/** The sender's name. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") FName Name;
+	/** Width of its texture, in pixels. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") int32 Width = 0;
+	/** Height of its texture, in pixels. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") int32 Height = 0;
+	/** Pixel format: BGRA8, RGBA8, RGB10A2, RGBA16F, RGBA32F, or the DirectX name of another format. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") FString Format;
+	/** Bits per color channel: 8, 10, 16 or 32; 0 when the format is not one of those. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") int32 BitsPerChannel = 0;
+	/** The application that publishes it (its executable's file name), as Spout records it. Empty when not recorded. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") FString SourceApplication;
+	/** True when this game publishes it. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") bool bFromThisGame = false;
+	/** Whether its texture is on the graphics card Unreal renders on. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") ESpoutSenderGpu Gpu = ESpoutSenderGpu::Unknown;
+	/** The name of the other graphics card when Gpu is Other. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") FString OtherGpuName;
+};
+
+/** A receiver session, and the outcome of the last receive call for its name (Get Spout Receiver Session Info). */
+USTRUCT(BlueprintType)
+struct FSpoutReceiverSessionInfo
+{
+	GENERATED_BODY()
+
+	/** A receiver session for this name is open in this game. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") bool bSessionOpen = false;
+	/** The session's receive mode, fixed by its first accepted receive. Synchronous while no session is open. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") ESpoutReceiveMode ReceiveMode = ESpoutReceiveMode::Synchronous;
+	/** The session's Color Space, fixed by its first accepted receive. Auto until then. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") ESpoutColorSpace ColorSpace = ESpoutColorSpace::Auto;
+	/** Spout Receiver actors using the session. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") int32 ReceiverActors = 0;
+	/** A Blueprint or C++ receive was accepted on the session (such a caller closes it with Close Receiver). */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") bool bUsedByBlueprintOrCode = false;
+	/** True when a receive call was made for this name since the plugin started. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") bool bHasLastResult = false;
+	/** The outcome of the most recent receive call for this name, from any caller. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") ESpoutReceiveResult LastResult = ESpoutReceiveResult::Accepted;
+	/** That outcome in words, naming the setting to change when there is one. */
+	UPROPERTY(BlueprintReadOnly, Category = "Spout") FString LastResultText;
 };
 
 /** All public entry points require the game thread, including C++ callers. */
@@ -446,6 +546,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Spout",
 		meta = (ToolTip = "Reads the current Spout sender limit. Max is set to 0 when Spout is unavailable."))
 	static void GetMaxSenders(int32& Max);
+
+	/** The current Spout sender limit, as a pure node; 0 when Spout is unavailable. Same value as Get Max Senders. */
+	UFUNCTION(BlueprintPure, Category = "Spout", meta = (DisplayName = "Get Max Spout Senders"))
+	static int32 GetMaxSpoutSenders();
+
+	/**
+	 * Lists the Spout senders running on this machine with what is known about each: size, pixel format and bit depth,
+	 * the application that publishes it, whether this game publishes it, and whether its texture is on the graphics card
+	 * Unreal renders on (a sender on another one cannot be received). Senders is emptied first; false when the list could
+	 * not be read. Spout records no frame rate for a sender: what a receiver here gets is in Get Spout Stream Status.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Spout",
+		meta = (ToolTip = "Lists the Spout senders on this machine with size, format, source application and whether each is on Unreal's graphics card. The array is emptied first."))
+	static bool ListSpoutSenders(TArray<FSpoutSenderInfo>& Senders);
+
+	/**
+	 * The receiver session of a name and why its last receive call was accepted or refused, from any caller (Spout
+	 * Receiver, Spout Receiver With Material, a Spout Receiver actor). Use it to show why a receiver stays black.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Spout")
+	static FSpoutReceiverSessionInfo GetSpoutReceiverSessionInfo(FName SpoutName);
 
 private:
 	// Creates the D3D11-on-D3D12 context and Spout helpers on first use.

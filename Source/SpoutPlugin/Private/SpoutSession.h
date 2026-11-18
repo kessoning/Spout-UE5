@@ -101,6 +101,8 @@ public:
 		~FQueuedWork();
 	};
 	TSharedPtr<FQueuedWork, ESPMode::ThreadSafe> TryQueue(const FSpoutStreamToken& Token);
+	/** True when the stream's own queue is full (r.Spout.MaxPendingPerStream), as opposed to the plugin-wide limits. */
+	bool IsStreamQueueFull(const FSpoutStreamToken& Token) const;
 	void MarkQueued(const FSpoutStreamToken& Token);
 	FSpoutStreamStatus GetStreamStatus(FName Name, ESpoutType Type) const;
 	FSpoutRuntimeStatus GetRuntimeStatus() const;

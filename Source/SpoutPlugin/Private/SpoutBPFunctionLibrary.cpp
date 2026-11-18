@@ -10,6 +10,10 @@
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutModule.h"
 
+#include "SpoutActorSupport.h"
+#include "SpoutGpu.h"
+#include "Misc/Paths.h"
+
 #include "SpoutD3DContext.h"
 #include "SpoutFormatPolicy.h"
 #include "SpoutLogThrottle.h"
@@ -115,6 +119,8 @@ void USpoutBPFunctionLibrary::GlobalShutdown()
 	FSpoutShutdownSteps Steps(false);
 	SpoutLifecycle::RunOrderedShutdown(Steps);
 	USpoutSubsystem::NoteAllStreamsClosed();
+	// The devices made to locate senders on other graphics cards go before the interop context.
+	SpoutGpu::Reset();
 	FSpoutD3DContext::Get().Shutdown();
 
 	// After the context is gone nothing else will use the tracker, and the UObject system is still
@@ -479,6 +485,94 @@ void USpoutBPFunctionLibrary::GetMaxSenders(int32& Max)
 		FScopeLock SpoutLock(&Context.GetSpoutMutex());
 		Max = SenderNames->GetMaxSenders();
 	}
+}
+
+int32 USpoutBPFunctionLibrary::GetMaxSpoutSenders()
+{
+	int32 Max = 0;
+	GetMaxSenders(Max);
+	return Max;
+}
+
+bool USpoutBPFunctionLibrary::ListSpoutSenders(TArray<FSpoutSenderInfo>& Senders)
+{
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return false;
+	Senders.Reset();
+	// The validated enumeration of Spout Info: names, sizes and handles that vanished or failed validation are skipped.
+	TArray<FSenderStruct> Listed;
+	if (!SpoutInfo(Listed))
+	{
+		return false;
+	}
+	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+	FSpoutSafeSenderNames* SenderNames = Context.GetSenderNames();
+	if (!SenderNames)
+	{
+		return false;
+	}
+	Senders.Reserve(Listed.Num());
+	for (const FSenderStruct& Sender : Listed)
+	{
+		TArray<ANSICHAR> Utf8Name;
+		if (SpoutValidation::ValidateName(Sender.Name, &Utf8Name) != SpoutValidation::EResult::Ok)
+		{
+			continue;
+		}
+		unsigned int Width = 0;
+		unsigned int Height = 0;
+		HANDLE Handle = nullptr;
+		unsigned long Format = 0;
+		SharedTextureInfo Shared = {};
+		bool bShared = false;
+		{
+			FScopeLock SpoutLock(&Context.GetSpoutMutex());
+			if (!SenderNames->GetSenderInfo(Utf8Name.GetData(), Width, Height, Handle, Format))
+			{
+				continue; // gone since the enumeration
+			}
+			bShared = SenderNames->getSharedInfo(Utf8Name.GetData(), &Shared);
+		}
+		FSpoutSenderInfo Info;
+		Info.Name = Sender.Name;
+		Info.Width = static_cast<int32>(Width);
+		Info.Height = static_cast<int32>(Height);
+		Info.Format = SpoutFormatPolicy::ShortDxgiFormatName(static_cast<uint32>(Format), Info.BitsPerChannel);
+		if (bShared)
+		{
+			// The SDK stores the sender process's executable path there, as single-byte characters.
+			Shared.description[UE_ARRAY_COUNT(Shared.description) - 1] = 0;
+			Info.SourceApplication = FPaths::GetCleanFilename(FString(ANSI_TO_TCHAR(reinterpret_cast<const ANSICHAR*>(Shared.description))));
+		}
+		Info.bFromThisGame = SpoutActorSupport::IsPublishedByThisProcess(Sender.Name);
+		const SpoutGpu::FSenderGpu Gpu = SpoutGpu::Locate(Sender.Name, Handle);
+		Info.Gpu = Gpu.Where;
+		if (Gpu.Where == ESpoutSenderGpu::Other)
+		{
+			Info.OtherGpuName = Gpu.AdapterName;
+		}
+		Senders.Add(MoveTemp(Info));
+	}
+	return true;
+}
+
+FSpoutReceiverSessionInfo USpoutBPFunctionLibrary::GetSpoutReceiverSessionInfo(FName SpoutName)
+{
+	if (!ensureMsgf(IsInGameThread(), TEXT("Spout API requires the game thread."))) return {};
+	FSpoutReceiverSessionInfo Info;
+	const FSpoutReceiverSessionState State = FSpoutReceiver::GetSessionState(SpoutName);
+	Info.bSessionOpen = State.bExists;
+	Info.ReceiveMode = State.bReceiveModeEstablished && State.bAsyncReceive ? ESpoutReceiveMode::AsyncBeta : ESpoutReceiveMode::Synchronous;
+	Info.ColorSpace = State.bColorSpaceEstablished ? State.ColorSpace : ESpoutColorSpace::Auto;
+	Info.ReceiverActors = State.ManagedConsumers;
+	Info.bUsedByBlueprintOrCode = State.bUnmanagedConsumer;
+	ESpoutReceiveResult Last = ESpoutReceiveResult::Accepted;
+	if (FSpoutReceiver::GetLastResult(SpoutName, Last))
+	{
+		Info.bHasLastResult = true;
+		Info.LastResult = Last;
+		Info.LastResultText = FSpoutReceiver::DescribeResult(Last);
+	}
+	return Info;
 }
 
 FSpoutStreamStatus USpoutBPFunctionLibrary::GetSpoutStreamStatus(FName SpoutName, ESpoutType Type)
