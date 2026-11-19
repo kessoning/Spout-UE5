@@ -20,8 +20,9 @@
  * Migrate   adds the instance-editable variable Async Receive (Beta) (default false, Spout|Experimental, the Beta
  *           tooltip) and connects it to the Async Receive (Beta) input of every Spout Receiver With Material node in
  *           the example; compiles; saves with the running engine. Refuses when the variable already exists.
- * MakeLevel saves a level with one example actor (the example always receives the name "Spout"): with -AsyncOn its
- *           Async Receive (Beta) is set on the placed instance, without it the instance keeps the class default (false).
+ * MakeLevel saves a level with one example actor (the example receives its Spout Name, "UESpout_Test_Example" by
+ *           default): with -AsyncOn its Async Receive (Beta) is set on the placed instance, without it the instance
+ *           keeps the class default (false).
  *           For the saved-value, reopen and packaged checks. A validation level of the host, never shipped.
  * Exit code 0 when everything held, 1 otherwise; the report says what.
  */

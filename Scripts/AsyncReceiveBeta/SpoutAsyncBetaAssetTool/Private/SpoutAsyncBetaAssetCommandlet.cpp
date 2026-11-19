@@ -391,10 +391,10 @@ namespace SpoutAsyncBetaAsset
 	}
 
 	/**
-	 * One example actor in a new level, saved. The example receives the fixed name "Spout", so a level holds one: with
-	 * bAsync its Async Receive variable is set to true on the placed instance, with bSync to false; with neither the
-	 * instance is left at the class default (false before -Mode=Promote, true after it), so the saved level also shows
-	 * that default. A value equal to the class default is not saved with the level.
+	 * One example actor in a new level, saved. The example receives its Spout Name (UESpout_Test_Example by default),
+	 * so a level holds one: with bAsync its Async Receive variable is set to true on the placed instance, with bSync to
+	 * false; with neither the instance is left at the class default (false before -Mode=Promote, true after it), so the
+	 * saved level also shows that default. A value equal to the class default is not saved with the level.
 	 */
 	static bool MakeLevel(const FString& MapPath, bool bAsync, bool bSync, const FString& Label, const TSharedRef<FJsonObject>& J)
 	{

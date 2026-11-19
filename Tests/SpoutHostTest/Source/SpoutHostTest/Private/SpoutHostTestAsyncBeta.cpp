@@ -7,11 +7,11 @@
 // works in Shipping builds)
 //
 // The Async Receive check of a packaged host (Scripts/AsyncReceiveBeta/README.md). The level it runs in holds
-// shipped receiver examples (BP_SpoutReceiverExample) whose Async Receive setting was SAVED with the level (or left at the class default); the
-// check sets nothing on them. It publishes a moving pattern under the given name (the example receives "Spout") with the
-// plugin's own sender, for the given time, then records what each example's saved setting is, what GetSpoutStreamStatus
-// reports as requested and effective, and whether the example's received texture holds exactly one of the published
-// patterns. The report is JSON; the process then exits normally (exit code 0 when every example's effective mode
+// shipped receiver examples (BP_SpoutReceiverExample) whose Async Receive setting was SAVED with the level (or left at
+// the class default); the check sets nothing on them. It publishes a moving pattern under the given name (the example
+// receives "UESpout_Test_Example" by default) with the plugin's own sender, for the given time, then records what each
+// example's saved setting is, what GetSpoutStreamStatus reports as requested and effective, and whether the example's
+// received texture holds exactly one of the published patterns. The report is JSON; the process then exits normally (exit code 0 when every example's effective mode
 // equals its saved request and its image arrived, 1 otherwise).
 #include "SpoutBPFunctionLibrary.h"
 #include "Containers/Ticker.h"
@@ -199,7 +199,7 @@ namespace SpoutHostTestAsyncBeta
 	{
 		FString Report;
 		if (!FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaCheck="), Report)) return;
-		FString Seconds = TEXT("15"), Name = TEXT("Spout"), Map;
+		FString Seconds = TEXT("15"), Name = TEXT("UESpout_Test_Example"), Map;
 		FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaSeconds="), Seconds);
 		FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaName="), Name);
 		FParse::Value(FCommandLine::Get(), TEXT("SpoutAsyncBetaMap="), Map);

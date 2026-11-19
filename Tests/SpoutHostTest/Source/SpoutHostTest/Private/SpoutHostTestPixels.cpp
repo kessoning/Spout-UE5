@@ -68,7 +68,8 @@ namespace SpoutHostTest
 	{
 		FString Exe;
 		if (!World || !FParse::Value(FCommandLine::Get(),TEXT("SpoutNativePeer="),Exe)) { Error=TEXT("example qualification needs a game world and native peer"); return false; }
-		const FName SenderName(TEXT("UESpout_Test_Example")), ReceiverName(TEXT("Spout"));
+		// The receiver example receives the sender example's name by default (its Spout Name).
+		const FName SenderName(TEXT("UESpout_Test_Example")), ReceiverName(TEXT("UESpout_Test_Example"));
 		FSenderStruct Existing;
 		if (USpoutBPFunctionLibrary::GetSenderInfo(SenderName,Existing) || USpoutBPFunctionLibrary::GetSenderInfo(ReceiverName,Existing))
 		{ Error=TEXT("shipped example name already belongs to another sender; qualification cannot take it over"); return false; }
@@ -111,11 +112,15 @@ namespace SpoutHostTest
 		const FString StopName=EventPrefix+TEXT("_Stop"), ReadyName=EventPrefix+TEXT("_Ready");
 		HANDLE Stop=CreateEventW(nullptr,true,false,*StopName), Ready=CreateEventW(nullptr,true,false,*ReadyName);
 		if (!Stop || !Ready) { if(Stop) CloseHandle(Stop); if(Ready) CloseHandle(Ready); Error=TEXT("example peer event creation failed"); return false; }
-		const FString Args=FString::Printf(TEXT("send Spout %s %s"),*StopName,*ReadyName);
+		const FString Args=FString::Printf(TEXT("send %s %s %s"),*ReceiverName.ToString(),*StopName,*ReadyName);
 		FProcHandle Writer=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr);
 		AActor* Receiver=World->SpawnActor<AActor>(ReceiverClass);
 		ON_SCOPE_EXIT { if(Receiver) Receiver->Destroy(); UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr; USpoutBPFunctionLibrary::CloseReceiver(ReceiverName,Texture,Material); SetEvent(Stop); FinishPeer(Writer,3.0); CloseHandle(Ready); CloseHandle(Stop); FlushRenderingCommands(); };
 		if (!Receiver || !Writer.IsValid() || WaitForSingleObject(Ready,10000)!=WAIT_OBJECT_0) { Error=TEXT("shipped receiver or external sender failed to start"); return false; }
+		// The example passes an output render target only when its Output Render Target is set; this check reads the frames there.
+		FObjectPropertyBase* TargetProperty=FindFProperty<FObjectPropertyBase>(ReceiverClass,TEXT("OutputRenderTarget"));
+		if (!TargetProperty) { Error=TEXT("the shipped receiver example has no Output Render Target variable"); return false; }
+		TargetProperty->SetObjectPropertyValue_InContainer(Receiver,ReceiverTarget);
 		int32 Verified=0, Last=-1, AwaitingCopy=0; TSet<int32> Widths;
 		const double ReceiverDeadline=FPlatformTime::Seconds()+12.0;
 		while (Verified<64 && FPlatformTime::Seconds()<ReceiverDeadline)
