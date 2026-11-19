@@ -47,7 +47,9 @@ namespace SpoutHostTest
 		Receiver4K10,      // 4K RGB10A2 source
 		Consumers8,        // one 1080p stream read by 8 consumers, each with its own material instance
 		Consumers32,       // one 1080p stream read by 32 consumers
-		Unconsumed         // receiver opened during warm-up, then not called while the sender keeps publishing
+		Unconsumed,        // receiver opened during warm-up, then not called while the sender keeps publishing
+		ViewportWindow,    // the whole-window viewport sender at 1920x1080 under a fixed GPU load
+		ViewportRelease    // process GPU memory before viewport senders open, while they send, and after they close
 	};
 
 	class FPerfHarness
@@ -154,6 +156,24 @@ namespace SpoutHostTest
 		double CpuPercentAccumulator = 0.0;
 		int32 CpuPercentSamples = 0;
 		uint64 PeakWorkingSetBytes = 0;
+
+		/** Viewport scenarios: the senders send the game viewport (the whole window, or Game Viewport Only), not a render target. */
+		bool bViewportSend = false;
+		/** The release scenario: nothing is sent during warm-up; the senders close when the measured window ends. */
+		bool bViewportRelease = false;
+		/** Full copies of a 3840x2160 RGBA16F texture queued on the GPU each frame (-SpoutPerfGpuLoadCopies=). */
+		int32 GpuLoadCopies = 0;
+		TStrongObjectPtr<UTextureRenderTarget2D> GpuLoadSource;
+		TStrongObjectPtr<UTextureRenderTarget2D> GpuLoadTarget;
+		/** Each viewport sender's frame count (Spout's frame-count semaphore, read by the probe); -1 before it is advertised. */
+		TArray<int64> LastSenderFrames;
+		uint32 ViewportStreamWidth = 0, ViewportStreamHeight = 0, ViewportStreamDxgiFormat = 0;
+		bool bViewportSendersClosed = false;
+		double ViewportSendersClosedSeconds = 0.0;
+		double MaxNoProgressWhileSending = 0.0;
+		/** Process dedicated GPU memory (DXGI, Unreal's adapter) and working set, sampled in each phase of the release scenario. */
+		TArray<int64> LocalMemoryBefore, LocalMemoryWhileSending, LocalMemoryAfter;
+		TArray<int64> WorkingSetBefore, WorkingSetWhileSending, WorkingSetAfter;
 
 		TArray<TStrongObjectPtr<UTextureRenderTarget2D>> SourceRenderTargets;
 		TArray<TStrongObjectPtr<UTexture2D>> ReceivedTextures;

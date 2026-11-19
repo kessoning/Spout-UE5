@@ -24,7 +24,11 @@
 #include "RHICommandList.h"
 #include "TextureResource.h"
 #include "UObject/StrongObjectPtr.h"
+#include "DynamicRHI.h"
 #include "Windows/WindowsHWrapper.h"
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <d3d12.h>
+#include "Windows/HideWindowsPlatformTypes.h"
 
 namespace SpoutHostTest
 {
@@ -50,6 +54,20 @@ namespace SpoutHostTest
 			Pixels[Y*W+X] = FColor((X*17+Sequence)&255, (Y*29+Sequence)&255, (X+Y+Sequence*13)&255,
 				(X==0 && Y==0) ? 255 : ((X*3+Y*7+Sequence)&255));
 		return Pixels;
+	}
+
+	/**
+	 * The pixel peer's --luid argument for Unreal's adapter, with a leading space, or empty when it cannot be read. Without
+	 * it the peer makes its device on Windows' default adapter, which on a machine with two graphics cards can be the one
+	 * Unreal does not render on: a texture shared on one card cannot be opened on the other.
+	 */
+	static FString PeerAdapterArgument()
+	{
+		ID3D12Device* Device = GDynamicRHI && RHIGetInterfaceType() == ERHIInterfaceType::D3D12
+			? static_cast<ID3D12Device*>(GDynamicRHI->RHIGetNativeDevice()) : nullptr;
+		if (!Device) return FString();
+		const LUID Luid = Device->GetAdapterLuid();
+		return FString::Printf(TEXT(" \"--luid=%08x:%08x\""), static_cast<uint32>(Luid.HighPart), static_cast<uint32>(Luid.LowPart));
 	}
 
 	static bool FinishPeer(FProcHandle& Peer, double Timeout)
@@ -101,7 +119,7 @@ namespace SpoutHostTest
 			ENQUEUE_RENDER_COMMAND(SpoutExamplePattern)([Resource,Pixels=MoveTemp(Pixels)](FRHICommandListImmediate& Cmd)
 			{ Cmd.UpdateTexture2D(Resource->GetTextureRHI(),0,FUpdateTextureRegion2D(0,0,0,0,256,16),1024,reinterpret_cast<const uint8*>(Pixels.GetData())); });
 			Sender->Tick(1.0f/60.0f); FlushRenderingCommands();
-			if (Sequence==1) { const FString Args=FString::Printf(TEXT("receive %s \"%s\" linear"),*SenderName.ToString(),*Output); Reader=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr); }
+			if (Sequence==1) { const FString Args=FString::Printf(TEXT("receive %s \"%s\" linear"),*SenderName.ToString(),*Output)+PeerAdapterArgument(); Reader=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr); }
 			if (!Reader.IsValid() || !FPlatformProcess::IsProcRunning(Reader)) break;
 			FPlatformProcess::Sleep(0.01f);
 		}
@@ -112,7 +130,7 @@ namespace SpoutHostTest
 		const FString StopName=EventPrefix+TEXT("_Stop"), ReadyName=EventPrefix+TEXT("_Ready");
 		HANDLE Stop=CreateEventW(nullptr,true,false,*StopName), Ready=CreateEventW(nullptr,true,false,*ReadyName);
 		if (!Stop || !Ready) { if(Stop) CloseHandle(Stop); if(Ready) CloseHandle(Ready); Error=TEXT("example peer event creation failed"); return false; }
-		const FString Args=FString::Printf(TEXT("send %s %s %s"),*ReceiverName.ToString(),*StopName,*ReadyName);
+		const FString Args=FString::Printf(TEXT("send %s %s %s"),*ReceiverName.ToString(),*StopName,*ReadyName)+PeerAdapterArgument();
 		FProcHandle Writer=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr);
 		AActor* Receiver=World->SpawnActor<AActor>(ReceiverClass);
 		ON_SCOPE_EXIT { if(Receiver) Receiver->Destroy(); UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr; USpoutBPFunctionLibrary::CloseReceiver(ReceiverName,Texture,Material); SetEvent(Stop); FinishPeer(Writer,3.0); CloseHandle(Ready); CloseHandle(Stop); FlushRenderingCommands(); };
@@ -210,7 +228,7 @@ namespace SpoutHostTest
 				FlushRenderingCommands();
 				if (Sequence==1)
 				{
-					const FString Args=FString::Printf(TEXT("receive %s \"%s\" %s"),*Name.ToString(),*Output,Format==PF_B8G8R8A8?TEXT("bgra"):TEXT("rgba"));
+					const FString Args=FString::Printf(TEXT("receive %s \"%s\" %s"),*Name.ToString(),*Output,Format==PF_B8G8R8A8?TEXT("bgra"):TEXT("rgba"))+PeerAdapterArgument();
 					Peer=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr);
 					if (!Peer.IsValid()) break;
 				}
@@ -229,7 +247,7 @@ namespace SpoutHostTest
 			const FString Name=Prefix+FString::Printf(TEXT("_Native%d"),GPU), StopName=Name+TEXT("_Stop"), ReadyName=Name+TEXT("_Ready");
 			HANDLE Stop=CreateEventW(nullptr,true,false,*StopName), Ready=CreateEventW(nullptr,true,false,*ReadyName);
 			if (!Stop || !Ready) { if(Stop) CloseHandle(Stop); if(Ready) CloseHandle(Ready); Error=TEXT("peer event creation failed"); return false; }
-			const FString Args=FString::Printf(TEXT("send %s %s %s"),*Name,*StopName,*ReadyName);
+			const FString Args=FString::Printf(TEXT("send %s %s %s"),*Name,*StopName,*ReadyName)+PeerAdapterArgument();
 			FProcHandle Peer=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr);
 			UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr;
 			ON_SCOPE_EXIT { USpoutBPFunctionLibrary::CloseReceiver(FName(*Name),Texture,Material); FlushRenderingCommands(); CloseHandle(Ready); CloseHandle(Stop); };
@@ -267,7 +285,7 @@ namespace SpoutHostTest
 			const FString Name=Prefix+TEXT("_NativeAsync"), StopName=Name+TEXT("_Stop"), ReadyName=Name+TEXT("_Ready");
 			HANDLE Stop=CreateEventW(nullptr,true,false,*StopName), Ready=CreateEventW(nullptr,true,false,*ReadyName);
 			if (!Stop || !Ready) { if(Stop) CloseHandle(Stop); if(Ready) CloseHandle(Ready); Error=TEXT("peer event creation failed"); return false; }
-			const FString Args=FString::Printf(TEXT("send %s %s %s"),*Name,*StopName,*ReadyName);
+			const FString Args=FString::Printf(TEXT("send %s %s %s"),*Name,*StopName,*ReadyName)+PeerAdapterArgument();
 			FProcHandle Peer=FPlatformProcess::CreateProc(*Exe,*Args,false,true,true,nullptr,0,nullptr,nullptr);
 			UTexture2D* Texture=nullptr; UMaterialInstanceDynamic* Material=nullptr; bool bClosed=false;
 			ON_SCOPE_EXIT { if (!bClosed) USpoutBPFunctionLibrary::CloseReceiver(FName(*Name),Texture,Material); FlushRenderingCommands(); CloseHandle(Ready); CloseHandle(Stop); };

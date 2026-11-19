@@ -94,6 +94,8 @@ public class SpoutHostTest : ModuleRules
 				PrivateDefinitions.Add("SPOUT_HOSTTEST_HAS_SDK=0");
 			}
 			PublicSystemLibraries.Add("d3d11.lib");
+			// The viewport release scenario reads this process's dedicated GPU memory from DXGI.
+			PublicSystemLibraries.Add("dxgi.lib");
 		}
 	}
 }

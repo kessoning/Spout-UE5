@@ -122,6 +122,8 @@ $AllScenarios = @(
     @{ Name = 'consumers8';      Title = 'One stream, 8 consumers';      Covers = 'Per-call receive cost with several consumers' }
     @{ Name = 'consumers32';     Title = 'One stream, 32 consumers';     Covers = 'Per-call receive cost with many consumers' }
     @{ Name = 'unconsumed';      Title = 'Receiver nobody reads';        Covers = 'Receive work done while no consumer reads the stream' }
+    @{ Name = 'viewportwindow';  Title = 'Whole-window viewport send, GPU-bound'; Covers = 'Render-thread wait of the whole-window viewport send under GPU load' }
+    @{ Name = 'viewportrelease'; Title = 'Viewport senders opened and closed'; Covers = 'GPU memory still held after the last viewport sender closes' }
 )
 
 if ($Scenarios.Count -gt 0)
@@ -319,7 +321,10 @@ foreach ($scenarioPass in $scenarioPasses)
         "-SpoutPerfStreams=$Streams",
         "-SpoutNativePeer=$($nativeTools.Executable)",
         '-unattended', '-nopause', '-nosplash', '-NoSound',
-        '-windowed', '-ResX=640', '-ResY=360',
+        '-windowed',
+        # The viewport scenarios send the window itself, at the size their criteria use.
+        $(if ($name -like 'viewport*') { '-ResX=1920' } else { '-ResX=640' }),
+        $(if ($name -like 'viewport*') { '-ResY=1080' } else { '-ResY=360' }),
         '-stdout', "-abslog=$absLog"
     )
 

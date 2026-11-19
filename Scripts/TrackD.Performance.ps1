@@ -59,7 +59,7 @@ function Test-TrackDPerformanceResult {
             if ($expected -ne 0 -or $observed -ne 0) { $problems.Add('Idle control unexpectedly reports transfers') }
         } else {
             $streamCount = Get-TrackDPerformanceNumber $Result.configuration.streamCount 'streamCount' -Integer
-            $wantedStreams = if ($Scenario -eq 'multistream') { $Streams } elseif ($Scenario -eq 'multistream8') { 8 } else { 1 }
+            $wantedStreams = if ($Scenario -eq 'multistream') { $Streams } elseif ($Scenario -eq 'multistream8') { 8 } elseif ($Scenario -eq 'viewportrelease') { 2 } else { 1 }
             if ($streamCount -ne $wantedStreams) { $problems.Add('Measured stream count differs from the requested workload') }
             if ($expected -gt $frames * $wantedStreams) { $problems.Add('Published opportunities exceed the measured work frames and streams') }
             # targetHz describes the host's polling/work cadence. The idle receiver
@@ -71,7 +71,9 @@ function Test-TrackDPerformanceResult {
             if ($expected -le 0 -or $observed -le 0 -or $actualRatio -lt 0.9) {
                 $problems.Add('Observed delivery is below 90% of published opportunities')
             }
-            if ($observed -lt $Seconds * $deliveryHz * $wantedStreams * 0.9) {
+            # A viewport stream is published once per rendered frame, so its target is the measured frames.
+            $targetDeliveries = if ($Scenario -like 'viewport*') { $frames * $wantedStreams } else { $Seconds * $deliveryHz * $wantedStreams }
+            if ($observed -lt $targetDeliveries * 0.9) {
                 $problems.Add('Observed delivery is below 90% of the requested target rate')
             }
             $silence = Get-TrackDPerformanceNumber $Result.maxNoProgressSeconds 'maxNoProgressSeconds'

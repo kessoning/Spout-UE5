@@ -20,6 +20,7 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformTime.h"
+#include "Math/RandomStream.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -29,6 +30,12 @@
 #include "Misc/Paths.h"
 #include "RenderTimer.h"
 #include "Runtime/Launch/Resources/Version.h"
+#include "UObject/UObjectGlobals.h"
+
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#include "Windows/HideWindowsPlatformTypes.h"
 
 // GPU frame time moved twice across the supported range. Rather than report it as unavailable on
 // four of the six engines, each location is used where it exists:
@@ -96,6 +103,43 @@ namespace SpoutHostTest
 		{
 			return Value < 0.0 ? FString(TEXT("null")) : FString::Printf(TEXT("%.4f"), Value);
 		}
+
+		/**
+		 * The viewport scenario's GPU load when -SpoutPerfGpuLoadCopies= is not given. Calibrated on an RTX 4090 at 1920x1080:
+		 * about 16 ms of GPU time per frame. The GPU time does not follow the number of copies in proportion (below about
+		 * 80 copies it barely shows), so another GPU needs its own calibration.
+		 */
+		constexpr int32 DefaultViewportGpuLoadCopies = 105;
+		/** The release scenario samples memory this long after its senders close, for one second. */
+		constexpr double ReleaseSettleSeconds = 3.0;
+
+		/** Dedicated GPU memory this process uses on Unreal's adapter, as DXGI reports it, or -1 when it cannot be read. */
+		int64 QueryLocalVideoMemoryBytes()
+		{
+			static TRefCountPtr<IDXGIAdapter3> Adapter;
+			static bool bLookedUp = false;
+			if (!bLookedUp)
+			{
+				bLookedUp = true;
+				ID3D12Device* Device = GDynamicRHI && RHIGetInterfaceType() == ERHIInterfaceType::D3D12
+					? static_cast<ID3D12Device*>(GDynamicRHI->RHIGetNativeDevice()) : nullptr;
+				TRefCountPtr<IDXGIFactory4> Factory;
+				if (Device && SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(Factory.GetInitReference()))))
+				{
+					Factory->EnumAdapterByLuid(Device->GetAdapterLuid(), __uuidof(IDXGIAdapter3), reinterpret_cast<void**>(Adapter.GetInitReference()));
+				}
+			}
+			DXGI_QUERY_VIDEO_MEMORY_INFO Info = {};
+			return Adapter.IsValid() && SUCCEEDED(Adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &Info))
+				? static_cast<int64>(Info.CurrentUsage) : -1;
+		}
+
+		int64 Median(TArray<int64> Values)
+		{
+			if (Values.Num() == 0) return -1;
+			Values.Sort();
+			return Values[Values.Num() / 2];
+		}
 	}
 
 	FPerfHarness* FPerfHarness::Instance = nullptr;
@@ -126,6 +170,8 @@ namespace SpoutHostTest
 		if (Name == TEXT("consumers8"))      return EPerfScenario::Consumers8;
 		if (Name == TEXT("consumers32"))     return EPerfScenario::Consumers32;
 		if (Name == TEXT("unconsumed"))      return EPerfScenario::Unconsumed;
+		if (Name == TEXT("viewportwindow"))  return EPerfScenario::ViewportWindow;
+		if (Name == TEXT("viewportrelease")) return EPerfScenario::ViewportRelease;
 
 		// Deliberately not None: an unrecognised name must fail the run rather than quietly turn
 		// into "no performance test requested" and let the matrix report a pass.
@@ -169,6 +215,10 @@ namespace SpoutHostTest
 			Instance->StreamCount = FMath::Clamp(Streams, 1, 32);
 		}
 
+		Instance->GpuLoadCopies = Instance->Scenario == EPerfScenario::ViewportWindow ? DefaultViewportGpuLoadCopies : 0;
+		FParse::Value(FCommandLine::Get(), TEXT("-SpoutPerfGpuLoadCopies="), Instance->GpuLoadCopies);
+		Instance->GpuLoadCopies = FMath::Clamp(Instance->GpuLoadCopies, 0, 2000);
+
 		Instance->StartTimeSeconds = FPlatformTime::Seconds();
 
 		Instance->TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
@@ -189,6 +239,8 @@ namespace SpoutHostTest
 		}
 
 		Instance->SourceRenderTargets.Empty();
+		Instance->GpuLoadSource.Reset();
+		Instance->GpuLoadTarget.Reset();
 		Instance->ReceivedTextures.Empty();
 		Instance->ReceivedMaterials.Empty();
 		Instance->ConsumerTextures.Empty();
@@ -264,8 +316,48 @@ namespace SpoutHostTest
 		case EPerfScenario::Unconsumed:
 			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = true;
 			bUnconsumed = true; break;
+		// The viewport scenarios ask the harness for a 1920x1080 window. What is sent is the window's size; it is
+		// recorded from the stream itself.
+		case EPerfScenario::ViewportWindow:
+			Width = 1920; Height = 1080; StreamCount = 1; bUsesSender = true; bUsesReceiver = false;
+			bViewportSend = true; SourceFormat = PF_Unknown; break;
+		case EPerfScenario::ViewportRelease:
+			// Stream 0 sends the whole window, stream 1 Game Viewport Only: both kinds of viewport texture.
+			Width = 1920; Height = 1080; StreamCount = 2; bUsesSender = true; bUsesReceiver = false;
+			bViewportSend = true; bViewportRelease = true; SourceFormat = PF_Unknown; break;
 		default:
 			return false;
+		}
+
+		if (GpuLoadCopies > 0)
+		{
+			// The GPU load: render targets of this harness only, copied on the GPU every frame (DriveScenario).
+			for (TStrongObjectPtr<UTextureRenderTarget2D>* Slot : { &GpuLoadSource, &GpuLoadTarget })
+			{
+				UTextureRenderTarget2D* Load = NewObject<UTextureRenderTarget2D>();
+				Load->InitCustomFormat(3840, 2160, PF_FloatRGBA, true);
+				Load->UpdateResourceImmediate(true);
+				Slot->Reset(Load);
+			}
+			// Random bytes (fixed seed) in the source: a cleared texture is copied almost free by the GPU's compression, so
+			// the cost would not follow the number of copies.
+			TArray<uint8> Noise;
+			Noise.SetNumUninitialized(3840 * 2160 * 8);
+			FRandomStream Random(0x5b07);
+			for (int32 Index = 0; Index < Noise.Num(); Index += 4)
+			{
+				const uint32 Value = static_cast<uint32>(Random.GetUnsignedInt());
+				FMemory::Memcpy(&Noise[Index], &Value, 4);
+			}
+			FTextureRenderTargetResource* NoiseTarget = GpuLoadSource->GameThread_GetRenderTargetResource();
+			ENQUEUE_RENDER_COMMAND(SpoutPerfGpuLoadNoise)([NoiseTarget, Noise = MoveTemp(Noise)](FRHICommandListImmediate& Cmd)
+			{
+				if (FRHITexture* Texture = NoiseTarget ? NoiseTarget->GetTextureRHI() : nullptr)
+				{
+					Cmd.UpdateTexture2D(Texture, 0, FUpdateTextureRegion2D(0, 0, 0, 0, 3840, 2160), 3840 * 8, Noise.GetData());
+				}
+			});
+			FlushRenderingCommands();
 		}
 
 		if (!bGpuReceiverPath)
@@ -301,6 +393,24 @@ namespace SpoutHostTest
 		}
 
 		const uint32 ProcessId = FPlatformProcess::GetCurrentProcessId();
+		if (bViewportSend)
+		{
+			for (int32 Index = 0; Index < StreamCount; ++Index)
+			{
+				SenderNames.Add(FName(*FString::Printf(TEXT("SpoutPerf_%u_%d"), ProcessId, Index)));
+				LastProgressTimes.Add(FPlatformTime::Seconds());
+				LastSenderFrames.Add(-1);
+				auto Probe=MakeUnique<FViewportSenderProbe>(); FString Error;
+				if (!Probe->Initialize(Error)) { FailAndFinish(Error); return false; }
+				if (!Probe->IsFrameCountingAvailable())
+				{
+					FailAndFinish(TEXT("Spout frame counting is disabled on this machine, so viewport frames cannot be counted externally"));
+					return false;
+				}
+				PixelProbes.Add(MoveTemp(Probe));
+			}
+			return true;
+		}
 		for (int32 Index = 0; Index < StreamCount; ++Index)
 		{
 			UTextureRenderTarget2D* RenderTarget = MakeRenderTarget(Width, Height);
@@ -378,7 +488,52 @@ namespace SpoutHostTest
 			++StreamRestartEvents;
 		}
 
-		if (bUsesSender)
+		if (GpuLoadCopies > 0 && GpuLoadSource.IsValid() && GpuLoadTarget.IsValid())
+		{
+			// Queued before this frame's scene and its viewport send, so the send's copy waits behind it on the GPU. The
+			// copies go back and forth between the two textures, each reading what the one before wrote, so none of them
+			// is redundant work a driver could leave out.
+			FTextureRenderTargetResource* LoadSource = GpuLoadSource->GameThread_GetRenderTargetResource();
+			FTextureRenderTargetResource* LoadTarget = GpuLoadTarget->GameThread_GetRenderTargetResource();
+			const int32 Copies = GpuLoadCopies;
+			ENQUEUE_RENDER_COMMAND(SpoutPerfGpuLoad)([LoadSource, LoadTarget, Copies](FRHICommandListImmediate& Cmd)
+			{
+				FRHITexture* From = LoadSource ? LoadSource->GetTextureRHI() : nullptr;
+				FRHITexture* To = LoadTarget ? LoadTarget->GetTextureRHI() : nullptr;
+				if (!From || !To) return;
+				Cmd.Transition(FRHITransitionInfo(From, ERHIAccess::Unknown, ERHIAccess::CopySrc));
+				Cmd.Transition(FRHITransitionInfo(To, ERHIAccess::Unknown, ERHIAccess::CopyDest));
+				for (int32 Copy = 0; Copy < Copies; ++Copy)
+				{
+					if (Copy > 0)
+					{
+						Swap(From, To);
+						Cmd.Transition(FRHITransitionInfo(From, ERHIAccess::CopyDest, ERHIAccess::CopySrc));
+						Cmd.Transition(FRHITransitionInfo(To, ERHIAccess::CopySrc, ERHIAccess::CopyDest));
+					}
+					Cmd.CopyTexture(From, To, FRHICopyTextureInfo());
+				}
+				Cmd.Transition(FRHITransitionInfo(From, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+				Cmd.Transition(FRHITransitionInfo(To, ERHIAccess::CopyDest, ERHIAccess::SRVMask));
+			});
+		}
+
+		if (bViewportSend)
+		{
+			// One send per frame and name; each is published when the frame is presented. The release scenario sends
+			// nothing during warm-up (memory before) and nothing once its senders closed (memory after).
+			const bool bSendNow = !bViewportRelease || (bMeasuring && !bViewportSendersClosed);
+			for (int32 Index = 0; bSendNow && Index < StreamCount; ++Index)
+			{
+				const ESpoutSendTextureFrom Source = Index == 0 ? ESpoutSendTextureFrom::GameViewport : ESpoutSendTextureFrom::GameViewportOnly;
+				const double SendCallStart=FPlatformTime::Seconds();
+				const bool bAccepted = USpoutBPFunctionLibrary::SpoutSender(SenderNames[Index], Source, nullptr);
+				if(bMeasuring) PeakSendCallMs=FMath::Max(PeakSendCallMs,(FPlatformTime::Seconds()-SendCallStart)*1000.0);
+				bAccepted ? ++AcceptedSends : ++RejectedSends;
+				if (bMeasuring && bAccepted) ++ExpectedDeliveries;
+			}
+		}
+		else if (bUsesSender)
 		{
 			// The idle-receiver scenario publishes once a second so the receiver spends ~59 of every
 			// 60 frames with no new frame to copy. That gap is the cost being measured.
@@ -478,6 +633,32 @@ namespace SpoutHostTest
 	{
 		if (Scenario==EPerfScenario::Baseline) return;
 		const double Start=FPlatformTime::Seconds();
+		if (bViewportSend)
+		{
+			// Frames are counted outside the plugin: the frame-count semaphore an external receiver reads.
+			for (int32 Index=0; Index<StreamCount; ++Index)
+			{
+				FViewportSenderProbe& Probe=*PixelProbes[Index];
+				const FString Name=SenderNames[Index].ToString();
+				if (LastSenderFrames[Index] < 0)
+				{
+					if (!Probe.IsSenderAdvertised(Name)) continue;
+					Probe.BeginFrameObservation(Name);
+					LastSenderFrames[Index]=Probe.GetSenderFrameCount();
+					if (Index == 0) Probe.GetSenderDescription(Name, ViewportStreamWidth, ViewportStreamHeight, ViewportStreamDxgiFormat);
+					continue;
+				}
+				if (!Probe.PollNewFrame()) continue;
+				const int64 Count=Probe.GetSenderFrameCount();
+				const int64 Advance=Count-LastSenderFrames[Index];
+				LastSenderFrames[Index]=Count;
+				if (Advance<=0) continue;
+				LastProgressTimes[Index]=FPlatformTime::Seconds();
+				if (bMeasuring && !bViewportSendersClosed) ObservedDeliveries+=static_cast<int32>(Advance);
+			}
+			if(bMeasuring) { const double Elapsed=FPlatformTime::Seconds()-Start; ValidationSeconds+=Elapsed; PeakObserverMs=FMath::Max(PeakObserverMs,Elapsed*1000.0); }
+			return;
+		}
 		// This deliberately drains the queue: timings include a serialized pixel observer.
 		// It is a delivery-qualified baseline, not a claim about unobserved asynchronous throughput.
 		FlushRenderingCommands();
@@ -578,11 +759,18 @@ namespace SpoutHostTest
 
 		const double Now = FPlatformTime::Seconds();
 		const double Elapsed = Now - StartTimeSeconds;
+		const auto SampleMemory = [](TArray<int64>& Local, TArray<int64>& WorkingSet)
+		{
+			Local.Add(QueryLocalVideoMemoryBytes());
+			WorkingSet.Add(static_cast<int64>(FPlatformMemory::GetStats().UsedPhysical));
+		};
 
 		if (!bMeasuring)
 		{
 			if (Elapsed < WarmupSeconds)
 			{
+				// The release scenario's memory before any viewport sender opened: the last 1.5 s of warm-up.
+				if (bViewportRelease && Elapsed >= WarmupSeconds - 1.5) SampleMemory(LocalMemoryBefore, WorkingSetBefore);
 				return true;
 			}
 
@@ -593,7 +781,7 @@ namespace SpoutHostTest
 			// is created on the render thread, so it is not publishable on the frame it is made.
 			// That is what the warmup absorbs - but only the warmup. Zero acceptances by the end of
 			// it is a real failure.
-			if (bUsesSender && AcceptedSends == 0)
+			if (bUsesSender && AcceptedSends == 0 && !bViewportRelease)
 			{
 				FailAndFinish(FString::Printf(
 					TEXT("no send was accepted during %.0f s of warmup (%d rejected); there is nothing to measure"),
@@ -617,11 +805,30 @@ namespace SpoutHostTest
 			return true;
 		}
 
+		if (bViewportSendersClosed)
+		{
+			// The release scenario after its senders closed: memory once the settle time has passed, then the result.
+			const double SinceClose = Now - ViewportSendersClosedSeconds;
+			if (SinceClose >= ReleaseSettleSeconds) SampleMemory(LocalMemoryAfter, WorkingSetAfter);
+			if (SinceClose >= ReleaseSettleSeconds + 1.0)
+			{
+				bFinished = true;
+				bPassed = true;
+				WriteResults();
+				if (FReport* Report = FReport::Get()) Report->Mark(Markers::PerfPass);
+				FPlatformMisc::RequestExitWithStatus(false, 0);
+			}
+			return true;
+		}
+
 		RecordSample(WorkDelta);
+		if (bViewportRelease && (Now - MeasureStartTimeSeconds) >= MeasureSeconds - 1.0) SampleMemory(LocalMemoryWhileSending, WorkingSetWhileSending);
 
 		if ((Now - MeasureStartTimeSeconds) >= MeasureSeconds)
 		{
-			const double TargetDeliveries=MeasureSeconds*(Scenario==EPerfScenario::IdleReceiver?1.0:60.0)*StreamCount;
+			// A viewport stream is published once per rendered frame, so its target follows the frames, not 60 Hz.
+			const double TargetDeliveries=bViewportSend ? static_cast<double>(MeasuredFrames)*StreamCount
+				: MeasureSeconds*(Scenario==EPerfScenario::IdleReceiver?1.0:60.0)*StreamCount;
 			const double MaxSilence=Scenario==EPerfScenario::IdleReceiver ? 1.5 : 0.5;
 			for (double LastProgress : LastProgressTimes)
 			{
@@ -636,6 +843,17 @@ namespace SpoutHostTest
 				ObservedDeliveries<TargetDeliveries*0.9 || PixelMismatches>0))
 			{
 				FailAndFinish(FString::Printf(TEXT("measured delivery gate failed: %d observed / %d published opportunities, target %.0f, %d corrupt observations"),ObservedDeliveries,ExpectedDeliveries,TargetDeliveries,PixelMismatches));
+				return true;
+			}
+			if (bViewportRelease)
+			{
+				// Close the viewport senders, collect garbage, and keep running: memory after is sampled once it settled.
+				for (double LastProgress : LastProgressTimes) MaxNoProgressWhileSending=FMath::Max(MaxNoProgressWhileSending,Now-LastProgress);
+				for (const FName& Name : SenderNames) USpoutBPFunctionLibrary::CloseSender(Name);
+				CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+				FlushRenderingCommands();
+				bViewportSendersClosed = true;
+				ViewportSendersClosedSeconds = FPlatformTime::Seconds();
 				return true;
 			}
 			bFinished = true;
@@ -701,8 +919,11 @@ namespace SpoutHostTest
 		FString Json;
 		Json += TEXT("{\n");
 		TArray<double> SortedLatency=DeliveryLatenciesMs; SortedLatency.Sort();
+		// A frame published by the last warm-up send is counted when it arrives: never report more than was sent.
+		if (bViewportSend) ObservedDeliveries=FMath::Min(ObservedDeliveries,ExpectedDeliveries);
 		double MaxNoProgressSeconds=0.0;
 		for(double LastProgress : LastProgressTimes) MaxNoProgressSeconds=FMath::Max(MaxNoProgressSeconds,FPlatformTime::Seconds()-LastProgress);
+		if (bViewportSendersClosed) MaxNoProgressSeconds=MaxNoProgressWhileSending;
 		Json += FString::Printf(TEXT("  \"maxNoProgressSeconds\":%.6f,\n"),MaxNoProgressSeconds);
 		Json += FString::Printf(TEXT("  \"delivery\": {\"targetHz\":60,\"expected\":%d,\"observed\":%d,\"ratio\":%.6f,\"drops\":%d,\"corrupt\":%d,\"staleObservations\":%d,\"maxObserverQueueDepth\":1,\"observerSeconds\":%.6f,\"latencyMeanMs\":%s,\"latencyP95Ms\":%s,\"timingScope\":\"host including serialized pixel observer; baseline has no streams\"},\n"),
 			ExpectedDeliveries,ObservedDeliveries,ExpectedDeliveries?double(ObservedDeliveries)/ExpectedDeliveries:1.0,FMath::Max(0,ExpectedDeliveries-ObservedDeliveries),PixelMismatches,StaleObservations,ValidationSeconds,*JsonNumber(Mean(DeliveryLatenciesMs)),*JsonNumber(Percentile(SortedLatency,0.95)));
@@ -752,6 +973,21 @@ namespace SpoutHostTest
 		Json += FString::Printf(TEXT("    \"requestedMeasureSeconds\": %.1f\n"), MeasureSeconds);
 		Json += TEXT("  },\n");
 
+		if (bViewportSend)
+		{
+			Json += TEXT("  \"viewport\": {\n");
+			Json += FString::Printf(TEXT("    \"sources\": \"%s\",\n"), bViewportRelease ? TEXT("GameViewport (whole window) and GameViewportOnly") : TEXT("GameViewport (whole window)"));
+			Json += FString::Printf(TEXT("    \"gpuLoadCopiesPerFrame\": %d, \"gpuLoadTexture\": \"3840x2160 PF_FloatRGBA\",\n"), GpuLoadCopies);
+			Json += FString::Printf(TEXT("    \"streamWidth\": %u, \"streamHeight\": %u, \"streamDxgiFormat\": %u, \"frameBytes\": %lld,\n"),
+				ViewportStreamWidth, ViewportStreamHeight, ViewportStreamDxgiFormat, static_cast<int64>(ViewportStreamWidth) * ViewportStreamHeight * 4);
+			Json += FString::Printf(TEXT("    \"releaseSettleSeconds\": %.1f, \"sendersClosed\": %s,\n"), ReleaseSettleSeconds, bViewportSendersClosed ? TEXT("true") : TEXT("false"));
+			Json += FString::Printf(TEXT("    \"localMemoryBeforeBytes\": %lld, \"localMemoryWhileSendingBytes\": %lld, \"localMemoryAfterBytes\": %lld,\n"),
+				Median(LocalMemoryBefore), Median(LocalMemoryWhileSending), Median(LocalMemoryAfter));
+			Json += FString::Printf(TEXT("    \"workingSetBeforeBytes\": %lld, \"workingSetWhileSendingBytes\": %lld, \"workingSetAfterBytes\": %lld,\n"),
+				Median(WorkingSetBefore), Median(WorkingSetWhileSending), Median(WorkingSetAfter));
+			Json += FString::Printf(TEXT("    \"memorySamples\": [%d, %d, %d]\n"), LocalMemoryBefore.Num(), LocalMemoryWhileSending.Num(), LocalMemoryAfter.Num());
+			Json += TEXT("  },\n");
+		}
 		Json += TEXT("  \"results\": {\n");
 		const auto RuntimeStatus = USpoutBPFunctionLibrary::GetSpoutRuntimeStatus();
 		Json += FString::Printf(TEXT("    \"peakEstimatedRetainedBytes\": %lld, \"rejectedAllocations\": %lld, \"peakPendingCommands\": %d, \"queueRejections\": %lld,\n"), RuntimeStatus.PeakEstimatedRetainedBytes, RuntimeStatus.RejectedAllocations, RuntimeStatus.PeakPendingCommands, RuntimeStatus.RejectedRequests);
