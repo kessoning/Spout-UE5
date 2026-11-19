@@ -29,6 +29,12 @@ namespace SpoutGpu
 	/** Where the texture behind SharedHandle (a Spout sender's handle) is. Cached per name and handle. */
 	FSenderGpu Locate(FName SenderName, void* SharedHandle);
 
+	/**
+	 * True once for each sender texture Locate found on another GPU, so that a receiver warns about it once and not on
+	 * every attempt. A sender that starts again (a new texture) is reported again. Call after Locate returned Other.
+	 */
+	bool TakeOtherGpuReport(FName SenderName);
+
 	/** The name of the graphics card Unreal renders on, as Windows reports it; empty before Spout starts. */
 	FString UnrealAdapterName();
 

@@ -10,8 +10,8 @@
 
 #include "Modules/ModuleManager.h"
 
-// Global log category for the plugin to keep Spout/D3D diagnostics consistent.
-DECLARE_LOG_CATEGORY_EXTERN(LogSpoutPlugin, Log, All);
+// Global log category for the plugin to keep Spout/D3D diagnostics consistent (the editor module logs to it too).
+SPOUTPLUGIN_API DECLARE_LOG_CATEGORY_EXTERN(LogSpoutPlugin, Log, All);
 
 class FSpoutModule : public IModuleInterface
 {

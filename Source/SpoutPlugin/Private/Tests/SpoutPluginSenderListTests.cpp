@@ -232,7 +232,8 @@ bool FSpoutSenderOnAnotherGpu::RunTest(const FString&)
 		return true;
 	}
 	AddInfo(FString::Printf(TEXT("Sending from %s (%s); Unreal renders on %s."), *OtherName, *OtherLuid, *SpoutGpu::UnrealAdapterName()));
-	AddExpectedMessage(TEXT("is on another graphics card"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 0);
+	// Once for this sender, however often it is tried.
+	AddExpectedMessage(TEXT("is on another graphics card"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 1);
 
 	const FString Name = FString::Printf(TEXT("SpoutListTest_OtherGpu_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
 	const FString StopName = Name + TEXT("_Stop"), ReadyName = Name + TEXT("_Ready");
@@ -243,13 +244,18 @@ bool FSpoutSenderOnAnotherGpu::RunTest(const FString&)
 	const bool bReady = Peer.IsValid() && WaitForSingleObject(Ready, 10000) == WAIT_OBJECT_0;
 	if (TestTrue(TEXT("the peer sends from the other graphics card"), bReady))
 	{
-		UTexture2D* Texture = nullptr;
-		UMaterialInstanceDynamic* Material = nullptr;
-		TestFalse(TEXT("its texture is not received"), USpoutBPFunctionLibrary::SpoutReceiver(FName(*Name), nullptr, NAME_None, Material, Texture));
-		const FSpoutReceiverSessionInfo Info = USpoutBPFunctionLibrary::GetSpoutReceiverSessionInfo(FName(*Name));
-		TestTrue(*FString::Printf(TEXT("the outcome is Sender On Another GPU (%s)"), *Info.LastResultText), Info.LastResult == ESpoutReceiveResult::OtherGpu);
+		// Listed first: finding the GPU for the list must not use up the receiver's warning.
 		TArray<FSpoutSenderInfo> Senders;
 		USpoutBPFunctionLibrary::ListSpoutSenders(Senders);
+		UTexture2D* Texture = nullptr;
+		UMaterialInstanceDynamic* Material = nullptr;
+		for (int32 Attempt = 0; Attempt < 3; ++Attempt)
+		{
+			TestFalse(TEXT("its texture is not received"), USpoutBPFunctionLibrary::SpoutReceiver(FName(*Name), nullptr, NAME_None, Material, Texture));
+		}
+		const FSpoutReceiverSessionInfo Info = USpoutBPFunctionLibrary::GetSpoutReceiverSessionInfo(FName(*Name));
+		TestTrue(*FString::Printf(TEXT("the outcome is Sender On Another GPU (%s)"), *Info.LastResultText), Info.LastResult == ESpoutReceiveResult::OtherGpu);
+		TestFalse(TEXT("its warning is not due again for the same texture"), SpoutGpu::TakeOtherGpuReport(FName(*Name)));
 		const FSpoutSenderInfo* Listed = Senders.FindByPredicate([&Name](const FSpoutSenderInfo& S) { return S.Name == FName(*Name); });
 		if (TestNotNull(TEXT("the sender is listed"), Listed))
 		{

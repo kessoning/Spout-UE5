@@ -117,6 +117,11 @@ namespace SpoutActorSupport
 		return World && World->WorldType == EWorldType::Editor;
 	}
 
+	const TCHAR* PausedInEditorStatus()
+	{
+		return TEXT("Paused: no level viewport is Realtime, so Unreal does not update the level in the editor. Turn Realtime on (Ctrl+R in the viewport) to resume.");
+	}
+
 	void ReleaseSenderName(FName Name, const AActor* Actor)
 	{
 		check(IsInGameThread());

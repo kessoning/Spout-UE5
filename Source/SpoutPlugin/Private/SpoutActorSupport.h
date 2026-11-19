@@ -38,4 +38,6 @@ namespace SpoutActorSupport
 	bool IsPlaySessionRunning();
 	/** True when the actor is in the level editor's world: not Play, and not a Blueprint editor's preview. */
 	bool IsInLevelEditorWorld(const AActor* Actor);
+	/** The Status of a sender or receiver in the level editor while no level viewport is Realtime. */
+	const TCHAR* PausedInEditorStatus();
 }

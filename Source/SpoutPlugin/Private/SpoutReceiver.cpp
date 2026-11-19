@@ -1377,8 +1377,8 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	const SpoutGpu::FSenderGpu SenderGpu = SpoutGpu::Locate(SpoutName, SharedHandle);
 	if (SenderGpu.Where == ESpoutSenderGpu::Other)
 	{
-		static FSpoutLogThrottle OtherGpuLogThrottle(10.0);
-		if (OtherGpuLogThrottle.ShouldLog())
+		// Once per sender texture: the refusal itself repeats on every attempt, the warning does not.
+		if (SpoutGpu::TakeOtherGpuReport(SpoutName))
 		{
 			UE_LOG(LogSpoutPlugin, Warning,
 				TEXT("Spout receiver '%s': the sender's texture is on another graphics card (%s), and Unreal renders on %s. Spout shares textures on one GPU only: ")

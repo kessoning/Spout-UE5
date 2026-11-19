@@ -74,8 +74,9 @@ public:
 
 	/**
 	 * Also receive while the level is edited, not only while the game plays, and show the stream on the screen in the
-	 * level viewport (set the viewport to Realtime to see it move). Needs Project Settings > Plugins > Spout > Startup
-	 * Policy set to Editor and Play. While Play runs, Play's copy of this actor shares the same stream.
+	 * level viewport. Needs Project Settings > Plugins > Spout > Startup Policy set to Editor and Play, and a Realtime
+	 * level viewport: without one Unreal does not update the level, and receiving pauses. While Play runs, Play's copy
+	 * of this actor shares the same stream.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Spout", meta = (DisplayName = "Receive In Editor"))
 	bool bReceiveInEditor = false;
@@ -179,6 +180,13 @@ public:
 	UFUNCTION()
 	static TArray<FString> GetRunningSenderOptions();
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
+	/**
+	 * While no level viewport is Realtime, Unreal does not tick the level in the editor, so this actor neither receives
+	 * nor updates its Status. The editor calls this then; when the actor works in the level editor, its Status says it
+	 * is paused (until its next tick) and true is returned.
+	 */
+	bool ShowPausedInEditor();
 #endif
 
 	virtual void OnConstruction(const FTransform& Transform) override;
@@ -234,4 +242,9 @@ private:
 	bool bSignal = false;
 	FString LastActionable;
 	FString LastOutputWarning;
+#if WITH_EDITORONLY_DATA
+	// Status shows the editor's pause (ShowPausedInEditor); the next tick puts back what was shown before it.
+	bool bShowingEditorPause = false;
+	FString StatusBeforeEditorPause;
+#endif
 };

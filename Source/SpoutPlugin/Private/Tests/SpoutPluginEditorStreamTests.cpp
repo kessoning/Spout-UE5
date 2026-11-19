@@ -4,9 +4,9 @@
 
 // Sending and receiving while the level is edited (Send In Editor, Receive In Editor, the Startup Policy), with the
 // Spout Sender and Spout Receiver actors in a level-editor world and real transfers through this process. Covered:
-// the defaults, the policy, a render target sent and received in the editor, the hand-over to Play's copy of a sender
-// and back, the viewport sources waiting without a level viewport, and closing a level. The level viewport's image
-// itself is checked by hand.
+// the defaults, the policy, a render target sent and received in the editor, the paused Status shown while no level
+// viewport is Realtime, the hand-over to Play's copy of a sender and back, the viewport sources waiting without a level
+// viewport, and closing a level. The level viewport's image itself, and Realtime itself, are checked by hand.
 #include "Misc/AutomationTest.h"
 #if SPOUT_WITH_TESTS && PLATFORM_WINDOWS && WITH_EDITOR
 #include "SpoutBPFunctionLibrary.h"
@@ -159,6 +159,59 @@ bool FSpoutEditorStreamsLoopback::RunTest(const FString&)
 	TestFalse(TEXT("the sender stops"), IsSending(Name));
 	TestTrue(TEXT("the receiver stops"), Receiver->State == ESpoutReceiverActorState::Disabled);
 	Receiver->Destroy();
+	Sender->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutEditorStreamsPaused, "SpoutPlugin.EditorStreams.PausedWithoutRealtimeSaysSo", EditorStreamTestFlags)
+bool FSpoutEditorStreamsPaused::RunTest(const FString&)
+{
+	// Without a Realtime level viewport the editor calls ShowPausedInEditor on each Spout actor (the actors themselves do
+	// not tick then); their next tick shows their own state again.
+	ExpectContextWarning(*this);
+	FScopedStartupPolicy Policy(ESpoutStartupPolicy::EditorAndPlay);
+	FScopedWorld Editor(EWorldType::Editor);
+	TStrongObjectPtr<UTextureRenderTarget2D> Target(USpoutBPFunctionLibrary::CreateTextureRenderTarget2D(64, 32, PF_B8G8R8A8, true));
+	const FName Name(TEXT("SpoutEditorTest_Paused_3b8e"));
+	ASpoutSenderActor* Sender = SpawnRenderTargetSender(Editor.World, Name, Target.Get());
+	ASpoutReceiverActor* Receiver = Editor.World->SpawnActor<ASpoutReceiverActor>();
+	ASpoutSenderActor* Idle = Editor.World->SpawnActor<ASpoutSenderActor>();
+	if (!TestNotNull(TEXT("sender placed"), Sender) || !TestNotNull(TEXT("receiver placed"), Receiver) || !TestNotNull(TEXT("second sender placed"), Idle)) return false;
+	Receiver->SenderName = Name;
+	Receiver->bReceiveInEditor = true;
+	for (int32 Attempt = 0; Attempt < 300 && Receiver->State != ESpoutReceiverActorState::Receiving; ++Attempt)
+	{
+		Step(Sender, Receiver);
+		FPlatformProcess::Sleep(0.005f);
+	}
+	if (!TestTrue(*FString::Printf(TEXT("streaming in the level editor first (status: %s)"), *Receiver->Status), Receiver->State == ESpoutReceiverActorState::Receiving)) return false;
+
+	TestTrue(TEXT("the sender takes the pause"), Sender->ShowPausedInEditor());
+	TestTrue(TEXT("the receiver takes the pause"), Receiver->ShowPausedInEditor());
+	TestTrue(*FString::Printf(TEXT("the sender's Status says why (%s)"), *Sender->Status), Sender->Status.StartsWith(TEXT("Paused")) && Sender->Status.Contains(TEXT("Realtime")));
+	TestFalse(TEXT("and it is not publishing"), Sender->bPublishing);
+	TestTrue(*FString::Printf(TEXT("the receiver's Status says why (%s)"), *Receiver->Status), Receiver->Status.StartsWith(TEXT("Paused")) && Receiver->Status.Contains(TEXT("Realtime")));
+	TestTrue(TEXT("a second call keeps it"), Sender->ShowPausedInEditor() && Sender->Status.StartsWith(TEXT("Paused")));
+	const FString IdleBefore = Idle->Status;
+	TestFalse(TEXT("a sender that does not send in the editor is left alone"), Idle->ShowPausedInEditor());
+	TestEqual(TEXT("its Status unchanged"), Idle->Status, IdleBefore);
+
+	// The level ticks again: both show their own state.
+	for (int32 Attempt = 0; Attempt < 60 && (!Sender->bPublishing || Receiver->Status.StartsWith(TEXT("Paused"))); ++Attempt)
+	{
+		Step(Sender, Receiver);
+		FPlatformProcess::Sleep(0.005f);
+	}
+	TestFalse(*FString::Printf(TEXT("the sender's Status is its own again (%s)"), *Sender->Status), Sender->Status.StartsWith(TEXT("Paused")));
+	TestFalse(*FString::Printf(TEXT("the receiver's Status is its own again (%s)"), *Receiver->Status), Receiver->Status.StartsWith(TEXT("Paused")));
+
+	// With the Startup Policy at Play only nothing works in the editor, so nothing is paused either.
+	Policy.Set(ESpoutStartupPolicy::PlayOnly);
+	Step(Sender, Receiver);
+	TestFalse(TEXT("a stopped sender is not shown as paused"), Sender->ShowPausedInEditor());
+	TestFalse(TEXT("a stopped receiver is not shown as paused"), Receiver->ShowPausedInEditor());
+	Receiver->Destroy();
+	Idle->Destroy();
 	Sender->Destroy();
 	return true;
 }

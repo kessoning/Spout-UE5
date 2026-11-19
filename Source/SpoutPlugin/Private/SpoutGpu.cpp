@@ -20,6 +20,8 @@ namespace
 		void* Handle = nullptr;
 		SpoutGpu::FSenderGpu Result;
 		double NextRetry = 0.0;
+		// This texture on another GPU has been reported (TakeOtherGpuReport).
+		bool bReported = false;
 	};
 
 	/** Another hardware adapter, with a device made on it to try handles that Unreal's GPU cannot open. */
@@ -149,10 +151,26 @@ namespace SpoutGpu
 		{
 			return Entry.Result;
 		}
+		if (Entry.Handle != SharedHandle)
+		{
+			Entry.bReported = false;
+		}
 		Entry.Handle = SharedHandle;
 		Entry.Result = Probe(SharedHandle);
 		Entry.NextRetry = Now + UnknownRetrySeconds;
 		return Entry.Result;
+	}
+
+	bool TakeOtherGpuReport(FName SenderName)
+	{
+		check(IsInGameThread());
+		FCachedLocation* Entry = GLocations.Find(SenderName);
+		if (!Entry || Entry->Result.Where != ESpoutSenderGpu::Other || Entry->bReported)
+		{
+			return false;
+		}
+		Entry->bReported = true;
+		return true;
 	}
 
 	FString UnrealAdapterName()

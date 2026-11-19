@@ -58,7 +58,8 @@ public:
 	 * Also send while the level is edited, not only while the game plays. Needs Project Settings > Plugins > Spout >
 	 * Startup Policy set to Editor and Play. In the editor, Game Viewport Only sends the level editor's active viewport
 	 * and Game Viewport (Whole Window) the level editor's window; a Texture Render Target is sent as during Play. While
-	 * Play runs, the Play copy of this actor takes the name over, and this one resumes when Play ends.
+	 * Play runs, the Play copy of this actor takes the name over, and this one resumes when Play ends. Sending in the
+	 * editor needs a Realtime level viewport: without one Unreal does not update the level, and the stream pauses.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Spout", meta = (DisplayName = "Send In Editor"))
 	bool bSendInEditor = false;
@@ -94,6 +95,13 @@ public:
 	virtual void PostActorCreated() override;
 	virtual void PostEditImport() override;
 	virtual void PostDuplicate(bool bDuplicateForPIE) override;
+
+	/**
+	 * While no level viewport is Realtime, Unreal does not tick the level in the editor, so this actor neither sends nor
+	 * updates its Status. The editor calls this then; when the actor works in the level editor, its Status says it is
+	 * paused (until its next tick) and true is returned.
+	 */
+	bool ShowPausedInEditor();
 #endif
 
 private:
@@ -129,4 +137,11 @@ private:
 	FString LastProblem;
 	// The level editor's sender gave its name to Play's and waits for Play to end.
 	bool bYieldedToPlay = false;
+#if WITH_EDITORONLY_DATA
+	// Status and Publishing show the editor's pause (ShowPausedInEditor); the next tick puts back what they showed
+	// before it.
+	bool bShowingEditorPause = false;
+	FString StatusBeforeEditorPause;
+	bool bPublishingBeforeEditorPause = false;
+#endif
 };

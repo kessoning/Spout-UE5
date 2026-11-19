@@ -161,6 +161,14 @@ void ASpoutSenderActor::StopSending(const TCHAR* Reason)
 
 void ASpoutSenderActor::UpdateSending()
 {
+#if WITH_EDITOR
+	if (bShowingEditorPause)
+	{
+		bShowingEditorPause = false;
+		Status = StatusBeforeEditorPause;
+		bPublishing = bPublishingBeforeEditorPause;
+	}
+#endif
 	UWorld* World = GetWorld();
 	const bool bInEditor = SpoutActorSupport::IsInLevelEditorWorld(this);
 	if (!World || (!World->IsGameWorld() && !bInEditor) || GetNetMode() == NM_DedicatedServer)
@@ -324,6 +332,24 @@ void ASpoutSenderActor::UpdateSending()
 }
 
 #if WITH_EDITOR
+bool ASpoutSenderActor::ShowPausedInEditor()
+{
+	FString Reason;
+	if (!SpoutActorSupport::IsInLevelEditorWorld(this) || (!bClaimed && !(bEnabled && MaySendInEditor(Reason))))
+	{
+		return false;
+	}
+	if (!bShowingEditorPause)
+	{
+		bShowingEditorPause = true;
+		StatusBeforeEditorPause = Status;
+		bPublishingBeforeEditorPause = bPublishing;
+	}
+	Status = SpoutActorSupport::PausedInEditorStatus();
+	bPublishing = false;
+	return true;
+}
+
 void ASpoutSenderActor::CheckForErrors()
 {
 	Super::CheckForErrors();

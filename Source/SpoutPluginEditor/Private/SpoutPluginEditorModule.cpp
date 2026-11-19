@@ -4,10 +4,13 @@
 
 /**
  * Adds a "Spout" category to the Place Actors panel holding the Spout Sender and Spout Receiver actors, gives both
- * classes the plugin's icon, and tells the runtime module which level viewport a Spout Sender actor sends while it
- * sends in the editor. Editor only; nothing here is part of a packaged game.
+ * classes the plugin's icon, tells the runtime module which level viewport a Spout Sender actor sends while it sends in
+ * the editor, and has those actors say in their Status when the editor pauses them (no Realtime level viewport). Editor
+ * only; nothing here is part of a packaged game.
  */
 #include "CoreMinimal.h"
+#include "Containers/Ticker.h"
+#include "EngineUtils.h"
 #include "Modules/ModuleManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "IPlacementModeModule.h"
@@ -34,6 +37,7 @@ public:
 	{
 		RegisterStyle();
 		FSpoutModule::SetLevelViewportProvider(&ActiveLevelViewport);
+		PauseCheckHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FSpoutPluginEditorModule::ShowEditorPause), PauseCheckSeconds);
 		if (GEngine && GEngine->IsInitialized())
 		{
 			RegisterPlacement();
@@ -47,6 +51,7 @@ public:
 	virtual void ShutdownModule() override
 	{
 		FSpoutModule::SetLevelViewportProvider(nullptr);
+		FTSTicker::GetCoreTicker().RemoveTicker(PauseCheckHandle);
 		PostEngineInit().Remove(PostEngineInitHandle);
 		if (IPlacementModeModule::IsAvailable())
 		{
@@ -80,6 +85,45 @@ private:
 		bOutRealtime = Client->IsRealtime();
 		// A level editor viewport is always a scene viewport (SLevelViewport creates one).
 		return static_cast<FSceneViewport*>(Client->Viewport)->GetViewportWidget().Pin();
+	}
+
+	/**
+	 * While no viewport showing the level is Realtime, Unreal ticks the level in the editor with time only: actors do
+	 * not tick, so the Spout actors working there stop streaming and cannot update their Status. Checked a few times a
+	 * second; each of them then says so in its Status, and the log says it once.
+	 */
+	bool ShowEditorPause(float)
+	{
+		UWorld* World = GEditor && !GEditor->PlayWorld ? GEditor->GetEditorWorldContext().World() : nullptr;
+		const double Now = FPlatformTime::Seconds();
+		if (!World || LevelTicksInEditor(World))
+		{
+			// A later pause is logged again only once Realtime has stayed on for a while: brief redraws (selecting an
+			// actor redraws a few frames) do not log it again.
+			if (LevelTickingSince == 0.0) LevelTickingSince = Now;
+			if (Now - LevelTickingSince >= PauseLogRearmSeconds) bPauseLogged = false;
+			return true;
+		}
+		LevelTickingSince = 0.0;
+		int32 Paused = 0;
+		for (TActorIterator<ASpoutSenderActor> It(World); It; ++It) Paused += It->ShowPausedInEditor() ? 1 : 0;
+		for (TActorIterator<ASpoutReceiverActor> It(World); It; ++It) Paused += It->ShowPausedInEditor() ? 1 : 0;
+		if (Paused > 0 && !bPauseLogged)
+		{
+			bPauseLogged = true;
+			UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: no level viewport is Realtime, so Unreal does not update the level in the editor: %d Spout actor(s) sending or receiving there are paused. Turn Realtime on (Ctrl+R in a level viewport) to resume."), Paused);
+		}
+		return true;
+	}
+
+	/** As the editor decides each frame (UEditorEngine::Tick): the level's actors tick while a viewport showing it is Realtime. */
+	static bool LevelTicksInEditor(const UWorld* World)
+	{
+		for (const FEditorViewportClient* Client : GEditor->GetAllViewportClients())
+		{
+			if (Client && Client->GetScene() == World->Scene && Client->IsRealtime()) return true;
+		}
+		return false;
 	}
 
 	// UE 5.8 replaced the delegate member with an accessor; UE 5.3-5.7 only have the member.
@@ -143,6 +187,12 @@ private:
 	TArray<FPlacementModeID> PlacedItems;
 	TSharedPtr<FSlateStyleSet> Style;
 	FDelegateHandle PostEngineInitHandle;
+
+	static constexpr float PauseCheckSeconds = 0.25f;
+	static constexpr double PauseLogRearmSeconds = 5.0;
+	FTSTicker::FDelegateHandle PauseCheckHandle;
+	double LevelTickingSince = 0.0;
+	bool bPauseLogged = false;
 };
 
 IMPLEMENT_MODULE(FSpoutPluginEditorModule, SpoutPluginEditor)

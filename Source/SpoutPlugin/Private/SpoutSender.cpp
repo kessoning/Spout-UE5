@@ -1121,6 +1121,7 @@ namespace
 				// Game Viewport Only's copy texture. Runs after the render-command flush, so no command still uses it.
 				CropTexture.SafeRelease();
 				CropLoggedSize = FIntPoint::ZeroValue;
+				CropPendingSize = FIntPoint::ZeroValue;
 			}
 			FSpoutGpuRetirement::Get().Poll();
 		}
@@ -1164,11 +1165,21 @@ namespace
 			}
 			if (CropLoggedSize != Rect.Size())
 			{
-				// Once per size: the start of sending and every resize are visible in the log.
-				CropLoggedSize = Rect.Size();
-				UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: %s sends %dx%d at (%d, %d) of a %dx%d back buffer (%s)."),
-					Target == ESpoutViewportTarget::LevelEditor ? TEXT("the level editor's viewport") : TEXT("Game Viewport Only"),
-					Rect.Width(), Rect.Height(), Rect.Min.X, Rect.Min.Y, Extent.X, Extent.Y, GetPixelFormatString(Format));
+				// The first size at once, and each new size once it has held for a moment: dragging a window edge gives
+				// one line, not one per frame.
+				const double Now = FPlatformTime::Seconds();
+				if (CropPendingSize != Rect.Size())
+				{
+					CropPendingSize = Rect.Size();
+					CropPendingSince = Now;
+				}
+				if (CropLoggedSize == FIntPoint::ZeroValue || Now - CropPendingSince >= CropLogSettleSeconds)
+				{
+					CropLoggedSize = Rect.Size();
+					UE_LOG(LogSpoutPlugin, Log, TEXT("Spout: %s sends %dx%d at (%d, %d) of a %dx%d back buffer (%s)."),
+						Target == ESpoutViewportTarget::LevelEditor ? TEXT("the level editor's viewport") : TEXT("Game Viewport Only"),
+						Rect.Width(), Rect.Height(), Rect.Min.X, Rect.Min.Y, Extent.X, Extent.Y, GetPixelFormatString(Format));
+				}
 			}
 			const SpoutRHIState::FCopyBracket Bracket = SpoutRHIState::GetCopyBracket(SpoutRHIState::EResourceRole::ViewportBackBuffer);
 			TransitionSpoutInteropTexture(RHICmdList, BackBuffer, Bracket.EntryBefore, Bracket.CopyAccess);
@@ -1542,9 +1553,13 @@ namespace
 		const ESpoutViewportTarget Target;
 		// The viewport's rectangle in the window's back buffer, resolved with TargetWindow. Guarded by WindowMutex.
 		FIntRect CropRect;
-		// The GPU copy of that rectangle, and the size last logged. Render thread, under ViewportSlotMutex.
+		// The GPU copy of that rectangle, the size last logged, and a new size waiting to hold before it is logged.
+		// Render thread, under ViewportSlotMutex.
 		FTextureRHIRef CropTexture;
 		FIntPoint CropLoggedSize = FIntPoint::ZeroValue;
+		FIntPoint CropPendingSize = FIntPoint::ZeroValue;
+		double CropPendingSince = 0.0;
+		static constexpr double CropLogSettleSeconds = 0.5;
 	};
 
 	/**

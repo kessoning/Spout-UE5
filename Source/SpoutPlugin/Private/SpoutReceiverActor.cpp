@@ -292,6 +292,13 @@ void ASpoutReceiverActor::Release(bool bKeepConnectedName)
 
 void ASpoutReceiverActor::UpdateReceiving()
 {
+#if WITH_EDITOR
+	if (bShowingEditorPause)
+	{
+		bShowingEditorPause = false;
+		Status = StatusBeforeEditorPause;
+	}
+#endif
 	UWorld* World = GetWorld();
 	const bool bInEditor = SpoutActorSupport::IsInLevelEditorWorld(this);
 	if (!World || (!World->IsGameWorld() && !bInEditor) || GetNetMode() == NM_DedicatedServer) return;
@@ -521,7 +528,8 @@ void ASpoutReceiverActor::UpdateReceiving()
 		SetState(ESpoutReceiverActorState::Refused, TEXT("Refused: this sender already has as many consumers this frame as r.Spout.MaxPendingPerStream allows (4 by default); raise it in Project Settings > Plugins > Spout."), true);
 		break;
 	case ESpoutReceiveResult::OtherGpu:
-		SetState(ESpoutReceiverActorState::Refused, TEXT("Refused: the sender's texture is on another graphics card than Unreal's, and Spout shares textures on one GPU only. Run the sending application on the same GPU (see the Output Log)."), true);
+		// Not logged here: the receive itself logs one warning naming both graphics cards.
+		SetState(ESpoutReceiverActorState::Refused, TEXT("Refused: the sender's texture is on another graphics card than Unreal's, and Spout shares textures on one GPU only. Run the sending application on the same GPU (see the Output Log)."));
 		break;
 	case ESpoutReceiveResult::Unavailable:
 		SetState(ESpoutReceiverActorState::Waiting, TEXT("Spout is unavailable: the plugin needs Direct3D 12 on Windows (see the Output Log)."), true);
@@ -605,5 +613,21 @@ void ASpoutReceiverActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 		SenderName = SenderNameFromOption(ChooseRunningSender);
 	}
 	ApplyDisplay();
+}
+
+bool ASpoutReceiverActor::ShowPausedInEditor()
+{
+	FString Reason;
+	if (!SpoutActorSupport::IsInLevelEditorWorld(this) || (!bConnected && !(bEnabled && MayReceiveInEditor(Reason))))
+	{
+		return false;
+	}
+	if (!bShowingEditorPause)
+	{
+		bShowingEditorPause = true;
+		StatusBeforeEditorPause = Status;
+	}
+	Status = SpoutActorSupport::PausedInEditorStatus();
+	return true;
 }
 #endif
