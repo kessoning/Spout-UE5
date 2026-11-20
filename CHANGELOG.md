@@ -1,5 +1,114 @@
 # Changelog
 
+## 1.1.0 - Unreleased
+
+The editor-workflow release: a settings page, streams while the level is edited, a sender list, clearer reasons when
+a receive is refused, examples that connect out of the box, and four measured performance changes. Nothing that
+existing Blueprints, C++ callers or saved assets rely on was removed or renamed, and the new editor features are off
+by default. Supported engines: UE 5.3 to 5.9, Windows 64-bit, Direct3D 12.
+
+### Added
+- **Project Settings > Plugins > Spout** (`USpoutSettings`, saved in `DefaultEngine.ini`): Startup Policy (Play only,
+  the default, or Editor and Play), Default Sender Name for new Spout Sender actors, Access Wait (ms) and the stream
+  and memory limits. The page sets the `r.Spout.*` console variables at project-setting priority; a value set with
+  higher priority (an ini file's `[ConsoleVariables]`, the command line, the console, code) keeps it, and the editor
+  logs which variable did.
+- **Streams in the editor without Play:** Send In Editor (`ASpoutSenderActor::bSendInEditor`) and Receive In Editor
+  (`ASpoutReceiverActor::bReceiveInEditor`), off by default, run while the Startup Policy is Editor and Play.
+  - In the editor, Game Viewport Only sends the level editor's active viewport and Game Viewport (Whole Window) the
+    level editor's window; a render target is sent as during Play.
+  - During Play, Play's copy of a sender takes the name over and the editor's sender continues when Play ends (within
+    0.1 s at each start and stop in the review); Play's copy of a receiver shares the editor receiver's stream.
+    Closing a level closes the streams its actors used.
+  - Without a Realtime level viewport Unreal does not update the level in the editor, so the editor streams pause.
+    Their Status starts with "Paused: no level viewport is Realtime" and says how to resume (Ctrl+R in the viewport);
+    the Output Log says it once.
+- **List Spout Senders** (`FSpoutSenderInfo`): name, size, format and bits per channel, source application, whether
+  this game publishes it, and whether its texture is on Unreal's graphics card (`ESpoutSenderGpu`, with the other
+  GPU's name). **Get Max Spout Senders**, a pure node. The Spout Receiver actor's Choose Running Sender shows each
+  sender's size and format and marks senders on another GPU.
+- **Get Spout Receiver Session Info** (`FSpoutReceiverSessionInfo`): whether a name's receiver session is open, its
+  receive mode and colour space, who uses it, and the outcome of its last receive call (`ESpoutReceiveResult`, now
+  public) with a sentence naming the setting to change. Two new outcomes:
+  - `StreamQueueFull`: the stream already has `r.Spout.MaxPendingPerStream` receive calls this frame (4 by default),
+    so a fifth consumer was refused without a word in 1.0.x. Now also logged, throttled.
+  - `OtherGpu`: the sender's texture is on another graphics card. Refused with one warning per sender texture that
+    names both GPUs and the Windows setting to change; a sender that starts again is reported again. The receiver
+    actor no longer adds a second warning.
+
+### Changed
+- **Ending Play In Editor closes only that Play session's streams** (`USpoutSubsystem` records the worlds, in the
+  editor only), plus streams whose world cannot be told. Streams another world uses (the editor's, for example an
+  editor stream or an editor utility) keep running. When nothing else uses a stream, the end of Play closes it as
+  before. Packaged games are unchanged.
+- **Example content:** `BP_SpoutReceiverExample` receives `UESpout_Test_Example`, the name `BP_SpoutSenderExample_`
+  sends, so the two connect in Play. The name is an instance-editable Spout Name instead of a fixed `Spout`; a placed
+  receiver example that received a sender called `Spout` needs its Spout Name set to `Spout`. It shows the stream
+  through the unlit `M_SpoutDisplayUnlit`, once a receive is accepted, and keeps the last frame when the sender stops.
+  Its output render target is an optional Output Render Target, empty by default: the fixed 8-bit
+  `RT_SpoutReceiverTest` could not match a 10-bit stream and logged a warning every 5 seconds. No asset was renamed.
+- **Viewport senders log a new size once,** after it has held for half a second (Game Viewport Only, and the level
+  viewport in the editor), so dragging a window edge gives one line instead of one per frame.
+- **The interop log line:** `Spout interop initialized: <shared-slot|wrap> path, D3D11-on-12 device <not
+  needed|created>.` replaces `SpoutDX11on12 Initialized.`
+- **`LogSpoutPlugin` is exported,** so the editor module logs under it.
+
+### Performance
+Each change was compared with the same build with that change switched off (one `r.Spout.Dev.*` switch per change,
+development builds only), in alternating runs of a packaged UE 5.8 Development test game on one desktop (NVIDIA
+GeForce RTX 4090), 60 seconds per run, two passes, the machine otherwise idle. Details:
+`Docs/LIMITATIONS.md#performance-changes-in-110`.
+- **The D3D11-on-12 device is created only for the D3D11-on-12 path** (`r.Spout.SharedSlotInterop 0`, or no native
+  device). The default shared-slot path never used it. The first call of a 1080p send took 36.3 and 32.7 ms instead
+  of 48.1 ms.
+- **A receiver no longer reserves four frames of the retained-memory budget when it opens a sender:** the sender's
+  texture is not its own, and the CPU readback path now reserves its staging memory when it creates it. A receiver on
+  the default path (GPU copy, Async Receive) reserves six frames instead of ten; with a 4K stream sent and received in
+  one game, the budget's peak fell from 464.6 MB to 331.9 MB, while GPU memory stayed the same.
+- **Asynchronous senders resolve together:** at the end of a render-command flush, every asynchronous sender's owed
+  frames get their attempt at once and the flush waits for all of them together, woken as each one resolves, instead
+  of one sender after another checking every millisecond. With four 1080p streams the hook took 0.465 to 0.495 ms
+  per frame instead of 1.266 to 1.292 ms.
+- **A viewport source's own GPU textures are released when its last sender closes,** instead of being kept until
+  Close All Streams: after a whole-window and a Game Viewport Only sender at 1920x1080 closed, the process held
+  69.5 MB of dedicated GPU memory above its level before they opened, instead of 86.7 to 88.1 MB.
+- Measured and left out of 1.1.0: a whole-window viewport send without the render-thread wait (it lost frames under
+  GPU load) and a pause for Async Receive workers nobody reads (a receiver read once a second or less got no new
+  image).
+
+### Removed
+- **Shipping builds** no longer register the development switches (`r.Spout.Dev.*`) and carry no send outcome log.
+- **`r.Spout.AsyncReceive`**, retired since Async Receive became a per-node setting, is removed; an old ini value is
+  ignored by Unreal.
+- The stubs for non-Windows platforms.
+
+### Spout SDK
+- **Spout2 2.007.018:** `Spout.dll`, `Spout.lib` and the SpoutDX headers are the official release (hashes in
+  `THIRD_PARTY_NOTICES.md`). The DirectX 9, DirectX 12, OpenGL and C-style header sets, which the plugin never
+  included, are no longer bundled.
+
+### Checked (before the release gate)
+- **Automation suite** after each group of changes, built with the test marker, on UE 5.3 to 5.9 (one desktop,
+  NVIDIA GeForce RTX 4090): 184, 197, 198, 199 and 203 tests, all passed on every engine. New tests: seven for the
+  per-world closing (`SpoutPlugin.Worlds`), 13 for the settings page, editor streams, sender list, refusal reasons
+  and the other GPU (`SpoutPlugin.Settings`, `.EditorStreams`, `.Senders`, `.Receivers`, `.Gpu`), one for the pause
+  without a Realtime viewport, one for the examples connecting with their defaults
+  (`SpoutPlugin.P2.ExamplesConnectWithTheirDefaults`), and the performance changes' tests.
+- **BuildPlugin** on UE 5.3 to 5.9 with no plugin warnings; the documentation validator.
+- **A sender on the desktop's Intel GPU** received by Unreal on the RTX 4090: refused, with one warning naming both
+  GPUs, on every engine.
+- **The packaged test game** (Development, UE 5.3 and 5.8) after the performance changes.
+- **A review of the editor workflow** in the level editor on UE 5.8; its two defects (no word when the viewport was
+  not Realtime, a repeated other-GPU warning) were fixed and tested.
+
+### Documentation and repository
+- README, release readiness, limitations, Blueprint and C++ references, guides and the user manual describe the
+  editor workflow, the settings page, the new nodes, the examples and the measured performance changes.
+- `Scripts/ExampleContent`: the editor-only tool that changed the receiver example through Unreal's Blueprint API.
+  Not shipped.
+- Performance harness: viewport scenarios (whole window under GPU load, viewport texture release) and a load
+  recorder; the packaged test game starts its pixel peer on Unreal's graphics card.
+
 ## 1.0.1 - 2026-11-16
 
 A maintenance release on top of 1.0.0: one sender fix, UE 5.9 support, quieter logs and lighter builds. Nothing that

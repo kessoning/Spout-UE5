@@ -1,7 +1,7 @@
 # Spout Texture Sharing for Unreal Engine 5
 
 ![Fab: coming soon](https://img.shields.io/badge/Fab-coming%20soon-lightgrey)
-[![GitHub Releases: v1.0.1](https://img.shields.io/badge/GitHub%20Releases-v1.0.1-2ea44f)](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.1)
+[![GitHub Releases: v1.1.0](https://img.shields.io/badge/GitHub%20Releases-v1.1.0-2ea44f)](https://github.com/kessoning/Spout-UE5/releases/tag/v1.1.0)
 ![Unreal Engine 5.3 to 5.9](https://img.shields.io/badge/Unreal%20Engine-5.3%20to%205.9-313131)
 ![Windows 64-bit, DirectX 12](https://img.shields.io/badge/Windows%2064--bit-DirectX%2012-0078D6)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
@@ -13,7 +13,7 @@ Hi, I'm Kesson, a new media artist and creative technologist. I built this plugi
 
 The plugin shares live GPU textures between Unreal Engine and other Windows applications through [Spout](https://spout.zeal.co/), with no disk or network transfer: send Unreal's game view or any render target out, and bring other applications' streams in.
 
-**Version 1.0.1** · Unreal Engine 5.3 to 5.9 · Windows 64-bit · DirectX 12 · MIT License
+**Version 1.1.0** · Unreal Engine 5.3 to 5.9 · Windows 64-bit · DirectX 12 · MIT License
 
 In Unreal the plugin appears as **Spout Plugin** (module `SpoutPlugin`, category Rendering).
 
@@ -22,10 +22,26 @@ In Unreal the plugin appears as **Spout Plugin** (module `SpoutPlugin`, category
 - **Drag-and-drop actors:** a Spout Sender and a Spout Receiver in the Place Actors panel. No Blueprint needed.
 - **Send** the game view, with or without the editor around it in Play In Editor, or any render target.
 - **Receive** into a texture, your own material, a render target, or the receiver actor's built-in screen.
+- **Stream while you edit:** the actors can also send and receive while the level is edited, without Play.
+- **Project Settings page** (Plugins > Spout) for the startup policy, the default sender name and the stream limits.
 - **Colour control:** a per-receiver Color Space setting (Auto, sRGB, Linear), including exact decoding of Unreal viewport streams.
 - **Formats:** BGRA8, RGBA8, RGB10A2 and RGBA16F.
 - **GPU to GPU:** the plugin bridges Unreal's DirectX 12 renderer and Spout's DirectX 11 shared textures.
 - **Blueprint nodes and a C++ API**, with example content and a full user manual (PDF) in every download.
+
+## What's new in 1.1.0
+
+Editor workflow, clearer answers when a receiver stays black, and lighter streams. No Blueprint node, actor setting or asset was removed or renamed, and the new editor features stay off until you turn them on.
+
+- **Stream while you edit the level:** turn on **Send In Editor** (Spout Sender actor) or **Receive In Editor** (Spout Receiver actor), and set Edit > Project Settings > Plugins > Spout > **Startup Policy** to **Editor and Play**. In the editor, Game Viewport Only sends the active level viewport, Game Viewport (Whole Window) the level editor window, and a render target is sent as during Play. When you press Play, Play's copy of the actor takes over and the editor's stream continues when Play ends. The level viewport must be Realtime (Ctrl+R); otherwise Unreal does not update the level, and the actors say they are paused.
+- **A settings page:** Project Settings > Plugins > Spout holds the startup policy, the name new Spout Sender actors get, the access wait and the stream and memory limits. A console variable set elsewhere (an ini file, the command line, the console) still takes precedence.
+- **Find senders:** **List Spout Senders** returns every running sender with its size, format, application and whether it runs on Unreal's graphics card. **Get Max Spout Senders** is a pure node. The receiver actor's **Choose Running Sender** shows each sender's size and format.
+- **Why is my receiver black?** **Get Spout Receiver Session Info** gives the outcome of the last receive and the setting to change. Two cases are now reported and logged: a fifth consumer of one stream within a frame (the per-stream limit, which the settings page can raise) and a sender on another graphics card (the warning names both GPUs, once per sender).
+- **The examples connect out of the box:** the receiver example receives `UESpout_Test_Example`, the example sender's name, through an editable **Spout Name**; it shows the stream unlit, so the level's lights no longer change it; and its output render target is optional and empty, so it logs no format warning. A placed receiver example that received a sender called `Spout` needs its Spout Name set to `Spout`.
+- **Ending Play In Editor closes only that Play session's streams.** Streams used from the editor keep running.
+- **Lighter** (measured on one desktop, UE 5.8): the first Spout call takes about 33-36 ms instead of 48 ms; a 4K receiver reserves six frames of the memory budget instead of ten; with four senders, the end-of-frame work for asynchronous sends takes about 0.5 ms instead of 1.3 ms; and a viewport sender's own textures are released when its last sender closes.
+- **Spout SDK 2.007.018**, the official release. The SDK header sets the plugin never used are no longer bundled.
+- Shipping builds no longer contain the development switches; the retired `r.Spout.AsyncReceive` was removed.
 
 ## What's new in 1.0.1
 
@@ -58,7 +74,7 @@ The full list is in the [changelog](https://github.com/kessoning/Spout-UE5/blob/
 
 ## Status and testing
 
-1.0.1 passed the full automated test suite on every supported engine version, UE 5.3 to 5.9. 1.0.0 was tested on every supported engine version, with automated tests and packaged Development and Shipping test games. The two newest additions (the actors and Game Viewport Only) received focused checks. Testing used Spout's own demo applications and an independent native test sender on NVIDIA GPUs.
+1.1.0 is published only after its release checks pass: the full automated test suite on every supported engine version (UE 5.3 to 5.9), the release archives built and audited, a test project built from each download, and projects saved with 1.0.x opened and run unchanged. 1.0.1 passed the full automated test suite on every supported engine version. 1.0.0 was tested on every supported engine version, with automated tests and packaged Development and Shipping test games. The two newest additions (the actors and Game Viewport Only) received focused checks. Testing used Spout's own demo applications and an independent native test sender on NVIDIA GPUs.
 
 Not covered by the automated release tests:
 
@@ -76,10 +92,10 @@ The plugin is free.
 | Option | Best for | Where |
 |---|---|---|
 | **Fab** | Installing from the marketplace into your engine | Coming soon: the listing is awaiting Fab's review. Its link will be added here once it is live. |
-| **GitHub Releases** | Free precompiled ZIPs, one per engine version | [v1.0.1 release](https://github.com/kessoning/Spout-UE5/releases/tag/v1.0.1) |
+| **GitHub Releases** | Free precompiled ZIPs, one per engine version | [v1.1.0 release](https://github.com/kessoning/Spout-UE5/releases/tag/v1.1.0) |
 | **Source** | Custom builds and modifications | https://github.com/kessoning/Spout-UE5 |
 
-A precompiled ZIP only works with the engine version it was built for. Download the one that matches your Unreal Engine version exactly (for example `SpoutPlugin_1.0.1_UE5.7_Win64.zip` for UE 5.7).
+A precompiled ZIP only works with the engine version it was built for. Download the one that matches your Unreal Engine version exactly (for example `SpoutPlugin_1.1.0_UE5.7_Win64.zip` for UE 5.7).
 
 ## Installation
 
@@ -123,8 +139,9 @@ The bundled `Spout.dll` is staged automatically, and its location depends on the
 ### Drag-and-drop actors
 
 1. Open **Place Actors** (Window > Place Actors) and choose the **Spout** category. If the panel is short, it is under **More**; searching "Spout" also finds both actors.
-2. Drag **Spout Sender** and/or **Spout Receiver** into the level and press **Play**. Nothing streams outside Play.
+2. Drag **Spout Sender** and/or **Spout Receiver** into the level and press **Play**. By default nothing streams outside Play.
 3. Adjust them in the **Details** panel (category Spout).
+4. Optional: to stream while you edit the level, set Edit > Project Settings > Plugins > Spout > **Startup Policy** to **Editor and Play**, and turn on **Send In Editor** or **Receive In Editor** on the actor. The level viewport must be Realtime (Ctrl+R).
 
 - **Spout Sender** sends Game Viewport Only by default, under a unique name per placement (`UE Spout Sender`, `UE Spout Sender 2`, and so on). It never takes over a name another sender already publishes.
 - **Spout Receiver** with an empty **Sender Name** connects to a sender from another application and stays with it, holding the last frame if the sender stops. Type a name, or use **Choose Running Sender**, to receive a specific sender. For a stream coming from an Unreal viewport, set **Color Space** to **sRGB**.
@@ -134,9 +151,9 @@ The bundled `Spout.dll` is staged automatically, and its location depends on the
 
 - **Send:** call **Spout Sender** on Tick or a timer, with a **Spout Name** and a **Send Texture From** source. **Close Sender** stops it.
 - **Receive:** create a Dynamic Material Instance once, then call **Spout Receiver With Material** on Tick with the same Spout Name. It returns the received texture and binds it to the texture parameter you name (for example `SpoutTexture`). **Close Receiver** ends the stream.
-- **Status and discovery:** **Spout Info**, **Get Sender Info**, **Get Spout Stream Status** and **Get Spout Runtime Status**.
+- **Status and discovery:** **List Spout Senders**, **Get Spout Receiver Session Info**, **Get Spout Stream Status** and **Get Spout Runtime Status** (and the older **Spout Info** and **Get Sender Info**).
 
-The example Blueprints `BP_SpoutSenderExample_` and `BP_SpoutReceiverExample` are in the plugin's content (enable Show Plugin Content in the Content Browser). Every node, and C++ use, is described in the [Blueprint API reference](Docs/BLUEPRINT_API.md) and the [user manual](Docs/Manual/SpoutPlugin_User_Manual.pdf).
+The example Blueprints `BP_SpoutSenderExample_` and `BP_SpoutReceiverExample` are in the plugin's content (enable Show Plugin Content in the Content Browser). Placed in a level, they connect to each other in Play: both use the name `UESpout_Test_Example`. Every node, and C++ use, is described in the [Blueprint API reference](Docs/BLUEPRINT_API.md) and the [user manual](Docs/Manual/SpoutPlugin_User_Manual.pdf).
 
 ## Documentation
 

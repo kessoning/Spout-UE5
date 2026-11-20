@@ -6,12 +6,12 @@ that document as a chapter. The included documents are the same pages shipped an
 manual and the documentation cannot say different things.
 
 - Plugin: SpoutPlugin (Spout Plugin)
-- Version: 1.0.1 (must match `SpoutPlugin.uplugin`; `Scripts/Validate-Documentation.ps1` fails the
+- Version: 1.1.0 (must match `SpoutPlugin.uplugin`; `Scripts/Validate-Documentation.ps1` fails the
   release when it does not)
-- Engine target: Unreal Engine 5.3 - 5.8 (Win64)
+- Engine target: Unreal Engine 5.3 - 5.9 (Win64)
 - Modules: SpoutPlugin (Runtime), SpoutPluginShaders (Runtime), SpoutPluginEditor (Editor)
 - Platform: Windows 64-bit, DirectX 12 RHI
-- Documentation date: 2026-11-12
+- Documentation date: 2026-11-20
 
 ---
 
@@ -41,10 +41,15 @@ transfer stays on the GPU; the optional CPU receive path, for debugging, reads b
 Three ways to use it:
 
 - **Drag-and-drop actors.** Place a Spout Sender or a Spout Receiver from the Place Actors panel (category Spout) and
-  press Play. The receiver shows the stream on its own unlit screen, sized to the stream.
+  press Play. The receiver shows the stream on its own unlit screen, sized to the stream. With Send In Editor or
+  Receive In Editor, and the project's Startup Policy at Editor and Play, they also stream while the level is
+  edited.
 - **Blueprint nodes.** Spout Sender, Spout Receiver With Material, Close Sender, Close Receiver and the other nodes in
   the Spout category, for full control from any Blueprint.
 - **C++.** The same functions and actors from your own C++ code.
+
+The plugin's settings are in Edit > Project Settings > Plugins > Spout: the startup policy, the name new Spout Sender
+actors get, the access wait and the stream and memory limits.
 
 The sender has three sources: Game Viewport Only (the default: the game view without the editor around it),
 Game Viewport (Whole Window) and Texture Render Target 2D.
@@ -113,11 +118,11 @@ see them.
 
 | Asset | Purpose |
 |---|---|
-| `BP_SpoutSenderExample_` | Example Blueprint sender. |
-| `BP_SpoutReceiverExample` | Example Blueprint receiver. |
-| `M_SpoutMaterial` | Material with a `SpoutTexture` texture parameter for received streams. |
-| `M_SpoutDisplayUnlit`, `T_SpoutDisplayDefault` | The Spout Receiver actor's unlit screen material and its default texture. |
-| `RT_SpoutSenderTest_`, `RT_SpoutReceiverTest` | Example render targets for sending and receiving. |
+| `BP_SpoutSenderExample_` | Example Blueprint sender: sends `RT_SpoutSenderTest_` as `UESpout_Test_Example`. |
+| `BP_SpoutReceiverExample` | Example Blueprint receiver: receives `UESpout_Test_Example` by default (editable Spout Name), shows it unlit, and copies it into an Output Render Target only when one is set. |
+| `M_SpoutMaterial` | Lit material with a `SpoutTexture` texture parameter for received streams. |
+| `M_SpoutDisplayUnlit`, `T_SpoutDisplayDefault` | The unlit screen material of the Spout Receiver actor and the receiver example, and its default texture. |
+| `RT_SpoutSenderTest_`, `RT_SpoutReceiverTest` | Example render targets for sending and receiving (the receiver example no longer uses `RT_SpoutReceiverTest` by default). |
 
 ### Plugin structure
 
@@ -125,7 +130,7 @@ see them.
 SpoutPlugin.uplugin
 Source/SpoutPlugin/          runtime module: public API (Public/), implementation (Private/)
 Source/SpoutPluginShaders/   runtime module: global shaders (10-bit sRGB decode)
-Source/SpoutPluginEditor/    editor module: Place Actors registration
+Source/SpoutPluginEditor/    editor module: Place Actors registration, editor streams
 Source/ThirdParty/Spout/     Spout SDK headers, Spout.lib, Spout.dll
 Shaders/                     shader source
 Content/                     examples and the receiver actor's screen material

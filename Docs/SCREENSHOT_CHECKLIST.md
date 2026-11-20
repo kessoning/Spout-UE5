@@ -28,10 +28,10 @@ Filenames and what each must show:
 | SP-010 | `SP-010_material-texture-parameter.png` | M_SpoutMaterial (or your own) with the Texture Parameter selected; its Parameter Name (default SpoutTexture) readable and connected to Base Color / Emissive. |
 | SP-011 | `SP-011_external-app-receiving.png` | TouchDesigner (or another receiver) Spout In TOP showing the live Unreal image, with the Unreal sender name visible in the dropdown. |
 | SP-012 | `SP-012_spout-info-debug.png` | A graph calling Spout Info and printing the array (name, width, height), or the on-screen/log output listing senders. |
-| SP-013 | `SP-013_log-loaded.png` | Output Log filtered to LogSpoutPlugin showing "Spout Plugin Loaded" and "SpoutDX11on12 Initialized.". |
+| SP-013 | `SP-013_log-loaded.png` | Output Log filtered to LogSpoutPlugin showing "Spout Plugin Loaded" and "Spout interop initialized: shared-slot path, D3D11-on-12 device not needed.". |
 | SP-014 | `SP-014_log-dll-missing.png` | Output Log showing the Spout.dll-not-found startup error naming the checked paths. Optional - include only if cleanly reproducible. |
 | SP-015 | `SP-015_cvar-console.png` | Editor console showing r.Spout.GPUReceiver and its current value, plus an example of setting it to 0 or 1. |
-| SP-016 | `SP-016_example-content.png` | Content Browser (Show Plugin Content enabled) with BP_SpoutSenderExample_, BP_SpoutReceiverExample, M_SpoutMaterial, RT_SpoutSenderTest_, RT_SpoutReceiverTest. |
+| SP-016 | `SP-016_example-content.png` | Content Browser (Show Plugin Content enabled) with BP_SpoutSenderExample_, BP_SpoutReceiverExample, M_SpoutMaterial, M_SpoutDisplayUnlit, T_SpoutDisplayDefault, RT_SpoutSenderTest_, RT_SpoutReceiverTest. |
 
 Notes:
 

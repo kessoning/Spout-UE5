@@ -45,7 +45,8 @@ game thread.
   sources).
 - Returns: `true` if the send was accepted or queued, `false` on invalid input (for example a
   null render target, no game viewport, or Spout unavailable). `GameViewportOnly` also returns `false` when the
-  game viewport's on-screen rectangle cannot be resolved, for example outside Play in the editor.
+  game viewport's on-screen rectangle cannot be resolved, for example outside Play in the editor. This node never
+  sends the level editor's viewport; only a Spout Sender actor with Send In Editor does (below).
 - Call it: every frame on Tick or on a timer, continuously, to request continuous frame updates.
 - Common mistakes: leaving the render target empty while using the TextureRenderTarget2D source;
   calling it once instead of continuously; using a name that does not match the receiver.
@@ -186,6 +187,9 @@ limits, are in [limitations](LIMITATIONS.md#async-receive-the-default). Until th
   checkbox under **Spout**, on by default; a value that differs from that default is saved with the
   actor. It is wired to this input. Two example actors with the same Spout Name must use the same
   value. Its variable keeps its earlier name, `AsyncReceiveBeta`, so that saved values stay attached.
+  Since 1.1.0 the example also has an editable **Spout Name** (default `UESpout_Test_Example`, the
+  sender example's name; it used to receive a fixed `Spout`) and an optional **Output Render
+  Target**, empty by default, and it shows the stream through the unlit `M_SpoutDisplayUnlit`.
 - **Console variables:** no console variable selects the receive mode; the old
   `r.Spout.AsyncReceive` has been removed.
   `r.Spout.AsyncReceive.GpuPriority` (default 0) remains a diagnostic for Async Receive sessions.
@@ -352,7 +356,15 @@ Blueprint instead of an asset.
 ## Placeable actors: Spout Sender and Spout Receiver
 
 Two actors in the Place Actors panel (category **Spout**) that send and receive while the game plays, with no
-Blueprint. They call the functions above; everything here can also be read and set from Blueprint.
+Blueprint, and, since 1.1.0, also while the level is edited (Send In Editor, Receive In Editor). They call the
+functions above; everything here can also be read and set from Blueprint.
+
+**Streams in the editor.** Send In Editor and Receive In Editor are off by default and work only while Project
+Settings > Plugins > Spout > Startup Policy is **Editor and Play** (otherwise Status says so). Unreal updates the
+level in the editor only while a level viewport is Realtime: without one, the editor streams pause, Status starts
+with "Paused: no level viewport is Realtime" and the Output Log says it once; Ctrl+R in the viewport resumes them.
+When Play starts, Play's copy of a sender takes the name over and the editor's sender continues when Play ends; Play's
+copy of a receiver shares the editor receiver's stream. Closing a level closes the streams its actors used.
 
 ### Spout Sender (`ASpoutSenderActor`)
 
@@ -362,10 +374,11 @@ Blueprint. They call the functions above; everything here can also be read and s
 | Spout Name | unique per placement (`UE Spout Sender`, `UE Spout Sender 2`, ...) | Spout Sender: Spout Name |
 | Send From | Game Viewport Only | Spout Sender: Send Texture From |
 | Texture Render Target (shown for the render-target mode) | none | Spout Sender: Texture Render Target 2D |
-| Status, Publishing (read-only, Play) | - | Get Spout Stream Status |
+| Send In Editor | off | (actor) - also send while the level is edited (above). In the editor, Game Viewport Only sends the level editor's active viewport and Game Viewport (Whole Window) the level editor's window |
+| Status, Publishing (read-only, Play, and in the editor with Send In Editor) | - | Get Spout Stream Status |
 
-- Sends every frame while playing (Tick, after the frame's game work); stops on Enabled off, on removal and at the end
-  of Play (Close Sender for its own name only).
+- Sends every frame while playing (Tick, after the frame's game work), and in the editor with Send In Editor; stops
+  on Enabled off, on removal and at the end of Play (Close Sender for its own name only).
 - Render-target mode without a target: nothing is sent, never another source. Status, one log warning and a Map Check
   error say so.
 - One name, one source: it does not start on a name another sender actor, a Blueprint or C++ sender of this game, or
@@ -381,14 +394,15 @@ Blueprint. They call the functions above; everything here can also be read and s
 |---|---|---|
 | Enabled | on | (actor) - off releases this actor's use of the stream at once |
 | Sender Name | empty: connect to a sender of another application | Spout Receiver: Spout Name |
-| Choose Running Sender (editor) | - | Spout Info (fills Sender Name) |
+| Choose Running Sender (editor) | - | List Spout Senders (fills Sender Name; shows each sender's size and format and marks senders on another GPU) |
+| Receive In Editor | off | (actor) - also receive, and show the screen, while the level is edited (above) |
 | Color Space | Auto | Color Space |
 | Async Receive (advanced) | on | Async Receive |
 | Output Render Target | none | Optional Output Render Target |
 | Show Display, Display Height (180 cm), Keep Aspect Ratio, When Sender Is Lost (Hold Last Frame), Brightness | - | (actor screen) |
 | Display Material (advanced) | `M_SpoutDisplayUnlit` | Input Material / Consumer Material |
 | Texture Parameter Name (advanced) | `SpoutTexture` | Texture Parameter Name |
-| State, Status, Connected Sender Name, Received Size, Applied Settings (read-only, Play) | - | Get Spout Stream Status |
+| State, Status, Connected Sender Name, Received Size, Applied Settings (read-only, Play, and in the editor with Receive In Editor) | - | Get Spout Stream Status |
 
 - The two Blueprint receive variants become one setting: the actor creates one material instance from Display
   Material when play starts (and again only if that setting changes) and binds it the way Spout Receiver With
@@ -502,3 +516,18 @@ Closing a role retires its per-stream counters; aggregate counters last for the 
 Send/receive return false when the operational queue, stream, consumer or memory budget refuses
 the request. See [limits and lifetime](LIMITATIONS.md) for the defaults, accounting boundaries,
 editor multi-world cleanup behavior and device-loss contract.
+
+## Project Settings: Plugins > Spout
+
+Added in 1.1.0 (`USpoutSettings`, saved in the project's `DefaultEngine.ini`; the values are readable from
+Blueprint).
+
+| Setting | Default | What it does |
+|---|---|---|
+| Startup Policy | Play only | Play only: streams run while the game plays. Editor and Play: Spout Sender and Spout Receiver actors with Send In Editor or Receive In Editor also run while the level is edited |
+| Default Sender Name | `UE Spout Sender` | The name a Spout Sender actor gets when it is placed; a number is added when the name is taken. Empty means `UE Spout Sender` |
+| Access Wait (ms) | 2 | `r.Spout.AccessWaitMs` |
+| Max Active Streams, Max Pending Commands, Max Pending Per Stream, Max Consumers Per Receiver, Max Texture Dimension, Max Frame (MiB), Max Retained (MiB) | as in [limitations](LIMITATIONS.md#operational-limits) | The `r.Spout.*` limits of the same names |
+
+The page sets the console variables at project-setting priority: a value given in a `[ConsoleVariables]` ini section,
+on the command line or in the console takes precedence, and the editor logs which variable kept such a value.

@@ -11,8 +11,8 @@
 window.SPOUT = {};
 
 SPOUT.facts = {
-  version: "1.0.1",
-  engine: "UE 5.3 - 5.8",
+  version: "1.1.0",
+  engine: "UE 5.3 - 5.9",
   module: "SpoutPlugin (Runtime)",
   platform: "Windows 64-bit",
   date: "2026-08-03"

@@ -97,7 +97,8 @@ The packaged game stages files differently from the editor, so check these in or
 - Confirm only one sender is using that name.
 - For the GameViewport source, make sure the game window is actively rendering and not
   minimized.
-- Look for `SpoutDX11on12 Initialized.` in the log to confirm the interop device came up.
+- Look for `Spout interop initialized:` in the log to confirm the interop came up (since 1.1.0; earlier
+  releases logged `SpoutDX11on12 Initialized.`).
 
 ## Spout Demo Receiver shows "No sender detected" for an sRGB render target
 
@@ -162,6 +163,24 @@ the current setting.
   value and validate `OutMat` and `OutTexture` before using them.
 - For the material path, the Texture Parameter Name must match a Texture Parameter inside the
   material. If left empty, the plugin uses `SpoutTexture`.
+- Call Get Spout Receiver Session Info with the same name: it gives the outcome of the last receive
+  call and the setting to change. Two outcomes are easy to miss:
+  - **Stream Queue Full:** one stream accepts `r.Spout.MaxPendingPerStream` receive calls per frame
+    (4 by default), one per consumer. Raise Max Pending Per Stream in Project Settings > Plugins >
+    Spout for a fifth consumer.
+  - **Sender On Another GPU:** the sender's texture is on another graphics card than Unreal's
+    (common on laptops with two GPUs). The log names both GPUs. Run both applications on the same
+    GPU, for example in Windows Settings > System > Display > Graphics.
+
+## Editor streams do not run (Send In Editor, Receive In Editor)
+
+- Project Settings > Plugins > Spout > Startup Policy must be **Editor and Play**; with Play only, the
+  actor's Status says so.
+- A level viewport must be Realtime. Without one Unreal does not update the level, the actor's Status
+  starts with "Paused: no level viewport is Realtime", and the Output Log says it once. Press Ctrl+R
+  in the viewport (or use its menu) to turn Realtime on.
+- During Play, Play's copy of a sender takes over its name; the editor's sender continues when Play
+  ends.
 
 ## Black texture from SceneCapture2D
 

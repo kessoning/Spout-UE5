@@ -17,6 +17,14 @@ Drag **Spout Sender** from the Place Actors panel (category Spout) into the leve
 Viewport Only by default; its Details panel has the same settings as the Spout Sender node. See the README section
 "Drag-and-drop actors" and [BLUEPRINT_API.md](BLUEPRINT_API.md#placeable-actors-spout-sender-and-spout-receiver).
 
+**Sending while you edit the level (since 1.1.0).** Set Edit > Project Settings > Plugins > Spout > Startup Policy to
+Editor and Play and turn on the actor's **Send In Editor**. In the editor, Game Viewport Only sends the level editor's
+active viewport, Game Viewport (Whole Window) the level editor's window, and a Texture Render Target is sent as during
+Play. When you press Play, Play's copy of the actor takes the name over; the editor's sender continues when Play
+ends. Unreal updates the level only while a level viewport is Realtime: without one the stream pauses, and the
+actor's Status and the Output Log say so (Ctrl+R in the viewport resumes it). The Spout Sender node itself still
+sends only while the game runs.
+
 ## Sources
 
 ### GameViewport (shown as "Game Viewport (Whole Window)")
@@ -51,7 +59,9 @@ viewport's rectangle out of the back buffer on the GPU into a texture the plugin
 - **Colour:** the same format and values as GameViewport (display values; a receiving Unreal should use Color
   Space sRGB on a 10-bit back buffer).
 - **Only while playing:** outside Play there is no game viewport, so nothing is sent and the Spout Sender node
-  returns false. Sending the editor's level viewport outside Play is not supported.
+  returns false. To send the editor's level viewport outside Play, use a Spout Sender actor with Send In Editor
+  (above).
+- **Resizing:** a new size is logged once it has held for half a second, so dragging a window edge gives one line.
 
 Leave the Texture Render Target 2D pin empty, as for GameViewport.
 

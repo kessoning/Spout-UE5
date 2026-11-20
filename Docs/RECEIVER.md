@@ -13,6 +13,16 @@ unlit screen shows a sender of another application, or the one named in Sender N
 settings of the receive nodes plus the screen's. See the README section "Drag-and-drop actors" and
 [BLUEPRINT_API.md](BLUEPRINT_API.md#placeable-actors-spout-sender-and-spout-receiver).
 
+**Receiving while you edit the level (since 1.1.0).** Set Edit > Project Settings > Plugins > Spout > Startup Policy
+to Editor and Play and turn on the actor's **Receive In Editor**: its screen then shows the stream in the level
+viewport without Play. During Play, Play's copy of the actor shares the same stream. The level viewport must be
+Realtime (Ctrl+R); without it, receiving pauses and the actor's Status and the Output Log say so.
+
+The example Blueprint `BP_SpoutReceiverExample` receives `UESpout_Test_Example`, the name the sender example sends, so
+the two connect when both are placed and you press Play. Change its **Spout Name** to receive another sender. Its
+**Output Render Target** is empty by default; set one only when you need the frame in a render target, in the format
+the stream needs (see below).
+
 ## Outputs
 
 | Output | Type | Notes |
@@ -26,8 +36,14 @@ named sender is not currently available, in which case the outputs are not updat
 
 ## Finding and matching senders
 
-- Use [Spout Info](BLUEPRINT_API.md#spout-info) to list active sender names, widths, and heights.
+- Use [List Spout Senders](BLUEPRINT_API.md#list-spout-senders) to list the running senders with their size,
+  format, application and whether they run on Unreal's graphics card ([Spout Info](BLUEPRINT_API.md#spout-info)
+  gives names, widths and heights only).
 - The Spout Name must match the sender exactly. A mismatch returns no data.
+- When a receiver stays black, [Get Spout Receiver Session Info](BLUEPRINT_API.md#get-spout-receiver-session-info)
+  gives the outcome of its last receive call and the setting to change. A sender whose texture is on another
+  graphics card cannot be received: Spout shares textures on one GPU only, and the log names both GPUs once per
+  sender texture.
 - The receiver reconnects automatically. When the named sender appears, opens a new shared
   handle, or changes size, the plugin reopens the shared texture and resizes its outputs.
 
@@ -125,7 +141,8 @@ can also cause runs of skipped frames. See [LIMITATIONS.md](LIMITATIONS.md#perfo
 
 To drive a material from the received stream:
 
-1. Create a material with a Texture Parameter (the example content is `M_SpoutMaterial`).
+1. Create a material with a Texture Parameter (the example content has `M_SpoutMaterial`, lit, and
+   `M_SpoutDisplayUnlit`, unlit; an unlit material shows the stream without the level's lights changing it).
 2. Pass that material as Input Material to the Spout Receiver node.
 3. Set Texture Parameter Name to match the parameter name inside the material. If you leave it
    empty the plugin uses `SpoutTexture` as the default name, so name your parameter

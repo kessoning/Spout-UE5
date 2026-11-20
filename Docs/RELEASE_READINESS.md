@@ -1,8 +1,54 @@
 # Release readiness
 
-This page ships inside the 1.0.1 release archives. It describes what qualification of a release
+This page ships inside the 1.1.0 release archives. It describes what qualification of a release
 consists of and what it does not cover. Do not treat historical releases or successful compilation
 as approval of changed source.
+
+## Release 1.1.0
+
+1.1.0 adds, compared with 1.0.1:
+
+- **Editor workflow:** a Project Settings page (Plugins > Spout); Send In Editor and Receive In Editor on the actors,
+  which stream while the level is edited when the Startup Policy is Editor and Play; List Spout Senders, a pure Get
+  Max Spout Senders and a sender dropdown that shows size and format; Get Spout Receiver Session Info, with two newly
+  reported refusals (the per-stream limit and a sender on another graphics card).
+- **Behaviour changes:** ending Play In Editor closes only the streams that Play session's world used; the example
+  Blueprints connect to each other by default and the receiver example shows the stream unlit, with an optional output
+  render target; Shipping builds no longer register the development switches, and the retired `r.Spout.AsyncReceive`
+  is removed.
+- **Performance changes:** the D3D11-on-12 device is created only for the path that uses it; a receiver no longer
+  reserves budget for a CPU readback it does not use; asynchronous senders' owed frames are resolved together at the
+  end of a render-command flush; a viewport source's textures are released with its last sender.
+- **Spout SDK 2.007.018**, the official binaries (hashes in the third-party notices).
+
+No Blueprint node, actor setting or asset was removed or renamed, and the defaults keep every stream to Play. The
+changes were checked as follows, on one desktop (NVIDIA GeForce RTX 4090 for Unreal, an Intel UHD 770 driving the
+display, Windows 11):
+
+- **During development:**
+  - The complete automation suite, built with the test marker, on every declared engine (UE 5.3 through 5.9) after
+    each group of changes: 184, 197, 198, 199 and 203 tests, all passed on every engine.
+  - New tests cover the per-world closing, the settings page, editor streams and their pause without a Realtime
+    viewport, the sender list, every refusal reason, the examples connecting with their defaults, and the performance
+    changes.
+  - BuildPlugin on every declared engine with no plugin warnings.
+  - A sender on the Intel GPU received by Unreal on the RTX 4090: refused with one warning naming both GPUs, on every
+    engine.
+  - The packaged test game (Development, UE 5.3 and 5.8) after the performance changes.
+  - A review of the editor workflow in the level editor on UE 5.8; its findings were fixed and tested.
+- **Performance changes:** each was compared with the same build with that change switched off, in alternating runs,
+  in a packaged UE 5.8 Development test game (60 seconds per run, two passes, the machine otherwise idle). The
+  measured differences are in [limitations](LIMITATIONS.md#performance-changes-in-110). A change that showed no gain
+  was left out.
+- **Before publication** (the release gate): the automation suite on UE 5.3 through 5.9 on the final source; the
+  release archives built for every engine and audited; a build without the test marker on UE 5.3 and 5.9; projects
+  saved with 1.0.x (placed actors, the example Blueprints, a C++ caller) opened and run unchanged; a test project built
+  from each release ZIP (UE 5.3 through 5.9) and from the Fab edition; the shipped-binary check; a compile against the
+  older Windows SDK headers that Fab's UE 5.3 builder uses; editor-time sending in the level editor, with Play started
+  and stopped while it runs; then 1.0.1 and 1.1.0 measured alternately on UE 5.8, and a final manual look.
+
+The soaks and the laptop measurements of 1.0.0 were not repeated; their results below stand for the code 1.1.0 did
+not change. The engines are those described for 1.0.1 and 1.0.0 below.
 
 ## Release 1.0.1
 

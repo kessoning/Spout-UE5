@@ -8,6 +8,9 @@ accepted work, not proof that a foreign application displayed a frame.
 - Windows x64 with Unreal's D3D12 RHI. Other RHIs disable interop and produce one capability warning.
 - Both applications must use the same GPU adapter. Cross-adapter, remote-machine and network
   sharing are outside this plugin's contract. Multi-GPU selection is controlled by the applications.
+  Since 1.1.0 a sender whose texture is on another graphics card is refused with one warning per
+  sender texture that names both GPUs, List Spout Senders marks it, and Get Spout Receiver Session
+  Info reports it (Sender On Another GPU).
 - Device removal requires an application restart. The plugin does not rebuild Unreal's RHI or
   promise automatic recovery from driver resets. Native errors and device reasons appear in logs.
 - Supported source/API range is UE 5.3 through 5.9. Match the plugin binary to the exact engine
@@ -36,7 +39,10 @@ pixels between them, chosen once per process:
   kept as a fallback. The release qualification of this version runs the default path; qualify the
   fallback in your own workload before relying on it.
 - The log names the path the process latched: `Spout interop path latched for this process: ...`.
-  The D3D11-on-12 device is still created at startup on both paths.
+  At the first Spout call it also says which path started and whether the D3D11-on-12 device was
+  needed: `Spout interop initialized: shared-slot path, D3D11-on-12 device not needed.` (or
+  `wrap path, D3D11-on-12 device created.`). Since 1.1.0 that device is created only for the
+  D3D11-on-12 path; earlier releases created it on both paths.
 
 ## Formats and color
 
@@ -86,8 +92,9 @@ pixels between them, chosen once per process:
   requiring different interpretation must convert downstream themselves.
 - The shipped `M_SpoutMaterial` is a lit material that feeds the received texture to Base Color, so
   what a surface using it shows depends on the scene's lighting, exposure and tone mapping. To
-  compare what is shown with the stream's values, use an unlit material (texture to Emissive Color)
-  or UI.
+  compare what is shown with the stream's values, use an unlit material (texture to Emissive Color),
+  such as the shipped `M_SpoutDisplayUnlit` that the Spout Receiver actor and, since 1.1.0, the
+  receiver example use, or UI. A surface in the level still passes through exposure and tone mapping.
 - SceneCapture output depends on Capture Source, exposure, post-processing, alpha and render-target
   format. A blanket assertion that SceneColor HDR always produces black is not a code guarantee.
   Qualify the chosen capture pipeline with known pixels and the receiving application.
@@ -100,9 +107,12 @@ pixels between them, chosen once per process:
 - Calls enqueue one transfer request; call on Tick or a timer for continuous transfer. Registration,
   the last frame, receiver ownership and native resources persist between calls until explicit close
   or global cleanup. A paused sender can still be discovered and its last frame read.
-- Editor world cleanup closes all plugin streams, including other PIE worlds. There is no per-world
-  ownership isolation. Packaged applications must close their streams at the appropriate EndPlay/
-  level-transition boundary; module shutdown performs final process-wide cleanup.
+- In the editor, ending Play In Editor closes the streams that Play session's world used, and the
+  streams whose world cannot be told. A stream that another world also uses (the editor's world,
+  for example an editor stream or an editor utility, or another Play world) keeps running, and
+  closing a level in the editor closes the streams its actors used. Before 1.1.0 the end of Play
+  closed every plugin stream. Packaged applications must close their streams at the appropriate
+  EndPlay/level-transition boundary; module shutdown performs final process-wide cleanup.
 - CloseReceiver restores only material parameters still holding the texture it bound. Caller-created
   materials and caller-retained old output textures remain valid. Store returned textures/materials
   in reflected references so Unreal GC can see them.
@@ -119,7 +129,7 @@ and release unused outputs before increasing limits.
 | --- | ---: | --- |
 | r.Spout.MaxActiveStreams | 32 | Sender and receiver roles combined |
 | r.Spout.MaxPendingCommands | 128 | Non-viewport commands, including cancelled work awaiting drain |
-| r.Spout.MaxPendingPerStream | 4 | Queued commands per active generation |
+| r.Spout.MaxPendingPerStream | 4 | Queued commands per active generation. Each send or receive call queues one, so with the default a fifth receive call on one stream within a frame (a fifth consumer) is refused: Get Spout Receiver Session Info reports Stream Queue Full, and it is logged |
 | r.Spout.MaxConsumersPerReceiver | 32 | Material bindings and optional targets, each bounded separately |
 | r.Spout.MaxTextureDimension | 8192 | Width/height; hard maximum 16384 |
 | r.Spout.MaxFrameMiB | 128 | Uncompressed bytes per frame |
@@ -129,6 +139,10 @@ and release unused outputs before increasing limits.
 time, in milliseconds, one shared-texture access attempt waits for a peer. It is not a per-frame
 bound. See [Performance and diagnostics](#performance-and-diagnostics). A change applies from the
 next attempt.
+
+Since 1.1.0, Edit > Project Settings > Plugins > Spout sets these variables and `r.Spout.AccessWaitMs`
+at project-setting priority. A value given in a `[ConsoleVariables]` ini section, on the command line
+or in the console takes precedence, and the editor logs which variable kept such a value.
 
 ### Experimental receive settings (off by default)
 
@@ -322,8 +336,13 @@ the end of October 2026 it was an opt-in beta, off by default.
   Unreal excepted, above).
 
 Viewport requests coalesce by name until presentation. Estimates reserve three image equivalents per
-received output (CPU mip plus GPU recreation overlap), two per sender resource, four per receiver native state (shared/staging/upload/cache
-allowance), and two per attached optional target. Replaced output textures retain their reservation
+received output (CPU mip plus GPU recreation overlap), two per sender resource, two per attached
+optional target, one per slot texture of the transfer paths (three per Async Receive stream, for
+example), one for the 10-bit decode's source, and three for a receiver's CPU readback (staging,
+upload and their overlap), reserved when that path creates its staging texture. A receiver on the
+default path (GPU copy, Async Receive) therefore reserves six image equivalents. Before 1.1.0 every
+receiver also reserved four for its native state when it opened a sender, whatever path it used: ten
+for the same receiver. Replaced output textures retain their reservation
 through UObject/resource lifetime, including when held by callers. Resize admission includes old
 and new reservations. The CPU mip is retained for UTexture2D resource recreation compatibility with installed engines.
 
@@ -477,6 +496,20 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
   - The receiver's screen is an unlit surface in the level: the level's exposure and tone mapping apply, so what it
     shows is not a pixel-exact copy. The Output Render Target and external receivers get the exact values.
   - On a dedicated server the actors do nothing.
+- Streams in the editor without Play (Send In Editor and Receive In Editor, added in 1.1.0):
+  - Off by default. They run only while Project Settings > Plugins > Spout > Startup Policy is Editor and Play;
+    otherwise Status says why nothing streams.
+  - Unreal updates the level in the editor only while a level viewport is Realtime. Without one, the actors' editor
+    streams pause: their Status starts with "Paused: no level viewport is Realtime", and the Output Log says it once.
+    Turn Realtime on (Ctrl+R in the viewport) to resume. A sender whose viewport is not Realtime also notes that its
+    image changes only when the viewport redraws.
+  - In the editor, Game Viewport Only sends the level editor's active viewport and Game Viewport (Whole Window) the
+    level editor's window; a render target is sent as during Play. With several viewport panes, the active one is
+    sent. Switching the active pane while sending is not covered by the automated tests.
+  - During Play, Play's copy of a sender takes the name over and the editor's sender continues when Play ends; Play's
+    copy of a receiver shares the editor receiver's stream. Closing a level in the editor closes the streams its
+    actors used.
+  - Checked by automation tests on UE 5.3 to 5.9 and in the level editor on UE 5.8, on one machine.
 - Game Viewport Only (`GameViewportOnly`, added in the final 1.0.0 release):
   - Checked in Play In Editor embedded in the level editor's viewport on UE 5.8, on one machine at 125 % display
     scaling, and in a packaged Development game on UE 5.3 to 5.8, where the game viewport fills the window. New
@@ -488,7 +521,9 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
     treats as the current game viewport, not a chosen one.
   - The rectangle is taken from the viewport's layout of the last UI update and clipped to the back buffer.
   - It adds one GPU copy per sent frame and one plugin-owned texture of the viewport's size, compared with
-    GameViewport. Its performance was not measured.
+    GameViewport. Its performance was not measured. Since 1.1.0 a viewport source's own textures are released when
+    its last sender closes (before, they were kept until Close All Streams); see
+    [performance changes in 1.1.0](#performance-changes-in-110).
 - A sender that keeps its texture locked while it waits for its own GPU work makes receive attempts
   wait or skip whenever that GPU work is queued behind other work. On a busy GPU this can be on
   most frames. With Async Receive those attempts are the worker's; its measured delivery against
@@ -515,6 +550,32 @@ correctness requirement and cannot be abandoned merely to satisfy a time budget.
 - Get Spout Stream Status exposes accepted queued requests, queue rejections, submitted frames,
   access misses and native failures. Get Spout Runtime Status exposes active roles, queue peaks and
   reservation totals/rejections. These are snapshots, not cross-process delivery acknowledgments.
+  Get Spout Receiver Session Info (added in 1.1.0) gives a receiver's last outcome and the setting to change.
+
+### Performance changes in 1.1.0
+
+Measured on one desktop (NVIDIA GeForce RTX 4090, Windows 11) in a packaged UE 5.8 Development test game: each change
+against the same build with that change switched off, in alternating runs of 60 seconds, two passes, the machine
+otherwise idle. The figures belong to that machine and those scenarios.
+
+- **First Spout call:** the D3D11-on-12 device is created only for the D3D11-on-12 path. The first call of a 1080p
+  send took 48.1 ms in both passes with the device and 36.3 and 32.7 ms without it. On the D3D11-on-12 path
+  (`r.Spout.SharedSlotInterop 0`) the device is created as before.
+- **Receiver memory budget:** a receiver reserves budget for a CPU readback only when it creates one (see the
+  estimates above). With one 4K 8-bit stream sent and received in the same game (default path), the budget's peak
+  fell from 464.6 MB to 331.9 MB,
+  four 4K frames; Unreal's dedicated GPU memory was the same (979 to 984 MB). The budget is accounting: the change
+  lets more streams be admitted, it does not use less GPU memory.
+- **Several asynchronous senders:** at the end of a render-command flush, every asynchronous sender's owed frames get
+  their attempt at once and the flush waits for all of them together, woken as each one resolves; before, one sender
+  after another, checking every millisecond. With four 1080p streams sent from render targets (and received in the
+  same game), that work took 1.266 to 1.292 ms
+  per frame before and 0.465 to 0.495 ms after, with 99.97 % delivery, in the two rerun passes that decided (of the
+  first two passes, one had a single 23 ms wait).
+- **Viewport sender textures:** when the last sender of a viewport source (the whole window, or Game Viewport Only)
+  closes, that source's own GPU textures are released. With a whole-window and a Game Viewport Only sender at
+  1920x1080, the process held 86.7 to 88.1 MB more dedicated GPU memory after they closed than before they opened;
+  with the change, 69.5 MB.
 
 ## Qualification
 

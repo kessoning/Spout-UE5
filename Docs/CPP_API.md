@@ -9,9 +9,9 @@ Reference; the C++ signatures there are the source of truth and are not repeated
 
 | Module | Type | What it is for you |
 |---|---|---|
-| `SpoutPlugin` | Runtime | The public API: `USpoutBPFunctionLibrary`, `ASpoutSenderActor`, `ASpoutReceiverActor`, the enums and structs. Depend on this module. |
+| `SpoutPlugin` | Runtime | The public API: `USpoutBPFunctionLibrary`, `ASpoutSenderActor`, `ASpoutReceiverActor`, `USpoutSettings`, the enums and structs. Depend on this module. |
 | `SpoutPluginShaders` | Runtime | Global shaders (the 10-bit sRGB decode). Internal; no public API. |
-| `SpoutPluginEditor` | Editor | Registers the two actors in the Place Actors panel. Internal; no public API. |
+| `SpoutPluginEditor` | Editor | Registers the two actors in the Place Actors panel and runs their editor streams. Internal; no public API. |
 
 All three modules are Windows 64-bit only (`PlatformAllowList` Win64 in `SpoutPlugin.uplugin`).
 
@@ -74,6 +74,9 @@ Blueprint node name, the C++ function and the parameters correspond one to one.
 | Get Sender Info | `GetSenderInfo(FName SpoutName, FSenderStruct& OutSenderStruct)` | `bool` |
 | Set Max Senders | `SetMaxSenders(int32 Max)` | `int32` |
 | Get Max Senders | `GetMaxSenders(int32& Max)` | `void` |
+| Get Max Spout Senders | `GetMaxSpoutSenders()` | `int32` |
+| List Spout Senders | `ListSpoutSenders(TArray<FSpoutSenderInfo>& Senders)` | `bool` |
+| Get Spout Receiver Session Info | `GetSpoutReceiverSessionInfo(FName SpoutName)` | `FSpoutReceiverSessionInfo` |
 | Create Texture Render Target 2D | `CreateTextureRenderTarget2D(int32 Width = 1024, int32 Height = 768, EPixelFormat Format = PF_B8G8R8A8, bool bForceLinearGamma = true)` | `UTextureRenderTarget2D*` |
 
 C++-specific notes:
@@ -90,8 +93,8 @@ C++-specific notes:
   stream. Passing `nullptr` for an output you did not use is fine.
 - **Not part of the API.** `GlobalShutdown()` and `CloseAllStreams()` are public for the plugin module's own use
   (module shutdown, end of Play in the editor) and close every stream in the process; do not call them.
-  `FSpoutModule` and the `LogSpoutPlugin` log category are not exported for use from other modules: log with your
-  own category.
+  `FSpoutModule` is not exported for use from other modules. The `LogSpoutPlugin` log category is exported since
+  1.1.0, for the plugin's editor module; log with your own category.
 
 ## Types
 
@@ -109,6 +112,11 @@ Blueprint API Reference describes every value.
 | `FSpoutRuntimeStatus` | `bInteropAvailable`, `ActiveStreams`, `PendingCommands`, `PeakPendingCommands`, `RejectedRequests`, `EstimatedRetainedBytes`, `PeakEstimatedRetainedBytes`, `RejectedAllocations` |
 | `ESpoutLostSenderDisplay` | `HoldLastFrame`, `ShowNoSignal` |
 | `ESpoutReceiverActorState` | `Disabled`, `Waiting`, `RequestAccepted`, `Receiving`, `Refused` |
+| `FSpoutSenderInfo` | `Name`, `Width`, `Height`, `Format`, `BitsPerChannel`, `SourceApplication`, `bFromThisGame`, `Gpu`, `OtherGpuName` (filled by List Spout Senders) |
+| `ESpoutSenderGpu` | `Unknown`, `SameAsUnreal`, `Other` |
+| `FSpoutReceiverSessionInfo` | `bSessionOpen`, `ReceiveMode`, `ColorSpace`, `ReceiverActors`, `bUsedByBlueprintOrCode`, `bHasLastResult`, `LastResult`, `LastResultText` |
+| `ESpoutReceiveResult` | `Accepted`, `InvalidName`, `Unavailable`, `NoSender`, `BadMetadata`, `FrameTooLarge`, `ColorSpaceUnsupported`, `Busy`, `ModeConflict`, `ColorConflict`, `ConsumerLimit`, `TextureFailed`, `StreamQueueFull`, `OtherGpu` |
+| `ESpoutStartupPolicy` (`SpoutSettings.h`) | `PlayOnly`, `EditorAndPlay` |
 
 ## Example: send the game viewport
 
@@ -387,8 +395,8 @@ void AMyGameMode::StartSpout()
 
 | Actor | Settings (members) | Functions |
 |---|---|---|
-| `ASpoutSenderActor` | `bEnabled`, `SpoutName`, `SendFrom`, `TextureRenderTarget`; read-only: `Status`, `bPublishing` | `SetEnabled(bool)`, `SetSpoutName(FName)`, `SetSource(ESpoutSendTextureFrom, UTextureRenderTarget2D*)` |
-| `ASpoutReceiverActor` | `bEnabled`, `SenderName`, `ColorSpace`, `bAsyncReceive`, `OutputRenderTarget`, `bShowDisplay`, `DisplayHeight`, `bKeepAspectRatio`, `WhenSenderLost`, `Brightness`, `DisplayMaterial`, `TextureParameterName`; read-only: `State`, `Status`, `ConnectedSenderName`, `ReceivedSize`, `AppliedSettings` | `SetEnabled(bool)`, `SetSenderName(FName)`, `SetOutputRenderTarget(UTextureRenderTarget2D*)`, `GetReceivedTexture()`, `GetDisplayMaterialInstance()` |
+| `ASpoutSenderActor` | `bEnabled`, `SpoutName`, `SendFrom`, `TextureRenderTarget`, `bSendInEditor`; read-only: `Status`, `bPublishing` | `SetEnabled(bool)`, `SetSpoutName(FName)`, `SetSource(ESpoutSendTextureFrom, UTextureRenderTarget2D*)` |
+| `ASpoutReceiverActor` | `bEnabled`, `SenderName`, `bReceiveInEditor`, `ColorSpace`, `bAsyncReceive`, `OutputRenderTarget`, `bShowDisplay`, `DisplayHeight`, `bKeepAspectRatio`, `WhenSenderLost`, `Brightness`, `DisplayMaterial`, `TextureParameterName`; read-only: `State`, `Status`, `ConnectedSenderName`, `ReceivedSize`, `AppliedSettings` | `SetEnabled(bool)`, `SetSenderName(FName)`, `SetOutputRenderTarget(UTextureRenderTarget2D*)`, `GetReceivedTexture()`, `GetDisplayMaterialInstance()` |
 
 The actors close their own streams when they are disabled, destroyed or the game ends. See the Placeable actors
 section of the Blueprint API Reference for their behaviour (empty Sender Name, shared streams, refusals, output
@@ -397,13 +405,20 @@ target formats).
 ## Example: list senders and read a stream's status
 
 ```cpp
-TArray<FSenderStruct> Senders;
-if (USpoutBPFunctionLibrary::SpoutInfo(Senders))
+TArray<FSpoutSenderInfo> Senders;
+if (USpoutBPFunctionLibrary::ListSpoutSenders(Senders))
 {
-    for (const FSenderStruct& Sender : Senders)
+    for (const FSpoutSenderInfo& Sender : Senders)
     {
-        UE_LOG(LogTemp, Log, TEXT("Spout sender '%s' %dx%d"), *Sender.Name.ToString(), Sender.Width, Sender.Height);
+        UE_LOG(LogTemp, Log, TEXT("Spout sender '%s' %dx%d %s from %s%s"), *Sender.Name.ToString(), Sender.Width, Sender.Height,
+            *Sender.Format, *Sender.SourceApplication, Sender.Gpu == ESpoutSenderGpu::Other ? TEXT(" (another GPU)") : TEXT(""));
     }
+}
+
+const FSpoutReceiverSessionInfo Session = USpoutBPFunctionLibrary::GetSpoutReceiverSessionInfo(TEXT("TouchDesigner"));
+if (Session.bHasLastResult && Session.LastResult != ESpoutReceiveResult::Accepted)
+{
+    UE_LOG(LogTemp, Warning, TEXT("%s"), *Session.LastResultText);
 }
 
 const FSpoutStreamStatus Status = USpoutBPFunctionLibrary::GetSpoutStreamStatus(TEXT("MyGame Viewport"), ESpoutType::Sender);
@@ -420,3 +435,8 @@ The plugin-wide settings are console variables (`r.Spout.*`), for example `r.Spo
 `r.Spout.AccessWaitMs` and the `r.Spout.Max*` limits. Set them as any console variable from C++
 (`IConsoleManager::Get().FindConsoleVariable(TEXT("r.Spout.AccessWaitMs"))->Set(...)`), in `DefaultEngine.ini` under
 `[SystemSettings]`, or from the console. Their meaning and defaults are in the Limitations chapter.
+
+Since 1.1.0 the project's values can also be set in Project Settings > Plugins > Spout (`USpoutSettings`, in
+`SpoutSettings.h`; read them with `USpoutSettings::Get()`). The page sets the console variables at project-setting
+priority, so a value set from code, an ini file's `[ConsoleVariables]`, the command line or the console takes
+precedence.

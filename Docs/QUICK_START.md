@@ -6,15 +6,22 @@ Spout application (for example TouchDesigner) is available to view or produce a 
 
 The plugin ships example Blueprints under its `Content/` folder that you can open instead of
 building these by hand: `BP_SpoutSenderExample_`, `BP_SpoutReceiverExample`, `M_SpoutMaterial`,
-`RT_SpoutSenderTest_`, and `RT_SpoutReceiverTest`.
+`M_SpoutDisplayUnlit`, `RT_SpoutSenderTest_`, and `RT_SpoutReceiverTest`. Place both example
+Blueprints in a level and press Play: they connect to each other through the name
+`UESpout_Test_Example`. To receive another sender with the receiver example, change its Spout Name
+in the Details panel.
 
 ## 0. No Blueprint: drag-and-drop actors
 
 1. Open Place Actors and choose the **Spout** category (under More when the panel is short, or search "Spout").
 2. Drag **Spout Sender** into the level to send the game (Game Viewport Only).
 3. Drag **Spout Receiver** into the level to show a sender of another application on a screen in the level (or
-   type a Sender Name in its Details panel).
+   type a Sender Name in its Details panel, or pick one from Choose Running Sender).
 4. Press Play.
+5. Optional, to stream while you edit the level without Play: set Edit > Project Settings > Plugins > Spout >
+   Startup Policy to **Editor and Play**, and turn on **Send In Editor** on the sender or **Receive In Editor** on the
+   receiver. In the editor, the sender's Game Viewport Only sends the active level viewport. The level viewport must
+   be Realtime (Ctrl+R); otherwise the actors' Status says they are paused.
 
 ## 1. Send the game viewport
 

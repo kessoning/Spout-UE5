@@ -73,6 +73,52 @@ projects for each Unreal version, from 5.3 to 5.9: build, open, play with a send
 packaged games and run those too. Everything passed. I also checked something I hadn't before: that the ready-made
 files in each download load and work in a project that can't compile anything, which is how most of you use them.
 
+And to close the month, version 1.1.0, the first bigger update since the release. It's all about working in the
+editor, and nothing you already built needs to change. Everything new stays off until you switch it on.
+
+The headline: the Spout Sender and Spout Receiver actors can now work while you're building your level, without
+pressing Play. Each one has a new checkbox (Send In Editor, Receive In Editor), and there's a new page in Project
+Settings, under Plugins > Spout, where you allow it once for the project. In the editor, a sender sends what you see in
+your level viewport, so another app can follow along while you move around and build. A receiver shows the other app's
+picture right in your level as you work. Press Play and the playing copy takes over, then hands everything back when
+you stop. One catch: Unreal only keeps the level moving while the viewport is in Realtime mode. If it isn't, the
+actors now tell you they're paused and how to fix it (Ctrl+R in the viewport).
+
+That same settings page also holds the plugin's limits and a couple of handy defaults, like the name new senders get.
+Before, those were console commands only.
+
+Finding senders got easier. There's a new node that lists every sender running on your machine, with its size, its
+format and which app it comes from. The receiver actor's dropdown shows the size and format too, so you can tell your
+two "Camera" senders apart.
+
+And when a receiver stays black, there's now a node that tells you why, in plain words, with the setting to change.
+Two reasons that used to be silent now speak up: when a fifth thing tries to read the same stream in one frame (there's
+a limit of four, and the settings page can raise it), and when the other app runs on a different graphics card, which
+happens a lot on laptops with two of them. Spout can't share pictures between two graphics cards, so the log now says
+which two are involved, once, instead of nagging every few seconds.
+
+The example Blueprints finally talk to each other. Drop the sender and receiver examples into a level, press Play,
+and the receiver shows what the sender sends, no setup needed. The receiver example also got a name box so you can
+point it at anything else, its picture no longer changes with the lights in your level, and it stopped filling the
+log with a warning when it received an Unreal viewport. If you had the old receiver example listening to a sender
+called "Spout", type Spout into its new name box.
+
+A few things got lighter under the hood. The very first Spout moment of your game now takes about a quarter less time
+(on my machine, from about 48 thousandths of a second to about 35). A big 4K receiver needs a good chunk less of the
+plugin's memory allowance. Several senders at once finish their work faster each frame, and senders that share the
+game view give their memory back when you stop the last one. I measured each of these against the same build with
+the change turned off, on my desktop, and only kept the ones that really helped. Two other ideas didn't make it: one
+dropped frames when the graphics card was busy, and the other, which let unused receivers rest, turned out to leave a
+receiver that's only checked once a second stuck on an old picture. I caught that one while writing these docs, so
+it's out until I get it right.
+
+Ending Play inside the editor now only closes what that Play session opened, so anything the editor itself is
+showing keeps going. The bundled Spout library is the newest official release, 2.007.018, and the files from it the
+plugin never used are gone from the download.
+
+Before 1.1.0 goes out, it gets the full release check: every test on every Unreal version from 5.3 to 5.9, the actual
+downloads installed into test projects, and projects made with 1.0 opened to make sure they still work as they did.
+
 ## OCTOBER 2026 UPDATES
 
 This month is mostly groundwork. Two changes are on for everyone: the new way pictures travel between

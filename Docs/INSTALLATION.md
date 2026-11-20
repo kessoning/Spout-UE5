@@ -97,7 +97,8 @@ plugin, and the prebuilt editor binaries do not provide that.
 
 Open `Project/Saved/Logs/ProjectName.log` and look for `Spout Plugin Loaded` from the
 `LogSpoutPlugin` category. On first use of any node you should also see
-`SpoutDX11on12 Initialized.`. If `Spout.dll` is missing, the plugin logs an explicit error or
+`Spout interop initialized: shared-slot path, D3D11-on-12 device not needed.` (with
+`r.Spout.SharedSlotInterop 0`: `wrap path, D3D11-on-12 device created.`). If `Spout.dll` is missing, the plugin logs an explicit error or
 warning at startup naming the paths it checked.
 
 See [PACKAGING_AND_DISTRIBUTION.md](PACKAGING_AND_DISTRIBUTION.md) for the clean-rebuild steps

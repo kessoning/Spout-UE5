@@ -76,7 +76,7 @@ RunUAT BuildPlugin -Plugin="<...>/SpoutPlugin.uplugin" -Package="<out>" -TargetP
 ```
 
 then strips `.pdb` files and zips a `SpoutPlugin/` folder per version (for example
-`SpoutPlugin_1.0.1_UE5.7_Win64.zip`). `build.bat` is a one-line launcher for `build.ps1`.
+`SpoutPlugin_1.1.0_UE5.7_Win64.zip`). `build.bat` is a one-line launcher for `build.ps1`.
 
 `Intermediate/Build` is kept in the zips on purpose (since 0.0.9). `BuildPlugin` emits
 precompiled `UnrealGame` Development and Shipping objects, generated headers and `.precompiled`
