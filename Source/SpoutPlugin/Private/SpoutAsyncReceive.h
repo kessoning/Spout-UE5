@@ -151,10 +151,6 @@ struct FSpoutAsyncStats
 	int64 InFlightWaits = 0;
 	int64 InFlightWaitsDelivered = 0;
 	int64 InFlightWaitMicroseconds = 0;
-	/** Times the worker paused because nobody took its images, how long it stayed paused in all, and the images it dropped unread then. */
-	int64 Pauses = 0;
-	int64 PausedMicroseconds = 0;
-	int64 DiscardedUnread = 0;
 };
 
 class FSpoutAsyncStream final : public FRunnable
@@ -225,12 +221,6 @@ private:
 	void Fail(const TCHAR* Why, HRESULT Result);
 	/** Waits on the stop event for at most the poll interval. */
 	void WaitForNextPoll();
-	/**
-	 * Worker. When nobody took an image for UnconsumedPauseSeconds (and r.Spout.Dev.PauseUnconsumedReceive is on): drops
-	 * the unread image, then waits without polling or copying until a reader, the stop or PausedWaitMs comes. Returns
-	 * whether it waited.
-	 */
-	bool WaitWhileUnconsumed();
 	/** Render thread: waits at most BoundMicroseconds (no more than InFlightWaitBoundMicroseconds) for the worker to end its transfer. Returns the time waited, in microseconds. */
 	int64 WaitForCopyInFlight(int64 BoundMicroseconds);
 #if SPOUT_WITH_INSTRUMENT
@@ -258,13 +248,6 @@ private:
 	 */
 	static constexpr int32 InFlightWaitBoundMicroseconds = 1000;
 	static constexpr int32 MinInFlightWaitMicroseconds = 100;
-	/**
-	 * A worker whose images nobody took for this long stops copying until the receiver is read again: a receiver that is
-	 * open but not read (a hidden screen, say) then costs no copies and does not hold the sender's texture.
-	 */
-	static constexpr double UnconsumedPauseSeconds = 1.0;
-	/** A paused worker looks again at least this often, whatever wakes it. */
-	static constexpr uint32 PausedWaitMs = 1000;
 
 	const FName Name;
 	const int32 InstrumentStream;
@@ -304,12 +287,6 @@ private:
 	HANDLE TransferEndedEvent = nullptr;
 	/** The render thread's own high-resolution timer for that wait (absent: the wait rounds to the system timer). */
 	HANDLE ConsumeWaitTimer = nullptr;
-	/** Set by the render thread when it reads while the worker is paused; wakes the worker. */
-	HANDLE ConsumerEvent = nullptr;
-	/** When a reader last asked for an image (render thread), in FPlatformTime::Seconds. */
-	std::atomic<double> LastConsumeSeconds{0.0};
-	/** The worker is (about to be) paused. Set before it checks LastConsumeSeconds again, so a reader that comes in between is never missed. */
-	std::atomic<bool> bPaused{false};
 	std::atomic<bool> bStop{false};
 	std::atomic<bool> bFailed{false};
 	FString Failure;
@@ -317,15 +294,12 @@ private:
 	// Worker thread only.
 	uint64 WrittenValue = 0;
 	int32 ConsecutiveTimeouts = 0;
-	bool bInPause = false;
 
 	std::atomic<int64> Polls{0};
 	std::atomic<int64> NoSlotSkips{0};
 	std::atomic<int64> InFlightWaits{0};
 	std::atomic<int64> InFlightWaitsDelivered{0};
 	std::atomic<int64> InFlightWaitMicroseconds{0};
-	std::atomic<int64> Pauses{0};
-	std::atomic<int64> PausedMicroseconds{0};
 	/** What the worker thread cost, taken by the thread itself as it ends: CPU time in 100 ns units, and how long it ran. */
 	std::atomic<int64> WorkerCpu100ns{-1};
 	std::atomic<double> WorkerSeconds{0.0};

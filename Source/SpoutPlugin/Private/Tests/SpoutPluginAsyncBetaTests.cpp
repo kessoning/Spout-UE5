@@ -1062,53 +1062,6 @@ bool FSpoutAccessWaitOpenCheck::RunTest(const FString&)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaPausesUnread, "SpoutPlugin.AsyncBeta.AWorkerNobodyReadsPausesAndCopiesAgainWhenRead", SPOUT_ASYNC_BETA_FLAGS)
-bool FSpoutAsyncBetaPausesUnread::RunTest(const FString&)
-{
-	// A receiver that is open but not read: after a second its worker stops copying the sender's new frames, and it
-	// copies again as soon as the receiver is read, which then gets the newest frame.
-	namespace AB = SpoutAsyncBetaTests;
-	if (!AB::RequireSharedSlot(*this)) return false;
-	if (!SpoutLimits::DevPauseUnconsumedReceive())
-	{
-		AddInfo(TEXT("r.Spout.Dev.PauseUnconsumedReceive is 0: the worker does not pause."));
-		return true;
-	}
-	FSpoutAsyncDevice::Get().ReenableForTest();
-	const FName Name = AB::UniqueName(TEXT("Pause"));
-	AB::FConsumer C; C.Node = AB::FConsumer::ENode::Receiver; C.bAsync = true;
-	TStrongObjectPtr<UTextureRenderTarget2D> Source(AB::MakeSource(64, 32, PF_B8G8R8A8));
-	if (!AB::StartAsync(*this, Name, C, Source.Get())) { AB::CloseBoth(Name, C); return false; }
-
-	int32 Sequence = 2;
-	const auto SendFor = [&](double Seconds)
-	{
-		const double End = FPlatformTime::Seconds() + Seconds;
-		while (FPlatformTime::Seconds() < End)
-		{
-			AB::Upload(Source.Get(), Sequence++);
-			AB::Send(Name, Source.Get());
-			FlushRenderingCommands();
-			FPlatformProcess::Sleep(0.016f);
-		}
-	};
-	// The sender keeps sending; nobody reads.
-	SendFor(1.6);
-	const FSpoutAsyncStats Paused = AB::WorkerStats(Name);
-	TestTrue(*FString::Printf(TEXT("the worker paused while nobody read (%lld pauses)"), Paused.Pauses), Paused.Pauses >= 1);
-	SendFor(0.5);
-	const FSpoutAsyncStats StillPaused = AB::WorkerStats(Name);
-	TestEqual(TEXT("and copied nothing meanwhile"), StillPaused.Published, Paused.Published);
-
-	// Read again.
-	AB::Upload(Source.Get(), Sequence++);
-	AB::Send(Name, Source.Get());
-	TestTrue(TEXT("reading again brings the newest frame"), AB::ReceiveExact(Name, C, Source.Get()));
-	TestTrue(TEXT("the worker copies again"), AB::WorkerStats(Name).Published > StillPaused.Published);
-	AB::CloseBoth(Name, C);
-	return true;
-}
-
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncBetaReceiverBudget, "SpoutPlugin.AsyncBeta.AReceiverReservesOnlyWhatItsPathMakes", SPOUT_ASYNC_BETA_FLAGS)
 bool FSpoutAsyncBetaReceiverBudget::RunTest(const FString&)
 {

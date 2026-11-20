@@ -122,13 +122,6 @@ namespace SpoutLimits
 	bool DevCreateOn12Device();
 
 	/**
-	 * r.Spout.Dev.PauseUnconsumedReceive != 0 (default 1): an Async Receive worker whose images nobody took for a second
-	 * stops copying (and polling) until the receiver is read again. 0 keeps the worker copying every new frame. Read by
-	 * the worker as it runs.
-	 */
-	bool DevPauseUnconsumedReceive();
-
-	/**
 	 * r.Spout.Dev.ReserveReceiverOpenBudget != 0 (default 0): a receiver reserves four frames of retained-memory budget
 	 * whenever it opens a sender, as before, instead of reserving its CPU readback's memory only when it creates the
 	 * staging texture. For comparing the two; read when a receiver opens or resizes.

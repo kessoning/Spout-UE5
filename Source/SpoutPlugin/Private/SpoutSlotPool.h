@@ -93,7 +93,6 @@ namespace SpoutAsync
 		std::int64_t RefusedRetired = 0;        // writes asked of a retired pool
 		std::int64_t PublishedAfterRetire = 0;  // copies that completed after the pool was retired: never published
 		std::int64_t RuleViolations = 0;        // calls the owner must never make; always 0 in a correct owner
-		std::int64_t DiscardedUnread = 0;       // publications the owner dropped unread (DiscardReady)
 	};
 
 	/** What the reader took. */
@@ -243,22 +242,6 @@ namespace SpoutAsync
 			S.Tag = Tag;
 			++Counters.Published;
 			return S.Sequence;
-		}
-
-		/**
-		 * The publication waiting for the reader, if there is one, is dropped unread: its slot is free again. For an
-		 * owner whose reader stopped reading, so that what the reader finds when it comes back is never that old image.
-		 */
-		bool DiscardReady()
-		{
-			const int Slot = Find(ESlotState::Ready);
-			if (Slot < 0)
-			{
-				return false;
-			}
-			Slots[Slot].State = ESlotState::Free;
-			++Counters.DiscardedUnread;
-			return true;
 		}
 
 		// ---- the reader (the render thread) ----

@@ -55,10 +55,6 @@ namespace
 		TEXT("Development switch, not a supported setting. With r.Spout.Dev.AsyncSend 1: 0 (default) the worker copies a frame once its fill finished; ")
 		TEXT("1 also waits for the end of Unreal's frame on its GPU queue, at most 100 ms."),
 		ECVF_Default);
-	TAutoConsoleVariable<int32> GSpoutDevPauseUnconsumedReceive(TEXT("r.Spout.Dev.PauseUnconsumedReceive"), 1,
-		TEXT("Development switch, not a supported setting. 1 (default): an Async Receive worker whose images nobody took for a second stops copying ")
-		TEXT("until the receiver is read again. 0: it keeps copying every new frame of the sender. Read by the worker as it runs."),
-		ECVF_Default);
 	TAutoConsoleVariable<int32> GSpoutDevReserveReceiverOpenBudget(TEXT("r.Spout.Dev.ReserveReceiverOpenBudget"), 0,
 		TEXT("Development switch, not a supported setting. 0 (default): a receiver reserves retained-memory budget for its CPU readback (staging, upload, overlap) ")
 		TEXT("only when it creates its staging texture. 1: it reserves four frames whenever it opens a sender, as before, whatever path it uses. Read when a receiver opens or resizes."),
@@ -107,7 +103,6 @@ bool SpoutLimits::SharedSlotInteropRequested() { return GSpoutSharedSlotInterop.
 bool SpoutLimits::DevAsyncSend() { return GSpoutDevAsyncSend.GetValueOnAnyThread() != 0; }
 int32 SpoutLimits::DevAsyncSendDrainAfter() { return GSpoutDevAsyncSendDrainAfter.GetValueOnAnyThread() != 0 ? 1 : 0; }
 bool SpoutLimits::DevCreateOn12Device() { return GSpoutDevCreateOn12Device.GetValueOnAnyThread() != 0; }
-bool SpoutLimits::DevPauseUnconsumedReceive() { return GSpoutDevPauseUnconsumedReceive.GetValueOnAnyThread() != 0; }
 bool SpoutLimits::DevReserveReceiverOpenBudget() { return GSpoutDevReserveReceiverOpenBudget.GetValueOnAnyThread() != 0; }
 bool SpoutLimits::DevResolveSendsTogether() { return GSpoutDevResolveSendsTogether.GetValueOnAnyThread() != 0; }
 bool SpoutLimits::DevReleaseViewportTextures() { return GSpoutDevReleaseViewportTextures.GetValueOnAnyThread() != 0; }
@@ -115,7 +110,6 @@ bool SpoutLimits::DevReleaseViewportTextures() { return GSpoutDevReleaseViewport
 bool SpoutLimits::DevAsyncSend() { return true; }
 int32 SpoutLimits::DevAsyncSendDrainAfter() { return 0; }
 bool SpoutLimits::DevCreateOn12Device() { return false; }
-bool SpoutLimits::DevPauseUnconsumedReceive() { return true; }
 bool SpoutLimits::DevReserveReceiverOpenBudget() { return false; }
 bool SpoutLimits::DevResolveSendsTogether() { return true; }
 bool SpoutLimits::DevReleaseViewportTextures() { return true; }

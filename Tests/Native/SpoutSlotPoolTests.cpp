@@ -94,23 +94,6 @@ static void PoolReplacedUnread()
 	Equal(P.BeginWrite(0), 0, "replaced: the slot that was never read is written again without waiting for any read");
 }
 
-static void PoolDiscardReady()
-{
-	// The owner drops the image nobody read (its reader stopped reading): the reader then finds nothing, not that image.
-	FSlotPool P;
-	FConsumed C;
-	Check(!P.DiscardReady(), "discard: nothing to drop at the start");
-	P.Publish(P.BeginWrite(0), 1, 1, 10);
-	Check(P.DiscardReady(), "discard: the unread image is dropped");
-	Check(StateOf(P, 0) == ESlotState::Free && !P.HasReady(), "discard: its slot is free and nothing is ready");
-	Equal(P.GetCounters().DiscardedUnread, 1, "discard: counted once");
-	Check(P.Consume(1, 1, C) == EConsume::Nothing, "discard: the reader finds nothing");
-	Equal(P.Publish(P.BeginWrite(0), 1, 2, 20), 2, "discard: the next copy is published");
-	Check(P.Consume(1, 1, C) == EConsume::Consumed && C.Tag == 20, "discard: and the reader takes that one");
-	Equal(P.GetCounters().Consumed, 1, "discard: one delivery");
-	Check(!P.DiscardReady(), "discard: an image being read is not dropped");
-}
-
 static void PoolNoFreeSlot()
 {
 	// The reader's queue is behind: two reads are queued and not completed, and a third image is ready.
@@ -420,7 +403,6 @@ int main()
 {
 	PoolBasics();
 	PoolReplacedUnread();
-	PoolDiscardReady();
 	PoolNoFreeSlot();
 	PoolRefusedAccessAndTimeout();
 	PoolBrokenRules();
