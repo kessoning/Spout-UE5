@@ -26,6 +26,7 @@
 #include "SpoutAsyncReceive.h"
 #include "SpoutBPFunctionLibrary.h"
 #include "SpoutD3DContext.h"
+#include "SpoutLimits.h"
 #include "SpoutSenderRegistry.h"
 #include "SpoutSharedSlot.h"
 #include "SpoutSlotRules.h"
@@ -275,6 +276,26 @@ bool FSpoutSlotLatch::RunTest(const FString&)
 	Setting->Set(Previous, ECVF_SetByCode);
 	Setting->ClearFlags(ECVF_SetByMask);
 	Setting->SetFlags(PreviousPriority);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutSlotNoOn12Device, "SpoutPlugin.SharedSlot.NoD3D11On12DeviceOnThisPath", SPOUT_SLOT_FLAGS)
+bool FSpoutSlotNoOn12Device::RunTest(const FString&)
+{
+	// The shared-slot path works on its own native device. The D3D11-on-12 device only the wrap path uses is not created
+	// (unless r.Spout.Dev.CreateOn12Device asks for it), and Spout is available without it. Every other test of this
+	// path then sends and receives without it.
+	if (!SpoutSharedSlotTests::RequireSharedSlot(*this)) return false;
+	FSpoutD3DContext& Context = FSpoutD3DContext::Get();
+	Context.InitializeIfNeeded();
+	TestTrue(TEXT("Spout is available"), Context.IsSpoutAvailable());
+	ID3D11Device* Native = FSpoutAsyncDevice::Get().GetDevice();
+	TestTrue(TEXT("the interop device is the native device"), Native != nullptr && Context.GetInteropDevice() == Native);
+	if (!SpoutLimits::DevCreateOn12Device())
+	{
+		TestTrue(TEXT("no D3D11-on-12 device"), Context.GetD3D11On12Device() == nullptr && Context.GetD3D11Device() == nullptr);
+		TestTrue(TEXT("no D3D11-on-12 device context"), Context.GetImmediateContext() == nullptr);
+	}
 	return true;
 }
 

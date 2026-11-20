@@ -55,6 +55,26 @@ namespace
 		TEXT("Development switch, not a supported setting. With r.Spout.Dev.AsyncSend 1: 0 (default) the worker copies a frame once its fill finished; ")
 		TEXT("1 also waits for the end of Unreal's frame on its GPU queue, at most 100 ms."),
 		ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutDevPauseUnconsumedReceive(TEXT("r.Spout.Dev.PauseUnconsumedReceive"), 1,
+		TEXT("Development switch, not a supported setting. 1 (default): an Async Receive worker whose images nobody took for a second stops copying ")
+		TEXT("until the receiver is read again. 0: it keeps copying every new frame of the sender. Read by the worker as it runs."),
+		ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutDevReserveReceiverOpenBudget(TEXT("r.Spout.Dev.ReserveReceiverOpenBudget"), 0,
+		TEXT("Development switch, not a supported setting. 0 (default): a receiver reserves retained-memory budget for its CPU readback (staging, upload, overlap) ")
+		TEXT("only when it creates its staging texture. 1: it reserves four frames whenever it opens a sender, as before, whatever path it uses. Read when a receiver opens or resizes."),
+		ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutDevResolveSendsTogether(TEXT("r.Spout.Dev.ResolveSendsTogether"), 1,
+		TEXT("Development switch, not a supported setting. 1 (default): at the end of a render-command flush, every asynchronous sender's owed frames get their ")
+		TEXT("attempt at once and the flush waits for all of them together, woken as each resolves. 0: one sender after another, checking every millisecond, as before. Read per flush."),
+		ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutDevReleaseViewportTextures(TEXT("r.Spout.Dev.ReleaseViewportTextures"), 1,
+		TEXT("Development switch, not a supported setting. 1 (default): when the last sender of a viewport source (the whole window, or the viewport only) ")
+		TEXT("closes, that source's own GPU textures are released; the next sender makes them again. 0: they are kept until Close All Streams, as before. Read when a sender closes."),
+		ECVF_Default);
+	TAutoConsoleVariable<int32> GSpoutDevCreateOn12Device(TEXT("r.Spout.Dev.CreateOn12Device"), 0,
+		TEXT("Development switch, not a supported setting. 0 (default): the D3D11-on-12 device is created only when the wrap path is in use ")
+		TEXT("(r.Spout.SharedSlotInterop 0, or no native device). 1: it is also created on the shared-slot path, which does not use it. Read once, at the first Spout initialization."),
+		ECVF_Default);
 #endif
 	FCriticalSection GSpoutLimitBudgetMutex;
 	int64 GSpoutLimitReserved = 0, GSpoutLimitPeak = 0, GSpoutLimitRejected = 0;
@@ -86,9 +106,19 @@ bool SpoutLimits::SharedSlotInteropRequested() { return GSpoutSharedSlotInterop.
 #if SPOUT_WITH_DEV_SETTINGS
 bool SpoutLimits::DevAsyncSend() { return GSpoutDevAsyncSend.GetValueOnAnyThread() != 0; }
 int32 SpoutLimits::DevAsyncSendDrainAfter() { return GSpoutDevAsyncSendDrainAfter.GetValueOnAnyThread() != 0 ? 1 : 0; }
+bool SpoutLimits::DevCreateOn12Device() { return GSpoutDevCreateOn12Device.GetValueOnAnyThread() != 0; }
+bool SpoutLimits::DevPauseUnconsumedReceive() { return GSpoutDevPauseUnconsumedReceive.GetValueOnAnyThread() != 0; }
+bool SpoutLimits::DevReserveReceiverOpenBudget() { return GSpoutDevReserveReceiverOpenBudget.GetValueOnAnyThread() != 0; }
+bool SpoutLimits::DevResolveSendsTogether() { return GSpoutDevResolveSendsTogether.GetValueOnAnyThread() != 0; }
+bool SpoutLimits::DevReleaseViewportTextures() { return GSpoutDevReleaseViewportTextures.GetValueOnAnyThread() != 0; }
 #else
 bool SpoutLimits::DevAsyncSend() { return true; }
 int32 SpoutLimits::DevAsyncSendDrainAfter() { return 0; }
+bool SpoutLimits::DevCreateOn12Device() { return false; }
+bool SpoutLimits::DevPauseUnconsumedReceive() { return true; }
+bool SpoutLimits::DevReserveReceiverOpenBudget() { return false; }
+bool SpoutLimits::DevResolveSendsTogether() { return true; }
+bool SpoutLimits::DevReleaseViewportTextures() { return true; }
 #endif
 int64 SpoutLimits::RetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitReserved; }
 int64 SpoutLimits::PeakRetainedBytes() { FScopeLock Lock(&GSpoutLimitBudgetMutex); return GSpoutLimitPeak; }

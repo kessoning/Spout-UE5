@@ -449,6 +449,9 @@ bool FSpoutAsyncStream::Initialize(EPixelFormat PixelFormat, FString& OutWhy)
 	StopEvent = ::CreateEventW(nullptr, true, false, nullptr);
 	FenceEvent = ::CreateEventW(nullptr, false, false, nullptr);
 	TransferEndedEvent = ::CreateEventW(nullptr, true, false, nullptr);
+	// Absent: the worker never pauses (WaitWhileUnconsumed).
+	ConsumerEvent = ::CreateEventW(nullptr, false, false, nullptr);
+	LastConsumeSeconds = FPlatformTime::Seconds();
 	if (!StopEvent || !FenceEvent || !TransferEndedEvent)
 	{
 		OutWhy = TEXT("an event could not be created");
@@ -498,10 +501,12 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 		const FSpoutAsyncStats Stats = GetStats();
 		UE_LOG(LogSpoutPlugin, Log, TEXT("Spout receiver '%s': asynchronous receive ended (stream object %llu, %.1f s): %lld polls, %lld images published, %lld consumed, ")
 			TEXT("%lld replaced unread, %lld transfers skipped for no free slot, %lld accesses refused, %lld copies failed, %lld copies finished late (discarded), %lld rule violations; ")
-			TEXT("%lld render-thread waits for a copy in progress (%lld then delivered an image; %.1f ms in all); worker thread CPU time %.1f ms."),
+			TEXT("%lld render-thread waits for a copy in progress (%lld then delivered an image; %.1f ms in all); paused %lld times while nobody read (%.1f s in all, %lld images dropped unread); ")
+			TEXT("worker thread CPU time %.1f ms."),
 			*Name.ToString(), Generation, WorkerSeconds.load(), Stats.Polls, Stats.Published, Stats.Consumed, Stats.ReplacedUnread, Stats.NoFreeSlot, Stats.AccessRefused,
 			Stats.CopyFailed, Stats.CompletionTimeouts, Stats.RuleViolations, Stats.InFlightWaits, Stats.InFlightWaitsDelivered,
-			double(Stats.InFlightWaitMicroseconds) / 1000.0, double(WorkerCpu100ns.load()) / 10000.0);
+			double(Stats.InFlightWaitMicroseconds) / 1000.0, Stats.Pauses, double(Stats.PausedMicroseconds) / 1000000.0, Stats.DiscardedUnread,
+			double(WorkerCpu100ns.load()) / 10000.0);
 	}
 	// The objects go to the retirement list with the fence values that prove their work finished: the worker's copies
 	// (written fence, or the event query after a failed signal) and the copies Unreal queued out of the slots (read
@@ -542,6 +547,7 @@ FSpoutAsyncStream::~FSpoutAsyncStream()
 	Proof.Reset();
 	if (PollTimer) ::CloseHandle(PollTimer);
 	if (ConsumeWaitTimer) ::CloseHandle(ConsumeWaitTimer);
+	if (ConsumerEvent) ::CloseHandle(ConsumerEvent);
 	if (TransferEndedEvent) ::CloseHandle(TransferEndedEvent);
 	if (StopEvent) ::CloseHandle(StopEvent);
 	// With the debug layer on: what the worker's device had to say about this stream's resources.
@@ -584,6 +590,40 @@ void FSpoutAsyncStream::WaitForNextPoll()
 	::WaitForSingleObject(StopEvent, 1);
 }
 
+bool FSpoutAsyncStream::WaitWhileUnconsumed()
+{
+	const auto Unconsumed = [this] { return FPlatformTime::Seconds() - LastConsumeSeconds.load() >= UnconsumedPauseSeconds; };
+	if (!ConsumerEvent || !SpoutLimits::DevPauseUnconsumedReceive() || !Unconsumed())
+	{
+		bInPause = false;
+		return false;
+	}
+	bPaused = true;
+	// Looked at again once the flag is set: a reader that came in between either saw the flag and set the event, or
+	// is seen here.
+	if (!Unconsumed())
+	{
+		bPaused = false;
+		bInPause = false;
+		return false;
+	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncPausedUnconsumed);
+	if (!bInPause)
+	{
+		bInPause = true;
+		++Pauses;
+		// The image nobody took would be old when the reader comes back: it finds the next copy instead.
+		FScopeLock Lock(&StateMutex);
+		Pool.DiscardReady();
+	}
+	const uint64 Start = FPlatformTime::Cycles64();
+	const HANDLE Handles[2] = { StopEvent, ConsumerEvent };
+	::WaitForMultipleObjects(2, Handles, false, PausedWaitMs);
+	PausedMicroseconds += static_cast<int64>(FPlatformTime::ToMilliseconds64(FPlatformTime::Cycles64() - Start) * 1000.0);
+	bPaused = false;
+	return true;
+}
+
 int64 FSpoutAsyncStream::WaitForCopyInFlight(int64 BoundMicroseconds)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncWaitForCopyInFlight);
@@ -614,6 +654,10 @@ uint32 FSpoutAsyncStream::Run()
 	const double Started = FPlatformTime::Seconds();
 	while (!bStop.load() && !bFailed.load())
 	{
+		if (WaitWhileUnconsumed())
+		{
+			continue;
+		}
 		// The poll: the SDK's public notification read, and nothing else of the frame sync's state.
 		bool bCountUsable = false;
 		const bool bNew = FrameSync.PollNotification(bCountUsable);
@@ -889,6 +933,12 @@ bool FSpoutAsyncStream::TransferOnce()
 bool FSpoutAsyncStream::ConsumeOnRenderThread(FRHICommandListImmediate& RHICmdList, FRHITexture* Destination, uint64 ReceivedBefore)
 {
 	check(IsInRenderingThread());
+	// A reader: a paused worker copies again (WaitWhileUnconsumed). Stored before the flag is read.
+	LastConsumeSeconds = FPlatformTime::Seconds();
+	if (bPaused.load() && ConsumerEvent)
+	{
+		::SetEvent(ConsumerEvent);
+	}
 	if (!Destination || bFailed.load())
 	{
 		return false;
@@ -1027,12 +1077,15 @@ FSpoutAsyncStats FSpoutAsyncStream::GetStats() const
 		Out.CompletionTimeouts = N.Abandoned[static_cast<int32>(SpoutAsync::EAbandon::CompletionTimeout)];
 		Out.PublishedAfterReuse = N.PublishedAfterReuse;
 		Out.RuleViolations = N.RuleViolations;
+		Out.DiscardedUnread = N.DiscardedUnread;
 	}
 	Out.NoFreeSlot = NoSlotSkips.load();
 	Out.InFlightWaits = InFlightWaits.load();
 	Out.InFlightWaitsDelivered = InFlightWaitsDelivered.load();
 	Out.InFlightWaitMicroseconds = InFlightWaitMicroseconds.load();
 	Out.Polls = Polls.load();
+	Out.Pauses = Pauses.load();
+	Out.PausedMicroseconds = PausedMicroseconds.load();
 	return Out;
 }
 

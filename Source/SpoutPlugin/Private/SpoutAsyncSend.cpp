@@ -470,6 +470,10 @@ bool FSpoutAsyncSendStream::ResolveLocked(uint64 Id, EOutcome Outcome)
 	{
 		return false;
 	}
+	if (ResolvedEvent)
+	{
+		ResolvedEvent->Trigger(); // a flush may be waiting for this frame (WaitResolved)
+	}
 	const uint64 ResolvedQpc = FPlatformTime::Cycles64();
 	const int32 Index = Traces.IndexOfByPredicate([Id](const FFrameTrace& T) { return T.Id == Id; });
 	if (Index != INDEX_NONE)
@@ -545,6 +549,7 @@ bool FSpoutAsyncSendStream::Initialize(FString& OutWhy)
 	}
 	FrameEndFence = GFrameEndFence;
 	WorkEvent = FPlatformProcess::GetSynchEventFromPool(false);
+	ResolvedEvent = FPlatformProcess::GetSynchEventFromPool(false);
 	Thread = FRunnableThread::Create(this, *FString::Printf(TEXT("SpoutAsyncSend %s"), *Entry.Name.ToString()), 0, TPri_Normal);
 	if (!Thread)
 	{
@@ -562,6 +567,11 @@ FSpoutAsyncSendStream::~FSpoutAsyncSendStream()
 	{
 		FPlatformProcess::ReturnSynchEventToPool(WorkEvent);
 		WorkEvent = nullptr;
+	}
+	if (ResolvedEvent)
+	{
+		FPlatformProcess::ReturnSynchEventToPool(ResolvedEvent);
+		ResolvedEvent = nullptr;
 	}
 	GLiveSendStreams.fetch_sub(1);
 }
@@ -1264,6 +1274,38 @@ void FSpoutAsyncSendStream::RetireSets(TArray<TSharedPtr<FSet, ESPMode::ThreadSa
 // Flush, stop and counters
 // ---------------------------------------------------------------------------------------------
 
+bool FSpoutAsyncSendStream::BeginResolveOwed(uint64& OutUpTo)
+{
+	{
+		// A stream with frames owed has a running worker: it exits only once nothing is owed after a stop.
+		FScopeLock Lock(&StateMutex);
+		if (Ring.IsEmpty())
+		{
+			return false;
+		}
+		OutUpTo = Ring.LimitToOneAttempt();
+	}
+	WorkEvent->Trigger();
+	return true;
+}
+
+void FSpoutAsyncSendStream::WaitResolved(uint64 UpTo)
+{
+	// Bounded by the classes the worker waits for (the fill, one access attempt, the drain's proof): the drain's proof
+	// is the only unbounded one, as on the synchronous send. The event wakes this at once; the 1 ms is a backstop.
+	for (;;)
+	{
+		{
+			FScopeLock Lock(&StateMutex);
+			if (Ring.ResolvedUpTo(UpTo))
+			{
+				return;
+			}
+		}
+		ResolvedEvent->Wait(1);
+	}
+}
+
 void FSpoutAsyncSendStream::ResolveOwed()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncSendResolveOwed);
@@ -1434,9 +1476,34 @@ void FSpoutAsyncSendStream::ResolveAllOwed()
 			}
 		}
 	}
+	if (!SpoutLimits::DevResolveSendsTogether())
+	{
+		// As before: one sender after another.
+		for (const TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe>& S : Live)
+		{
+			S->ResolveOwed();
+		}
+		return;
+	}
+	// Every sender's owed frames get their attempt first, so all workers run at once; the flush then waits about as long
+	// as the slowest sender, not the sum of them.
+	TArray<TPair<FSpoutAsyncSendStream*, uint64>, TInlineAllocator<8>> Owed;
 	for (const TSharedPtr<FSpoutAsyncSendStream, ESPMode::ThreadSafe>& S : Live)
 	{
-		S->ResolveOwed();
+		uint64 UpTo = 0;
+		if (S->BeginResolveOwed(UpTo))
+		{
+			Owed.Emplace(S.Get(), UpTo);
+		}
+	}
+	if (Owed.Num() == 0)
+	{
+		return;
+	}
+	TRACE_CPUPROFILER_EVENT_SCOPE(Spout_AsyncSendResolveOwed);
+	for (const TPair<FSpoutAsyncSendStream*, uint64>& O : Owed)
+	{
+		O.Key->WaitResolved(O.Value);
 	}
 }
 

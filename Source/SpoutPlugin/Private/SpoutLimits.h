@@ -114,6 +114,40 @@ namespace SpoutLimits
 	 * fence signalled behind the frame's own work, or 100 ms after the fill. Read per send.
 	 */
 	int32 DevAsyncSendDrainAfter();
+
+	/**
+	 * r.Spout.Dev.CreateOn12Device != 0 (default 0): the D3D11-on-12 device is created at the first Spout initialization
+	 * even on the shared-slot path, which never uses it (it costs a hitch at first use). For comparing the two; read once.
+	 */
+	bool DevCreateOn12Device();
+
+	/**
+	 * r.Spout.Dev.PauseUnconsumedReceive != 0 (default 1): an Async Receive worker whose images nobody took for a second
+	 * stops copying (and polling) until the receiver is read again. 0 keeps the worker copying every new frame. Read by
+	 * the worker as it runs.
+	 */
+	bool DevPauseUnconsumedReceive();
+
+	/**
+	 * r.Spout.Dev.ReserveReceiverOpenBudget != 0 (default 0): a receiver reserves four frames of retained-memory budget
+	 * whenever it opens a sender, as before, instead of reserving its CPU readback's memory only when it creates the
+	 * staging texture. For comparing the two; read when a receiver opens or resizes.
+	 */
+	bool DevReserveReceiverOpenBudget();
+
+	/**
+	 * r.Spout.Dev.ResolveSendsTogether != 0 (default 1): the flush hook gives every asynchronous sender's owed frames
+	 * their attempt at once and waits for all of them together, woken as each resolves. 0: one sender after another,
+	 * checking every millisecond, as before. Read per flush.
+	 */
+	bool DevResolveSendsTogether();
+
+	/**
+	 * r.Spout.Dev.ReleaseViewportTextures != 0 (default 1): when the last sender of a viewport source closes, that
+	 * source's own GPU textures (its shared slot, Game Viewport Only's copy texture, back-buffer wraps) are released; the
+	 * next sender makes them again. 0 keeps them until Close All Streams, as before. Read when a sender closes.
+	 */
+	bool DevReleaseViewportTextures();
 }
 
 // Lifetime follows the actual retained texture/entry, including old outputs held by callers.

@@ -1769,4 +1769,47 @@ bool FSpoutAsyncSendBetaLateCopy::RunTest(const FString&)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSpoutAsyncSendFlushTogether, "SpoutPlugin.AsyncSend.AFlushResolvesEverySendersFramesTogether", SPOUT_ASYNC_SEND_FLAGS)
+bool FSpoutAsyncSendFlushTogether::RunTest(const FString&)
+{
+	// Three senders, each with a frame owed, the first held in its drain: one flush resolves them all, and each frame is
+	// published. With r.Spout.Dev.ResolveSendsTogether 1 the flush starts every sender's attempt before it waits.
+	namespace AS = SpoutAsyncSendTests;
+	if (!AS::RequireSharedSlot(*this)) return false;
+	AS::FScopedVariable Switch(TEXT("r.Spout.Dev.AsyncSend"), TEXT("1"));
+	AS::FHooksReset Reset;
+	constexpr int32 Count = 3;
+	FName Names[Count];
+	TStrongObjectPtr<UTextureRenderTarget2D> Sources[Count];
+	for (int32 I = 0; I < Count; ++I)
+	{
+		Names[I] = AS::UniqueName(*FString::Printf(TEXT("Together%d"), I));
+		Sources[I].Reset(AS::MakeSource(64, 32));
+		AS::Upload(Sources[I].Get(), 1);
+		TestTrue(TEXT("the first send is accepted"), AS::Send(Names[I], Sources[I].Get()));
+	}
+	// Upload flushes, so every source is updated first; the three sends then queue their frames without a flush.
+	for (int32 I = 0; I < Count; ++I)
+	{
+		AS::Upload(Sources[I].Get(), 2);
+	}
+	SpoutAsyncSendTestHooks::DelayDrainMs = 200;
+	for (int32 I = 0; I < Count; ++I)
+	{
+		AS::SendNoFlush(Names[I], Sources[I].Get());
+	}
+	FlushRenderingCommands();
+	for (int32 I = 0; I < Count; ++I)
+	{
+		const FSpoutAsyncSendStats S = AS::Stats(Names[I]);
+		TestEqual(*FString::Printf(TEXT("sender %d: nothing owed after one flush"), I), S.InFlight, int64(0));
+		TestEqual(*FString::Printf(TEXT("sender %d: both frames published"), I), S.Published(), int64(2));
+	}
+	for (int32 I = 0; I < Count; ++I)
+	{
+		AS::CloseSender(Names[I]);
+	}
+	return true;
+}
+
 #endif // SPOUT_WITH_TESTS && PLATFORM_WINDOWS

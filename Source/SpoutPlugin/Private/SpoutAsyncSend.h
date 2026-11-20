@@ -197,6 +197,13 @@ public:
 
 	/** Game thread, at the end of a flush: frames accepted so far get one access attempt; returns once they are resolved. */
 	void ResolveOwed();
+	/**
+	 * Game thread: the first half of ResolveOwed. Frames accepted so far get one access attempt and the worker is woken.
+	 * False when nothing is owed; otherwise OutUpTo is what WaitResolved then waits for.
+	 */
+	bool BeginResolveOwed(uint64& OutUpTo);
+	/** Game thread: returns once every frame up to UpTo is resolved, woken by the worker as it resolves frames. */
+	void WaitResolved(uint64 UpTo);
 
 	FSpoutAsyncSendStats GetStats() const;
 	bool HasFailed() const { return bFailed.load(); }
@@ -307,6 +314,8 @@ private:
 	std::atomic<bool> bStopped{false};
 
 	FEvent* WorkEvent = nullptr;
+	/** Triggered by the worker each time it resolves a frame; waited on by WaitResolved. */
+	FEvent* ResolvedEvent = nullptr;
 	FRunnableThread* Thread = nullptr;
 	double CreatedAt = 0.0;
 };

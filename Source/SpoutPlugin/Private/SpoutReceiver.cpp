@@ -196,9 +196,15 @@ namespace
 
 		int64 FrameBytes = 0;
 		if (!SpoutLimits::FrameBytes(Width, Height, SpoutFormatPolicy::ResolveReceiverFormat(Format).PixelFormat, FrameBytes)) return false;
-		// Shared source, staging/readback upload and completed-image overlap.
-		const auto Reservation = FSpoutResourceReservation::TryReserve(FrameBytes * 4);
-		if (!Reservation) return false;
+		// Nothing of the receiver's own is allocated here: the shared texture is the sender's. The CPU readback path's
+		// memory is reserved where its staging texture is made (GetSharedAndStaging); the GPU paths reserve what they
+		// make themselves. r.Spout.Dev.ReserveReceiverOpenBudget 1 reserves four frames here, as before.
+		TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> Reservation;
+		if (SpoutLimits::DevReserveReceiverOpenBudget())
+		{
+			Reservation = FSpoutResourceReservation::TryReserve(FrameBytes * 4);
+			if (!Reservation) return false;
+		}
 
 		// Open the shared DX11 texture from the external sender's handle. OpenSharedResource is a
 		// device-level (free-threaded) call; holding ResourceMutex across it is acceptable because
@@ -256,6 +262,7 @@ namespace
 		Receiver.SharedTexture = MoveTemp(NewSharedTexture);
 		// Invalidate caches tied to previous geometry/handle.
 		Receiver.StagingTexture.Reset();
+		Receiver.StagingReservation.Reset();
 		Receiver.CachedWrappedResource.Reset();
 		Receiver.CachedNativeResource = nullptr;
 		Receiver.CachedRTWrappedResource.Reset();
@@ -323,6 +330,24 @@ namespace
 			Desc.SampleDesc.Count = 1;
 			Desc.SampleDesc.Quality = 0;
 
+			// The CPU readback's own memory: the staging texture, the upload into Unreal's texture, and their overlap.
+			TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> Reservation;
+			if (!SpoutLimits::DevReserveReceiverOpenBudget())
+			{
+				int64 FrameBytes = 0;
+				if (!SpoutLimits::FrameBytes(Desc.Width, Desc.Height, SpoutFormatPolicy::ResolveReceiverFormat(Desc.Format).PixelFormat, FrameBytes)) return false;
+				Receiver.StagingTexture.Reset();
+				Receiver.StagingReservation.Reset();
+				Reservation = FSpoutResourceReservation::TryReserve(FrameBytes * 3);
+				if (!Reservation)
+				{
+					if (Receiver.OpenLogThrottle.ShouldLog()) UE_LOG(LogSpoutPlugin, Warning,
+						TEXT("Spout receiver '%s': the retained-memory budget has no room for the CPU readback of the %ux%u frame; nothing is received until it has."),
+						*Receiver.Name.ToString(), Desc.Width, Desc.Height);
+					return false;
+				}
+			}
+
 			// Staging texture is owned by the receiver and recreated on size changes.
 			ComPtr<ID3D11Texture2D> NewStaging;
 			ID3D11Device* Device = ReceiverDevice(Context);
@@ -336,6 +361,7 @@ namespace
 			}
 
 			Receiver.StagingTexture = MoveTemp(NewStaging);
+			Receiver.StagingReservation = MoveTemp(Reservation);
 		}
 
 		OutStaging = Receiver.StagingTexture;
@@ -1288,7 +1314,7 @@ bool FSpoutReceiver::Receive(const FName SpoutName, UMaterialInterface* InputMat
 	if (!FSpoutSession::Get().IsRunning()) return Refuse(ESpoutReceiveResult::Unavailable);
 	Context.InitializeIfNeeded();
 
-	if (!Context.GetSenderNames() || !Context.GetD3D11Device())
+	if (!Context.GetSenderNames() || !Context.GetInteropDevice())
 	{
 		return Refuse(ESpoutReceiveResult::Unavailable);
 	}

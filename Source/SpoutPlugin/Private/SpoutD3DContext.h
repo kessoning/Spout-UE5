@@ -3,8 +3,9 @@
 // Spout plugin for Unreal Engine 5 - https://github.com/kessoning/Spout-UE5
 
 /**
- * Declares the singleton D3D11-on-D3D12 context used for Spout interop, exposing devices,
- * Spout helper objects, and shared mutexes for sender/receiver code.
+ * Declares the singleton context used for Spout interop: the Spout helper objects, the interop path's device, and
+ * shared mutexes for sender/receiver code. The D3D11-on-12 device exists only for the wrap path
+ * (r.Spout.SharedSlotInterop 0, or no native device); the shared-slot path (the default) never creates it.
  */
 #pragma once
 
@@ -38,13 +39,20 @@ public:
 	// Singleton lifetime is process-wide; created on first access and never destroyed explicitly.
 	static FSpoutD3DContext& Get();
 
-	// Lazily initializes a D3D11-on-D3D12 device for Spout interop.
+	// Lazily creates the Spout helpers, latches the interop path and, for the wrap path only, the D3D11-on-12 device.
 	void InitializeIfNeeded();
 	void Shutdown();
 
 	bool IsInitialized() const;
 	bool IsSpoutAvailable() const;
 
+	/**
+	 * The D3D11 device the latched interop path opens and creates Spout's shared textures with, on Unreal's adapter:
+	 * the native device on the shared-slot path, the D3D11-on-12 device on the wrap path. Null before initialization.
+	 */
+	ID3D11Device* GetInteropDevice() const;
+
+	// The D3D11-on-12 device and its context: wrap path only (null on the shared-slot path).
 	ID3D11Device* GetD3D11Device() const;
 	ID3D11DeviceContext* GetImmediateContext() const;
 	ID3D11On12Device* GetD3D11On12Device() const;
@@ -62,8 +70,12 @@ public:
 
 private:
 	FSpoutD3DContext() = default;
-	// Creates D3D11-on-12 device and Spout helpers; only called under InitMutex.
+	// Creates the Spout helpers, latches the interop path and creates what that path needs; only called under InitMutex.
 	void Initialize();
+#if PLATFORM_WINDOWS
+	// Creates the D3D11-on-12 device over Unreal's D3D12 device and graphics queue; only called under InitMutex.
+	bool CreateD3D11On12Device(ID3D12Device* D3D12Device, ID3D12CommandQueue* D3D12Queue);
+#endif
 
 	// Serializes initialization/shutdown across threads.
 	// Mutable so const accessors (IsInitialized/IsSpoutAvailable) can lock during reads.
@@ -73,6 +85,10 @@ private:
 	// Protects Spout global registry access.
 	FCriticalSection SpoutMutex;
 	bool bUnsupportedRHI = false;
+	// Spout.dll did not load: no initialization is attempted again.
+	bool bSpoutDllMissing = false;
+	// The helpers exist, the interop path is latched, and that path's device exists.
+	bool bInitialized = false;
 	double NextInitializeAttempt = 0;
 	FSpoutLogThrottle InitializationLogThrottle;
 

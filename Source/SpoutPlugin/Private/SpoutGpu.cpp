@@ -109,7 +109,8 @@ namespace
 	SpoutGpu::FSenderGpu Probe(void* Handle)
 	{
 		SpoutGpu::FSenderGpu Result;
-		ID3D11Device* UnrealDevice = FSpoutD3DContext::Get().GetD3D11Device();
+		// On Unreal's adapter: the device the interop path opens senders' textures with.
+		ID3D11Device* UnrealDevice = FSpoutD3DContext::Get().GetInteropDevice();
 		LUID UnrealLuid = {};
 		FString UnrealName;
 		if (!UnrealDevice || !UnrealAdapter(UnrealLuid, UnrealName))

@@ -523,11 +523,6 @@ namespace
 			return;
 		}
 
-		if (!Context.GetImmediateContext() || !Context.GetD3D11On12Device())
-		{
-			return;
-		}
-
 		// UE D3D12 textures expose their native resource for interop.
 		ID3D12Resource* NativeRes = static_cast<ID3D12Resource*>(SourceRHI->GetNativeResource());
 		if (!NativeRes)
@@ -706,6 +701,12 @@ namespace
 		if (SpoutInterop::IsSharedSlot())
 		{
 			SendThroughSharedSlot(Destinations, SourceRHI, bIsViewport, RHICmdList, Bracket, Format, SourceSlot, SourceSlotRefusedFor);
+			return;
+		}
+
+		// The wrap path below needs the D3D11-on-12 device (created only for this path).
+		if (!Context.GetImmediateContext() || !Context.GetD3D11On12Device())
+		{
 			return;
 		}
 
@@ -1001,18 +1002,50 @@ namespace
 			}
 
 			PendingSenders.Add(Token);
+			OpenNames.Add(Token.Name);
 			return true;
 		}
 
 		/**
-		 * Drops one name from the pending set.
+		 * Close Sender, game thread: drops one name from the pending set and from the names this source sends. Returns
+		 * whether the name was pending.
 		 *
-		 * Without it an individually closed viewport sender would stay queued, and the next
-		 * present would publish a name the caller had already closed.
+		 * Without it an individually closed viewport sender would stay queued, and the next present would publish a name
+		 * the caller had already closed. When it was this source's last name, the source's own GPU textures are released
+		 * behind the commands already queued (ReleaseIdleResources), instead of being kept until Close All Streams.
 		 */
-		bool RemovePending(const FName& SpoutName)
+		bool ForgetSender(const FName& SpoutName)
 		{
-			return PendingSenders.Remove(SpoutName);
+			check(IsInGameThread());
+			const bool bWasPending = PendingSenders.Remove(SpoutName);
+			if (OpenNames.Remove(SpoutName) > 0 && OpenNames.Num() == 0 && SpoutLimits::DevReleaseViewportTextures())
+			{
+				// The producers are process-wide statics: the pointer outlives the command.
+				FSpoutViewportSender* Producer = this;
+				ENQUEUE_RENDER_COMMAND(SpoutReleaseViewportTextures)([Producer](FRHICommandListImmediate&)
+				{
+					Producer->ReleaseIdleResources();
+				});
+			}
+			return bWasPending;
+		}
+
+		/**
+		 * Render thread, once this source has no sender left: releases what ReleaseNativeResources releases (the shared
+		 * slot, Game Viewport Only's copy texture, the back-buffer wraps). The slot is retired with its outstanding GPU
+		 * work, never dropped. Behind every send already queued, and under the same locks as a send: the next send makes
+		 * them again.
+		 */
+		void ReleaseIdleResources()
+		{
+			check(IsInRenderingThread());
+			InvalidateBackBufferWraps();
+			FScopeLock SlotLock(&ViewportSlotMutex);
+			ViewportSlot.Reset();
+			ViewportSlotRefusedFor = FSpoutSlotSend::FIdentity();
+			CropTexture.SafeRelease();
+			CropLoggedSize = FIntPoint::ZeroValue;
+			CropPendingSize = FIntPoint::ZeroValue;
 		}
 
 		/**
@@ -1099,6 +1132,7 @@ namespace
 		void ClearPending()
 		{
 			PendingSenders.Reset();
+			OpenNames.Reset();
 
 			FScopeLock Lock(&WindowMutex);
 			TargetWindow = nullptr;
@@ -1519,6 +1553,9 @@ namespace
 		// Names queued for the next present, each with the token it was queued under. Individually
 		// removable, which is what lets CloseSender cancel a single viewport name.
 		FSpoutPendingSenders PendingSenders;
+		// Game thread: the names this source sent that are not closed yet. The last one to close releases the source's
+		// own GPU textures (ForgetSender).
+		TSet<FName> OpenNames;
 
 		FCriticalSection WindowMutex;
 		// Identity of the game viewport's window, resolved on the game thread. Compared against the
@@ -1905,7 +1942,7 @@ void FSpoutSender::Close(FName SpoutName)
 	// Drop the name from the viewport queue, so a closed viewport sender is not published again at
 	// the next present.
 	bool bWasPending = false;
-	FSpoutViewportSender::ForEach([&bWasPending, SpoutName](FSpoutViewportSender& Producer) { bWasPending |= Producer.RemovePending(SpoutName); });
+	FSpoutViewportSender::ForEach([&bWasPending, SpoutName](FSpoutViewportSender& Producer) { bWasPending |= Producer.ForgetSender(SpoutName); });
 
 	// Registry is keyed by (Name, Type); Close must scope to the Sender entry only,
 	// leaving any Receiver entry with the same FName untouched.

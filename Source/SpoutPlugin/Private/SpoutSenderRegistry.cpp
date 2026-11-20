@@ -136,6 +136,7 @@ void FSpoutSharedSender::ReleaseResources()
 	}
 	SharedTexture.Reset();
 	StagingTexture.Reset();
+	StagingReservation.Reset();
 	CpuCompletion.Reset();
 	CachedWrappedResource.Reset();
 	CachedRTWrappedResource.Reset();

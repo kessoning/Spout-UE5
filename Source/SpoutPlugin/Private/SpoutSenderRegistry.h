@@ -262,6 +262,9 @@ public:
 	// Protects SharedTexture/handle updates across game and render threads.
 	FCriticalSection ResourceMutex;
 	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> NativeReservation;
+	// Receiver role: the CPU readback path's staging texture, the upload into Unreal's texture, and their overlap; held
+	// while StagingTexture exists.
+	TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe> StagingReservation;
 	// Game-thread admission records; render delivery records are separately owned above.
 	TMap<TWeakObjectPtr<UObject>, TSharedPtr<FSpoutResourceReservation, ESPMode::ThreadSafe>> OutputReservations;
 	// Receiver role, game thread: who uses this session, for the placeable Spout Receiver actor's release rule.

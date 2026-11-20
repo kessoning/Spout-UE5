@@ -326,7 +326,7 @@ bool FSpoutP0Layouts::RunTest(const FString&)
 	Desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 	Desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; Desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
 	Microsoft::WRL::ComPtr<ID3D11Texture2D> Shared;
-	if (!TestTrue(TEXT("shared texture created"), SUCCEEDED(Context.GetD3D11Device()->CreateTexture2D(&Desc, nullptr, &Shared)))) return false;
+	if (!TestTrue(TEXT("shared texture created"), SUCCEEDED(Context.GetInteropDevice()->CreateTexture2D(&Desc, nullptr, &Shared)))) return false;
 	Microsoft::WRL::ComPtr<IDXGIResource> DXGI; Shared.As(&DXGI);
 	HANDLE Handle = nullptr; DXGI->GetSharedHandle(&Handle);
 	FSpoutSafeSenderNames Foreign;
